@@ -36,6 +36,7 @@ import open3d as o3d
 
 from scan_session import Session, Scan, PALETTE
 import plane_register as pr
+from view_cube import ViewCube, look_from, slerp_dir
 
 gui = o3d.visualization.gui
 rendering = o3d.visualization.rendering
@@ -173,6 +174,11 @@ class App:
         self.fly_pitch = 0.0
         self._fly_last = None
         self._look = None
+        # куб навигации
+        self.cube = ViewCube(FONT)
+        self._cube_key = None         # (ориентация, наведение, размер) последней отрисовки
+        self._cube_drag = None
+        self._cube_anim = None
         self._build()
         if self.s.scans:
             self.load_all()
@@ -219,6 +225,13 @@ class App:
         self.panel.add_child(self.status)
         self.panel.add_child(self.progress)
         w.add_child(self.sw)
+        # куб навигации: отдельный маленький 3D-вид поверх основного (только фон-картинка);
+        # добавлен после основного — получает мышь в своей области
+        self.cube_sw = gui.SceneWidget()
+        self.cube_sw.scene = rendering.Open3DScene(w.renderer)
+        self.cube_sw.scene.set_background([1, 1, 1, 1])
+        self.cube_sw.set_on_mouse(self._on_cube_mouse)
+        w.add_child(self.cube_sw)
         w.add_child(self.panel)
         w.set_on_layout(self._on_layout)
         w.set_on_key(self._on_key)
@@ -229,6 +242,11 @@ class App:
         pw = PANEL_W * self.em
         self.panel.frame = gui.Rect(r.x, r.y, pw, r.height)
         self.sw.frame = gui.Rect(r.x + pw, r.y, r.width - pw, r.height)
+        cs = int(9 * self.em)
+        f = self.sw.frame
+        self.cube_sw.frame = gui.Rect(f.x + f.width - cs - int(0.5 * self.em), f.y + int(0.5 * self.em),
+                                      cs, cs)
+        self._cube_key = None
 
     def _btn(self, text, cb):
         b = gui.Button(text)
@@ -792,6 +810,10 @@ class App:
         self.sw.force_redraw()
 
     def _on_tick(self):
+        redraw = self._cube_tick()
+        return self._fly_tick() or redraw
+
+    def _fly_tick(self):
         if not self.fly or not self.fly_keys:
             self._fly_last = None
             return False
@@ -811,6 +833,102 @@ class App:
         self.fly_pos = self.fly_pos + v * d
         self._apply_fly_camera()
         return True
+
+    # ── куб навигации ────────────────────────────────────────────────────
+    def _cam_basis(self):
+        return np.asarray(self.sw.scene.camera.get_model_matrix())[:3, :3]
+
+    def _update_cube(self, force=False):
+        f = self.cube_sw.frame
+        if f.width <= 0:
+            return
+        R = self._cam_basis()
+        key = (np.round(R, 4).tobytes(), self.cube.hover, f.width, f.height)
+        if not force and key == self._cube_key:
+            return
+        self._cube_key = key
+        img = np.ascontiguousarray(np.asarray(self.cube.render(R, f.width, f.height)))
+        self.cube_sw.scene.set_background([1, 1, 1, 1], o3d.geometry.Image(img))
+        self.cube_sw.force_redraw()
+
+    def _orbit_state(self):
+        """Центр вращения, расстояние до него и направление «от центра к глазу»."""
+        M = np.asarray(self.sw.scene.camera.get_model_matrix())
+        eye = M[:3, 3]
+        c = np.asarray(self.sw.center_of_rotation, float)
+        dist = float(np.linalg.norm(eye - c))
+        if dist < 1e-3:
+            c = eye - M[:3, 2] * 5.0
+            dist = 5.0
+        return c, dist, M[:3, 2].copy(), M[:3, 1].copy()
+
+    def _set_view_dir(self, e, up_hint):
+        """Камера смотрит на центр вращения с направления e (в полёте — меняется только взгляд)."""
+        R = look_from(e, up_hint)
+        if self.fly:
+            fwd = -R[:, 2]
+            self.fly_yaw = float(np.arctan2(fwd[1], fwd[0]))
+            self.fly_pitch = float(np.clip(np.arcsin(np.clip(fwd[2], -1, 1)), -1.5, 1.5))
+            self._apply_fly_camera()
+            return
+        c, dist, _, _ = self._orbit_state()
+        self.sw.look_at(c, c + R[:, 2] * dist, R[:, 1])
+        self.sw.force_redraw()
+
+    def snap_view(self, h):
+        """Плавно повернуть вид к грани/ребру/углу куба."""
+        _, _, e0, up0 = self._orbit_state()
+        e1 = ViewCube.snap_direction(h)
+        # для видов сверху/снизу сохранить направление «вперёд» на экране
+        up_hint = up0 if abs(e1[2]) > 0.99 else (0, 0, 1)
+        self._cube_anim = (e0, e1, time.time(), 0.32, up_hint)
+        self.set_status(ViewCube.describe(h))
+
+    def _cube_tick(self):
+        if self._cube_anim is not None:
+            e0, e1, t0, dur, up_hint = self._cube_anim
+            p = min(1.0, (time.time() - t0) / dur)
+            ease = 1 - (1 - p) ** 3
+            self._set_view_dir(slerp_dir(e0, e1, ease), up_hint)
+            if p >= 1.0:
+                self._cube_anim = None
+        self._update_cube()
+        return self._cube_anim is not None
+
+    def _on_cube_mouse(self, ev):
+        T = gui.MouseEvent.Type
+        f = self.cube_sw.frame
+        mx, my = ev.x - f.x, ev.y - f.y
+        R = self._cam_basis()
+        if ev.type == T.MOVE:
+            h = self.cube.hit(R, f.width, f.height, mx, my)
+            if h != self.cube.hover:
+                self.cube.hover = h
+                self._update_cube()
+        elif ev.type == T.BUTTON_DOWN:
+            self._cube_drag = {'x': ev.x, 'y': ev.y, 'dragged': False}
+        elif ev.type == T.DRAG and self._cube_drag is not None:
+            dx, dy = ev.x - self._cube_drag['x'], ev.y - self._cube_drag['y']
+            if not self._cube_drag['dragged'] and np.hypot(dx, dy) > 3:
+                self._cube_drag['dragged'] = True
+            if self._cube_drag['dragged']:
+                # перетаскивание куба — вращение вида (yaw вокруг вертикали, pitch)
+                _, _, e, up = self._orbit_state()
+                yaw = np.arctan2(e[1], e[0]) - dx * 0.006
+                pitch = float(np.clip(np.arcsin(np.clip(e[2], -1, 1)) + dy * 0.006, -1.55, 1.55))
+                e2 = np.array([np.cos(pitch) * np.cos(yaw), np.cos(pitch) * np.sin(yaw), np.sin(pitch)])
+                self._set_view_dir(e2, up)
+                self._cube_drag['x'], self._cube_drag['y'] = ev.x, ev.y
+                self.cube.hover = None
+        elif ev.type == T.BUTTON_UP and self._cube_drag is not None:
+            if not self._cube_drag['dragged']:
+                h = self.cube.hit(R, f.width, f.height, mx, my)
+                if h is not None:
+                    self.snap_view(h)
+            self._cube_drag = None
+        elif ev.type == T.WHEEL:
+            pass
+        return gui.Widget.EventCallbackResult.CONSUMED
 
     def _fly_mouse(self, ev):
         T = gui.MouseEvent.Type
