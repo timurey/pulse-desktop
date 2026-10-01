@@ -157,39 +157,132 @@ def solve_translation(constraints, R, prior=None):
                'rms': float(np.sqrt(np.mean(resid ** 2))) if len(resid) else 0.0}
 
 
-def solve_pose(pairs_planes, pairs_points=(), yaw=None, T_init=None):
+def kabsch_rotation(pairs_planes, pairs_points=(), min_spread=0.2):
+    """
+    Полный поворот B→A по парам нормалей плоскостей и (≥3) парам точек.
+    None, если направления не задают поворот (все нормали параллельны и точек мало).
+    """
+    va, vb, w = [], [], []
+    for a, b in pairs_planes:
+        va.append(np.asarray(a.normal, float)); vb.append(np.asarray(b.normal, float))
+        w.append(min(a.area, b.area))
+    pts = [(np.asarray(p[0], float), np.asarray(p[1], float)) for p in pairs_points if len(p) == 2]
+    if len(pts) >= 3:
+        PA = np.array([p[0] for p in pts]); PB = np.array([p[1] for p in pts])
+        PA -= PA.mean(0); PB -= PB.mean(0)
+        for x, y in zip(PA, PB):
+            n = np.linalg.norm(x)
+            if n > 1e-6:
+                va.append(x / n); vb.append(y / max(np.linalg.norm(y), 1e-9)); w.append(10.0 * n)
+    if len(va) < 2:
+        return None
+    VA = np.array(va) * np.sqrt(w)[:, None]
+    sv = np.linalg.svd(VA, compute_uv=False)
+    if sv[1] < min_spread * sv[0]:
+        return None
+    H = (np.array(vb) * np.array(w)[:, None]).T @ np.array(va)
+    U, _, Vt = np.linalg.svd(H)
+    D = np.diag([1, 1, np.sign(np.linalg.det(Vt.T @ U.T))])
+    return Vt.T @ D @ U.T
+
+
+def split_yaw_tilt(R):
+    """R = Rz(yaw) · R_tilt; R_tilt не содержит поворота вокруг вертикали."""
+    yaw = float(np.arctan2(R[1, 0], R[0, 0]))
+    return yaw, rot_z(-yaw) @ np.asarray(R)
+
+
+def level_correction(normals, areas, max_dev_deg=12.0, iters=4):
+    """
+    Поворот (вокруг горизонтальных осей), делающий горизонтальные плоскости
+    горизонтальными, а стены — вертикальными. Плоскости, отклонённые больше
+    max_dev_deg от горизонтали/вертикали (скаты, уклон улицы), не учитываются.
+    normals — в текущей системе. → (R_corr 3×3, info).
+    """
+    N = np.asarray(normals, float).reshape(-1, 3)
+    W = np.asarray(areas, float)
+    R = np.eye(3)
+    cmax = np.cos(np.radians(max_dev_deg))
+    smax = np.sin(np.radians(max_dev_deg))
+    used = (0, 0)
+    for _ in range(iters):
+        M = N @ R.T
+        rows, rhs, wts = [], [], []
+        nh = nv = 0
+        for n, w in zip(M, W):
+            if abs(n[2]) > cmax:                       # пол / потолок / земля
+                # хотим n_x = n_y = 0:  ω_y n_z = -n_x ;  -ω_x n_z = -n_y
+                rows += [[0, n[2]], [-n[2], 0]]
+                rhs += [-n[0], -n[1]]
+                wts += [w, w]
+                nh += 1
+            elif abs(n[2]) < smax:                     # стена
+                # хотим n_z = 0:  ω_x n_y - ω_y n_x = -n_z
+                rows.append([n[1], -n[0]])
+                rhs.append(-n[2])
+                wts.append(w)
+                nv += 1
+        if len(rows) < 2:
+            break
+        A = np.array(rows) * np.sqrt(wts)[:, None]
+        b = np.array(rhs) * np.sqrt(wts)
+        (wx, wy), *_ = np.linalg.lstsq(A, b, rcond=None)
+        om = np.array([wx, wy, 0.0])
+        ang = np.linalg.norm(om)
+        if ang < 1e-9:
+            break
+        k = om / ang
+        K = np.array([[0, -k[2], k[1]], [k[2], 0, -k[0]], [-k[1], k[0], 0]])
+        R = (np.eye(3) + np.sin(ang) * K + (1 - np.cos(ang)) * K @ K) @ R
+        used = (nh, nv)
+    tilt = float(np.degrees(np.arccos(np.clip(R[2, 2], -1, 1))))
+    return R, {'tilt_deg': tilt, 'horizontal': used[0], 'walls': used[1]}
+
+
+def solve_pose(pairs_planes, pairs_points=(), yaw=None, T_init=None, full=True):
     """
     Поза B→A по ручным парам.
       pairs_planes: [(PlaneA, PlaneB), ...]
       pairs_points: [(pA, pB) или (pA, pB, P)]
-    yaw — если не задан, берётся взвешенное среднее разностей азимутов стен.
+    full=True — если пары задают наклон (≥2 непараллельных направления), поворот
+    находится целиком (6 степеней свободы). Иначе ищется только поворот вокруг
+    вертикали, а наклон подвижного скана берётся из T_init (не меняется).
     """
-    if yaw is None:
-        diffs, w = [], []
-        for a, b in pairs_planes:
-            if a.kind == 'wall' and b.kind == 'wall':
-                diffs.append(azimuth(a.normal) - azimuth(b.normal))
-                w.append(min(a.area, b.area))
-        if not diffs and len(pairs_points) >= 2:
-            # yaw по двум точкам в горизонтали
-            (a0, b0), (a1, b1) = [(np.asarray(p[0]), np.asarray(p[1])) for p in pairs_points[:2]]
-            da, db = (a1 - a0)[:2], (b1 - b0)[:2]
-            diffs = [np.arctan2(da[1], da[0]) - np.arctan2(db[1], db[0])]
-            w = [1.0]
-        if not diffs:
-            if T_init is None:
-                raise ValueError("Нужна хотя бы одна пара стен или две пары точек для yaw")
-            yaw = float(np.arctan2(T_init[1, 0], T_init[0, 0]))     # поворот не задан — как есть
-        else:
-            yaw = float(np.angle(np.sum(np.array(w) * np.exp(1j * np.array(diffs)))))
-    R = rot_z(yaw)
+    R_init = np.eye(3) if T_init is None else np.asarray(T_init)[:3, :3]
+    y0, R_tilt = split_yaw_tilt(R_init)
+    R = kabsch_rotation(pairs_planes, pairs_points) if (full and yaw is None) else None
+    mode = '6dof' if R is not None else 'yaw'
+    if R is None:
+        if yaw is None:
+            diffs, w = [], []
+            for a, b in pairs_planes:
+                if a.kind == 'wall' and b.kind == 'wall':
+                    nb = R_tilt @ np.asarray(b.normal)
+                    diffs.append(azimuth(a.normal) - azimuth(nb))
+                    w.append(min(a.area, b.area))
+            if not diffs and len(pairs_points) >= 2:
+                # yaw по двум точкам в горизонтали
+                (a0, b0), (a1, b1) = [(np.asarray(p[0]), R_tilt @ np.asarray(p[1]))
+                                      for p in pairs_points[:2]]
+                da, db = (a1 - a0)[:2], (b1 - b0)[:2]
+                diffs = [np.arctan2(da[1], da[0]) - np.arctan2(db[1], db[0])]
+                w = [1.0]
+            if not diffs:
+                if T_init is None:
+                    raise ValueError("Нужна хотя бы одна пара стен или две пары точек для yaw")
+                yaw = y0                                  # поворот не задан — как есть
+            else:
+                yaw = float(np.angle(np.sum(np.array(w) * np.exp(1j * np.array(diffs)))))
+        R = rot_z(yaw) @ R_tilt
     cons = [('plane', a.normal, a.offset, b.normal, b.offset, min(a.area, b.area))
             for a, b in pairs_planes]
     for pp in pairs_points:
         P = pp[2] if len(pp) > 2 else np.eye(3)
         cons.append(('point', pp[0], pp[1], P, 10.0))
     t, info = solve_translation(cons, R, None if T_init is None else np.asarray(T_init)[:3, 3])
-    info['yaw_deg'] = float(np.degrees(yaw))
+    info['yaw_deg'] = float(np.degrees(np.arctan2(R[1, 0], R[0, 0])))
+    info['rotation'] = mode
+    info['tilt_deg'] = float(np.degrees(np.arccos(np.clip(R[2, 2], -1, 1))))
     return make_T(R, t), info
 
 

@@ -6,8 +6,9 @@
 Системы координат:
   - исходная система скана (как в файле; у экспорта HMI «вверх» = -Z);
   - каноническая система скана (planes.py): +Z вверх, начало - сканер;
-  - ОБЩАЯ система сеанса = каноническая система опорного скана. В ней
-    рисуется сцена, выбираются точки и хранятся позы `Tc` (канон. скана -> общая).
+  - ОБЩАЯ система сеанса = каноническая система опорного скана, повёрнутая на
+    поправку горизонта проекта L (`level_project`): Tc = L * R_ref * pose * R_scan^T.
+    В ней рисуется сцена, выбираются точки и задаются позы `Tc` (канон. скана -> общая).
   - в project.json, как и раньше, `pose` - исходная скана -> исходная опорного.
 
 Рёбра графа: автоматические пары (plane_register.register_pair) и ручные
@@ -107,6 +108,7 @@ class Session:
         self.frame = None            # id опорного скана
         self.edges = []              # пары/рёбра (dict, как в scan_project)
         self.project_path = None
+        self.level = np.eye(3)       # поправка горизонта проекта (поворот общей системы)
         self.lock = threading.RLock()
 
     # ── загрузка / сохранение ─────────────────────────────────────────────
@@ -119,6 +121,7 @@ class Session:
             sc.clean = e.get('clean', True)
             s.scans.append(sc)
         s.frame = proj.get('frame') or s.scans[0].id
+        s.level = np.asarray(proj.get('level', np.eye(3).tolist()), float)
         s.edges = proj.get('pairs', []) + proj.get('manual_edges', [])
         s.project_path = str(path)
         s._recolor()
@@ -147,6 +150,7 @@ class Session:
         auto = [e for e in self.edges if e.get('method') != 'manual']
         manual = [e for e in self.edges if e.get('method') == 'manual']
         proj = {'frame': self.frame, 'created': time.strftime('%Y-%m-%d %H:%M:%S'),
+                'level': self.level.tolist(),
                 'scans': [s.to_json() for s in self.scans],
                 'pairs': [_jsonable(e) for e in auto],
                 'manual_edges': [_jsonable(e) for e in manual]}
@@ -170,10 +174,49 @@ class Session:
         """Канон. система скана -> общая. None, если скан не размещён."""
         if scan.pose is None:
             return None
-        return homog(self.ref.R_up) @ scan.pose @ homog(scan.R_up).T
+        return homog(self.level) @ homog(self.ref.R_up) @ scan.pose @ homog(scan.R_up).T
 
     def set_Tc(self, scan, Tc):
-        scan.pose = homog(self.ref.R_up).T @ np.asarray(Tc) @ homog(scan.R_up)
+        scan.pose = homog(self.ref.R_up).T @ homog(self.level).T @ np.asarray(Tc) @ homog(scan.R_up)
+
+    # ── горизонт ─────────────────────────────────────────────────────────
+    @staticmethod
+    def _plane_normals(scan, R, min_area=1.0):
+        ns, ws = [], []
+        for p in scan.planes:
+            if p.area >= min_area:
+                ns.append(R @ np.asarray(p.normal))
+                ws.append(p.area)
+        return ns, ws
+
+    def level_pose(self, scan, T):
+        """
+        Поза скана T (канон. -> общая) с исправленным наклоном: пол/земля горизонтальны,
+        стены вертикальны. Поворот вокруг точки сканера. -> (T', info).
+        """
+        T = np.asarray(T, float)
+        ns, ws = self._plane_normals(scan, T[:3, :3])
+        Rc, info = pr.level_correction(ns, ws)
+        T2 = T.copy()
+        T2[:3, :3] = Rc @ T[:3, :3]
+        return T2, info
+
+    def level_project(self):
+        """
+        Поправка горизонта всего проекта по полам и стенам всех размещённых сканов:
+        поворачивает общую систему (позы сканов друг относительно друга не меняются).
+        """
+        ns, ws = [], []
+        for sc in self.placed():
+            n, w = self._plane_normals(sc, self.Tc(sc)[:3, :3])
+            ns += n
+            ws += w
+        Rc, info = pr.level_correction(ns, ws)
+        self.level = Rc @ self.level
+        return info
+
+    def reset_level(self):
+        self.level = np.eye(3)
 
     def placed(self):
         return [s for s in self.scans if s.pose is not None]
@@ -257,7 +300,7 @@ class Session:
         with self.lock:
             for s in self.scans:
                 if s.id in poses:
-                    self.set_Tc(s, poses[s.id])
+                    self.set_Tc(s, homog(self.level) @ poses[s.id])   # граф — в канон. системе опорного
                 elif s.id != self.frame:
                     s.pose = None
             self.ref.pose = np.eye(4)
@@ -360,7 +403,7 @@ class Session:
             txt += ' (толщина стены для проёмов подбирается автоматически)'
         return {'z': z, 'yaw': yaw, 'xy_rank': rank, 'text': txt}
 
-    def solve_manual(self, fixed, moving, pairs, T_init=None):
+    def solve_manual(self, fixed, moving, pairs, T_init=None, full=True):
         """Поза moving (канон. -> общая) по выбранным парам. -> (Tc, info)."""
         Tf, cp, cpt, walls = self.manual_constraints(fixed, moving, pairs)
         if walls and not cp and not cpt:
@@ -389,7 +432,7 @@ class Session:
             P = np.array([u / np.linalg.norm(u), [0, 0, 1.0], [0, 0, 0]])
             pts.append((pr.transform(np.asarray(fa['center'])[None], Tf)[0],
                         np.asarray(fb['center']), P))
-        T, info = pr.solve_pose(cp, pts, T_init=T_init)
+        T, info = pr.solve_pose(cp, pts, T_init=T_init, full=full)
         info['method'] = 'manual'
         return T, info
 
@@ -400,14 +443,25 @@ class Session:
         return T2, {'fitness': fit, 'rmse': rmse, 'shift': pr.pose_delta(T, T2)}
 
     @staticmethod
-    def nudge(T, dx=0.0, dy=0.0, dz=0.0, dyaw_deg=0.0):
-        """Сдвиг/поворот вокруг вертикали (в общей системе, вокруг центра скана)."""
+    def nudge(T, dx=0.0, dy=0.0, dz=0.0, dyaw_deg=0.0, droll_deg=0.0, dpitch_deg=0.0):
+        """
+        Сдвиг и повороты в общей системе вокруг точки сканера:
+        yaw - вокруг вертикали Z, roll - вокруг X, pitch - вокруг Y.
+        """
         T = np.asarray(T, float).copy()
         c = T[:3, 3].copy()
-        R = pr.rot_z(np.radians(dyaw_deg))
+        r, p = np.radians(droll_deg), np.radians(dpitch_deg)
+        Rx = np.array([[1, 0, 0], [0, np.cos(r), -np.sin(r)], [0, np.sin(r), np.cos(r)]])
+        Ry = np.array([[np.cos(p), 0, np.sin(p)], [0, 1, 0], [-np.sin(p), 0, np.cos(p)]])
+        R = pr.rot_z(np.radians(dyaw_deg)) @ Ry @ Rx
         T[:3, :3] = R @ T[:3, :3]
         T[:3, 3] = c + np.array([dx, dy, dz])
         return T
+
+    @staticmethod
+    def tilt_deg(T):
+        """Наклон оси Z скана от вертикали, градусы."""
+        return float(np.degrees(np.arccos(np.clip(np.asarray(T)[2, 2], -1, 1))))
 
     def score_pose(self, moving, Tc):
         others = [s for s in self.placed() if s is not moving]
@@ -525,7 +579,11 @@ class Session:
         return out
 
     # ── экспорт ──────────────────────────────────────────────────────────
-    def export(self, path, voxel=0.02, progress=None):
+    def export(self, path, voxel=0.02, progress=None, frame='ref'):
+        """
+        frame='ref'    - исходная система опорного скана (как в файле опорного скана);
+        frame='common' - общая система: Z вверх, с поправкой горизонта проекта.
+        """
         import open3d as o3d
         parts = []
         placed = self.placed()
@@ -539,7 +597,8 @@ class Session:
             pc = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pts))
             if voxel > 0:
                 pc = pc.voxel_down_sample(voxel)
-            parts.append(pr.transform(np.asarray(pc.points), s.pose))
+            T = s.pose if frame == 'ref' else self.Tc(s) @ homog(s.R_up)
+            parts.append(pr.transform(np.asarray(pc.points), T))
         pts = np.vstack(parts)
         pc = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pts))
         if voxel > 0:

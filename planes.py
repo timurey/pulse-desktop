@@ -84,11 +84,13 @@ def detect_up(pts: np.ndarray):
     for label, (i, s) in AXES.items():
         down = -s * u[:, i]                      # косинус с направлением «вниз»
         stats[label] = (int((down > c10).sum()), int((down > c20).sum()))
-    total = len(u)
+    # порог относительный: у наклонённого скана (ошибка IMU) мёртвый конус смещён
+    # и в 10° вокруг оси попадает немного точек — но на порядок меньше, чем у других осей
+    med10 = float(np.median([v[0] for v in stats.values()]))
     best, best_score = None, -1.0
     for label, (n10, n20) in stats.items():
         ring = n20 - n10
-        if n10 > 1e-4 * total or ring < 20:
+        if n10 > 0.2 * med10 or ring < 20:
             continue
         score = ring / (n10 + 1)
         if score > best_score:

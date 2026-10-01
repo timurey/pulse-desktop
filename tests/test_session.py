@@ -69,9 +69,9 @@ class TestSession(unittest.TestCase):
         for a, b in zip(s.scans, s2.scans):
             np.testing.assert_allclose(a.pose, b.pose, atol=1e-9)
 
-    def _canon_point(self, s, sc, world_xyz):
+    def _canon_point(self, s, sc, world_xyz, name=None):
         """Мировая точка комнаты → канон. система скана (как будто клик по ней)."""
-        o, yaw = self.origins[sc.id]
+        o, yaw = self.origins[name or sc.id]
         local = (np.asarray(world_xyz) - o) @ pr.rot_z(-yaw).T      # Z вверх, начало — сканер
         return local                                               # канон. = локальная Z-вверх
 
@@ -114,6 +114,47 @@ class TestSession(unittest.TestCase):
         T2 = Session.nudge(Tc, dx=0.1, dyaw_deg=5)
         dt, da = pr.pose_delta(Tc, T2)
         self.assertAlmostEqual(da, 5, places=6)
+
+    def test_tilt_level_and_6dof(self):
+        """Скан B с наклоном 3° (ошибка IMU): выравнивание и решение с полным поворотом."""
+        tilt = pr.make_T(np.eye(3), np.zeros(3))
+        a = np.radians(3.0)
+        Rt = np.array([[1, 0, 0], [0, np.cos(a), -np.sin(a)], [0, np.sin(a), np.cos(a)]]) @ \
+            np.array([[np.cos(a / 2), 0, np.sin(a / 2)], [0, 1, 0], [-np.sin(a / 2), 0, np.cos(a / 2)]])
+        tilt[:3, :3] = Rt
+        pts, _ = scan(POSES['B.ply'][0], POSES['B.ply'][1], seed=2)
+        F = pr.make_T(FLIP, np.zeros(3))
+        # наклон в канонической системе (Z вверх): канон = FLIP · исходная
+        tilted = pr.transform(pts, F @ tilt @ F)
+        p = Path(self.tmp) / 'Bt.ply'
+        o3d.io.write_point_cloud(str(p), o3d.geometry.PointCloud(o3d.utility.Vector3dVector(tilted)))
+        s = Session.from_scans([self.paths[0], str(p)])
+        A, B = s.scans
+        oA, yA = self.origins['A.ply']
+        oB, yB = self.origins['B.ply']
+        Tc_true = F @ gt_pose(oA, yA, oB, yB) @ F @ np.linalg.inv(tilt)
+        # 1) «наивная» поза (скан считается ровным) + сдвиг → выравнивание даёт истинный поворот
+        T_naive = F @ gt_pose(oA, yA, oB, yB) @ F
+        T_naive[:3, 3] += [0.3, 0.0, 0.0]
+        lev, info = s.level_pose(B, T_naive)
+        R_err = lev[:3, :3] @ Tc_true[:3, :3].T
+        err_deg = np.degrees(np.arccos(np.clip((np.trace(R_err) - 1) / 2, -1, 1)))
+        self.assertLess(err_deg, 0.3, info)
+        self.assertGreater(info['tilt_deg'], 3.0)
+        np.testing.assert_allclose(lev[:3, 3], T_naive[:3, 3])     # вращение вокруг сканера
+        # 2) пары «пол + две стены» + полный поворот → поза с наклоном
+        clicks = [(1.0, 1.0, 0.0), (0.0, 2.0, 2.0), (3.0, 0.0, 2.0)]
+        pairs = []
+        for w in clicks:
+            fa = s.pick_feature(A, self._canon_point(s, A, w))
+            pb = pr.transform(self._canon_point(s, B, w, 'B.ply')[None], tilt)[0]
+            fb = s.pick_feature(B, pb)
+            pairs.append((fa, fb))
+        Tc, info = s.solve_manual(A, B, pairs, T_init=np.eye(4), full=True)
+        self.assertEqual(info['rotation'], '6dof')
+        dt, da = pr.pose_delta(Tc, Tc_true)
+        self.assertLess(dt, 0.03, info)
+        self.assertLess(da, 0.3, info)
 
     def test_project_portable(self):
         """Пути сканов в проекте относительные: папку можно перенести (другая машина/ОС)."""

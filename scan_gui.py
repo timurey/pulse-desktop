@@ -260,6 +260,8 @@ class App:
                               self._btn('Вид 3D', self.view_3d),
                               self._btn('Все видимы', self.show_all)))
         v.add_child(self._btn('Скриншот (F12)', self.save_screenshot))
+        v.add_child(self._row(self._btn('Выровнять проект по горизонту', self.on_level_project),
+                              self._btn('Сбросить', self.on_level_reset)))
         self.fly_btn = self._btn('Режим полёта (F)', self.toggle_fly)
         self.fly_combo = gui.Combobox()
         v.add_child(self._row(self.fly_btn, self._btn('Встать в точку скана', self.fly_to_scan)))
@@ -364,8 +366,18 @@ class App:
         v.add_child(self._row(self._btn('X-', lambda: n(dx=-1)), self._btn('X+', lambda: n(dx=1)),
                               self._btn('Y-', lambda: n(dy=-1)), self._btn('Y+', lambda: n(dy=1)),
                               self._btn('Z-', lambda: n(dz=-1)), self._btn('Z+', lambda: n(dz=1))))
-        v.add_child(self._row(self._btn('< yaw', lambda: n(dyaw=1)),
-                              self._btn('> yaw', lambda: n(dyaw=-1))))
+        v.add_child(self._row(gui.Label('Поворот:'),
+                              self._btn('yaw-', lambda: n(dyaw=-1)), self._btn('yaw+', lambda: n(dyaw=1)),
+                              self._btn('крен-', lambda: n(droll=-1)), self._btn('крен+', lambda: n(droll=1)),
+                              self._btn('тангаж-', lambda: n(dpitch=-1)), self._btn('тангаж+', lambda: n(dpitch=1))))
+        v.add_child(gui.Label('крен - вокруг X, тангаж - вокруг Y (оси общей системы),\n'
+                              'вращение вокруг точки сканера'))
+        v.add_child(self._row(self._btn('Выровнять подвижный по горизонту', self.on_level_moving)))
+        self.full_rot = gui.Checkbox('Полный поворот при решении (учитывать наклон)')
+        self.full_rot.checked = True
+        v.add_child(self.full_rot)
+        self.tilt_label = gui.Label('')
+        v.add_child(self.tilt_label)
         self.manual_score = gui.Label('')
         v.add_child(self.manual_score)
         v.add_child(self._row(self._btn('Оценить', self.on_manual_score),
@@ -421,6 +433,10 @@ class App:
         self.voxel = gui.NumberEdit(gui.NumberEdit.DOUBLE)
         self.voxel.double_value = 0.01
         v.add_child(self._row(gui.Label('Воксель, м'), self.voxel))
+        self.export_common = gui.Checkbox('Экспорт в выровненной системе (Z вверх)')
+        self.export_common.checked = False
+        v.add_child(self.export_common)
+        v.add_child(gui.Label('иначе - в исходной системе опорного скана'))
         v.add_child(self._btn('Экспорт... (.e57 / .pcd / .ply)', self.on_export))
         return v
 
@@ -625,6 +641,17 @@ class App:
         self._file_dialog(gui.FileDialog.SAVE, 'Сохранить проект', [('.json', 'Проект')],
                           lambda p: (self.s.save(p), self.set_status(f'Сохранено: {p}')))
 
+    def on_level_project(self):
+        info = self.s.level_project()
+        self.redraw_all()
+        self.set_status(f"горизонт проекта: поправка {info['tilt_deg']:.2f} град по {info['horizontal']} "
+                        f"гориз. и {info['walls']} верт. плоскостям (сохраняется в проекте)")
+
+    def on_level_reset(self):
+        self.s.reset_level()
+        self.redraw_all()
+        self.set_status('горизонт проекта сброшен')
+
     def on_ref_changed(self, text, idx):
         if text and text != self.s.frame and self.s.by_id(text).pose is not None:
             self.s.set_frame(text)
@@ -681,6 +708,7 @@ class App:
         self.only_show({fixed.id, moving.id})
         self.redraw_all()
         self.refresh_manual()
+        self.tilt_label.text = f'наклон подвижного: {Session.tilt_deg(self.T_moving):.2f} град'
         self.tabs.selected_tab_index = 2
         self.set_status('Ctrl/Cmd + клик по облаку: признак в неподвижном, затем такой же в подвижном')
 
@@ -1007,6 +1035,7 @@ class App:
                 sc.set_geometry_transform(m, self.T_moving)
         self.sw.force_redraw()
         self.w.post_redraw()
+        self.tilt_label.text = f'наклон подвижного: {Session.tilt_deg(self.T_moving):.2f} град'
 
     def live_score(self):
         """Оценка текущей позы подвижного скана в фоне (без блокировки других действий)."""
@@ -1080,8 +1109,10 @@ class App:
             return
         fixed, moving, pairs, T0 = self.fixed, self.moving, list(self.pairs), self.T_moving
 
+        full = self.full_rot.checked
+
         def work(progress):
-            return self.s.solve_manual(fixed, moving, pairs, T_init=T0)
+            return self.s.solve_manual(fixed, moving, pairs, T_init=T0, full=full)
 
         def done(r):
             T, info = r
@@ -1094,7 +1125,10 @@ class App:
                 side = ('с одной стороны стены' if info['same_side']
                         else f"сквозь стену, толщина {info['delta']:.2f} м")
                 extra = f" - проём {side}, нарушений {info['violations']:.3f}"
-            self.set_status(f"решено: yaw {np.degrees(np.arctan2(T[1, 0], T[0, 0])):.1f}°{extra}")
+            rot = ('полный поворот' if info.get('rotation') == '6dof'
+                   else 'только вокруг вертикали (пары не задают наклон)')
+            self.set_status(f"решено ({rot}): yaw {np.degrees(np.arctan2(T[1, 0], T[0, 0])):.1f}, "
+                            f"наклон {Session.tilt_deg(T):.2f} град{extra}")
             self.live_score()
         self.run_bg('решение позы...', work, done)
 
@@ -1117,13 +1151,29 @@ class App:
             self.live_score()
         self.run_bg('ICP...', work, done)
 
-    def _nudge(self, dx=0, dy=0, dz=0, dyaw=0):
+    def _nudge(self, dx=0, dy=0, dz=0, dyaw=0, droll=0, dpitch=0):
         if self.moving is None:
             return
         st, sd = self.step.double_value, self.step_deg.double_value
-        self.T_moving = Session.nudge(self.T_moving, dx * st, dy * st, dz * st, dyaw * sd)
+        self.T_moving = Session.nudge(self.T_moving, dx * st, dy * st, dz * st, dyaw * sd,
+                                      droll * sd, dpitch * sd)
         self._update_moving()
         self.live_score()
+
+    def on_level_moving(self):
+        if self.moving is None:
+            return
+        T2, info = self.s.level_pose(self.moving, self.T_moving)
+        if info['horizontal'] + info['walls'] == 0:
+            self.set_status('нет подходящих плоскостей (пол/земля, стены) для выравнивания')
+            return
+        before = Session.tilt_deg(self.T_moving)
+        self.T_moving = T2
+        self._update_moving()
+        self.live_score()
+        self.set_status(f"выровнено по {info['horizontal']} гориз. и {info['walls']} верт. плоскостям: "
+                        f"поправка {info['tilt_deg']:.2f} град (наклон оси был {before:.2f}, "
+                        f"стал {Session.tilt_deg(T2):.2f})")
 
     def on_manual_score(self):
         if self.moving is None:
@@ -1248,9 +1298,10 @@ class App:
 
     def on_export(self):
         voxel = self.voxel.double_value
+        frame = 'common' if self.export_common.checked else 'ref'
 
         def go(path):
-            self.run_bg('экспорт...', lambda p: self.s.export(path, voxel, p),
+            self.run_bg('экспорт...', lambda p: self.s.export(path, voxel, p, frame),
                         lambda n: self.set_status(f'Экспорт: {path} ({n:,} точек)'))
         self._file_dialog(gui.FileDialog.SAVE, 'Экспорт склейки',
                           [('.e57', 'E57'), ('.pcd', 'PCD'), ('.ply', 'PLY')], go)
