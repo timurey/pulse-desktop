@@ -725,13 +725,14 @@ class App:
         y = ev.y - self.sw.frame.y
         cam = self.sw.scene.camera
         W, H = self.sw.frame.width, self.sw.frame.height
-        p0 = np.asarray(cam.unproject(x, y, 0.0, W, H))
-        p1 = np.asarray(cam.unproject(x, y, 1.0, W, H))
+        # глубина 1.0 = бесконечная дальняя плоскость → NaN; берём 0 и 0.5
+        p0 = np.asarray(cam.unproject(x, y, 0.0, W, H), float)
+        p1 = np.asarray(cam.unproject(x, y, 0.5, W, H), float)
         d = p1 - p0
-        if abs(d[2]) < 1e-9:
+        if not (np.isfinite(p0).all() and np.isfinite(d).all()) or abs(d[2]) < 1e-9:
             return None
-        t = (z0 - p0[2]) / d[2]
-        return p0 + t * d
+        g = p0 + (z0 - p0[2]) / d[2] * d
+        return g if np.isfinite(g).all() else None
 
     def _rotate_drag(self, ev):
         # Alt+тянуть; на Linux Alt+тянуть часто перехватывает оконный менеджер —
@@ -753,9 +754,12 @@ class App:
             d = self._drag
             if d['mode'] == 'move':
                 g = self._ray_ground(ev, d['z0'])
-                if g is not None and d['g0'] is not None:
-                    delta = g - d['g0']
-                    self.T_moving = Session.nudge(d['T0'], delta[0], delta[1], 0.0, 0.0)
+                if g is None or d['g0'] is None:
+                    return True                          # луч параллелен полу — пропустить
+                delta = g - d['g0']
+                if np.linalg.norm(delta) > 200:          # защита от вырожденного луча
+                    return True
+                self.T_moving = Session.nudge(d['T0'], delta[0], delta[1], 0.0, 0.0)
             else:
                 self.T_moving = Session.nudge(d['T0'], dyaw_deg=0.3 * (ev.x - d['x0']))
             self._update_moving()
