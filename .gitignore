@@ -1,0 +1,30 @@
+# Point clouds / meshes / bags (generated, large)
+*.pcd
+*.e57
+*.las
+*.laz
+*.ply
+*.npz
+*.obj
+*.stl
+*.dxf
+*.glb
+*.gltf
+*.bin
+*.xyz
+*.pts
+*.mcap
+*.mcap.zstd
+bags/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Local scratch
+build/
+cloudcompare/
+
+# macOS
+.DS_Store
