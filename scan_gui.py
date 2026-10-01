@@ -164,6 +164,15 @@ class App:
         self._moving_markers = set()
         self._drag = None             # перетаскивание подвижного скана мышью
         self._score_pending = False
+        # режим полёта (как в 3D-шутере)
+        self.fly = False
+        self.fly_speed = 1.5          # м/с
+        self.fly_keys = set()
+        self.fly_pos = np.zeros(3)
+        self.fly_yaw = 0.0            # рад, от +X против часовой
+        self.fly_pitch = 0.0
+        self._fly_last = None
+        self._look = None
         self._build()
         if self.s.scans:
             self.load_all()
@@ -213,6 +222,7 @@ class App:
         w.add_child(self.panel)
         w.set_on_layout(self._on_layout)
         w.set_on_key(self._on_key)
+        w.set_on_tick_event(self._on_tick)
 
     def _on_layout(self, ctx):
         r = self.w.content_rect
@@ -250,6 +260,13 @@ class App:
                               self._btn('Вид 3D', self.view_3d),
                               self._btn('Все видимы', self.show_all)))
         v.add_child(self._btn('Скриншот (F12)', self.save_screenshot))
+        self.fly_btn = self._btn('Режим полёта (F)', self.toggle_fly)
+        self.fly_combo = gui.Combobox()
+        v.add_child(self._row(self.fly_btn, self._btn('Встать в точку скана', self.fly_to_scan)))
+        v.add_child(self._row(gui.Label('Скан:'), self.fly_combo))
+        v.add_child(gui.Label('Полёт: W/S A/D - ходьба, Space/E - вверх, C/Q - вниз,\n'
+                              'левая кнопка + мышь - обзор, колесо - скорость,\n'
+                              'Shift - быстрее, Esc - выход'))
         ps = gui.Slider(gui.Slider.INT)
         ps.set_limits(1, 6)
         ps.int_value = 2
@@ -357,7 +374,8 @@ class App:
         return v
 
     def refresh_manual_combos(self):
-        for cb in (self.fixed_combo, self.moving_combo, self.cand_combo, self.clean_combo):
+        for cb in (self.fixed_combo, self.moving_combo, self.cand_combo, self.clean_combo,
+                   self.fly_combo):
             cb.clear_items()
         for s in self.s.scans:
             if s.pose is not None:
@@ -365,6 +383,8 @@ class App:
             self.moving_combo.add_item(s.id)
             self.cand_combo.add_item(s.id)
             self.clean_combo.add_item(s.id)
+            if s.pose is not None:
+                self.fly_combo.add_item(s.id)
         unplaced = [s.id for s in self.s.scans if s.pose is None]
         if unplaced:
             self.moving_combo.selected_text = unplaced[0]
@@ -674,9 +694,115 @@ class App:
                 best = (d, s, T)
         return best[1], best[2]
 
+    FLY_KEYS = {gui.KeyName.W, gui.KeyName.A, gui.KeyName.S, gui.KeyName.D,
+                gui.KeyName.SPACE, gui.KeyName.C, gui.KeyName.E, gui.KeyName.Q,
+                gui.KeyName.LEFT_SHIFT, gui.KeyName.RIGHT_SHIFT}
+
     def _on_key(self, ev):
-        if ev.type == gui.KeyEvent.Type.DOWN and ev.key == gui.KeyName.F12:
+        down = ev.type == gui.KeyEvent.Type.DOWN
+        if down and ev.key == gui.KeyName.F12:
             self.save_screenshot()
+            return True
+        if down and ev.key == gui.KeyName.F and not getattr(ev, 'is_repeat', False):
+            self.toggle_fly()
+            return True
+        if self.fly:
+            if down and ev.key == gui.KeyName.ESCAPE:
+                self.toggle_fly()
+                return True
+            if ev.key in self.FLY_KEYS:
+                (self.fly_keys.add if down else self.fly_keys.discard)(ev.key)
+                return True
+        return False
+
+    # ── режим полёта ─────────────────────────────────────────────────────
+    def toggle_fly(self):
+        self.fly = not self.fly
+        self.fly_keys.clear()
+        self._fly_last = None
+        if self.fly:
+            M = np.asarray(self.sw.scene.camera.get_model_matrix())    # камера → мир
+            self.fly_pos = M[:3, 3].copy()
+            fwd = -M[:3, 2]
+            self.fly_yaw = float(np.arctan2(fwd[1], fwd[0]))
+            self.fly_pitch = float(np.clip(np.arcsin(np.clip(fwd[2], -1, 1)), -1.5, 1.5))
+            # сверху «шутер» бессмыслен — встаём в точку опорного скана
+            if abs(self.fly_pitch) > 1.2:
+                self.fly_to_scan(self.s.frame)
+            self.fly_btn.text = 'Выйти из полёта (F/Esc)'
+            self._apply_fly_camera()
+            self.set_status(f'Полёт: скорость {self.fly_speed:.1f} м/с (колесо - изменить)')
+        else:
+            self.fly_btn.text = 'Режим полёта (F)'
+            self.set_status('Полёт выключен')
+
+    def fly_to_scan(self, sid=None):
+        s = self.s.by_id(sid or self.fly_combo.selected_text or self.s.frame)
+        if s is None or s.pose is None:
+            return
+        T = self.s.Tc(s)
+        self.fly_pos = T[:3, 3].copy()                    # сканер ~ на высоте головы
+        fwd = T[:3, 0]
+        self.fly_yaw = float(np.arctan2(fwd[1], fwd[0]))
+        self.fly_pitch = 0.0
+        if not self.fly:
+            self.toggle_fly()
+        self._apply_fly_camera()
+
+    def _fly_forward(self):
+        cp = np.cos(self.fly_pitch)
+        return np.array([cp * np.cos(self.fly_yaw), cp * np.sin(self.fly_yaw), np.sin(self.fly_pitch)])
+
+    def _apply_fly_camera(self):
+        eye = self.fly_pos
+        self.sw.look_at(eye + self._fly_forward(), eye, [0, 0, 1])
+        f = self.sw.frame
+        if f.width > 0 and f.height > 0:
+            # близкая плоскость отсечения — иначе стены вплотную обрезаются
+            self.sw.scene.camera.set_projection(60, f.width / f.height, 0.03, 2000,
+                                                rendering.Camera.FovType.Vertical)
+        self.sw.force_redraw()
+
+    def _on_tick(self):
+        if not self.fly or not self.fly_keys:
+            self._fly_last = None
+            return False
+        now = time.time()
+        dt = 0.0 if self._fly_last is None else min(0.1, now - self._fly_last)
+        self._fly_last = now
+        K = gui.KeyName
+        has = self.fly_keys.__contains__
+        v = self.fly_speed * (4.0 if (has(K.LEFT_SHIFT) or has(K.RIGHT_SHIFT)) else 1.0) * dt
+        fwd = np.array([np.cos(self.fly_yaw), np.sin(self.fly_yaw), 0.0])   # ходьба — по горизонтали
+        right = np.array([np.sin(self.fly_yaw), -np.cos(self.fly_yaw), 0.0])
+        up = np.array([0.0, 0.0, 1.0])
+        d = (has(K.W) - has(K.S)) * fwd + (has(K.D) - has(K.A)) * right + \
+            ((has(K.SPACE) or has(K.E)) - (has(K.C) or has(K.Q))) * up
+        if not d.any():
+            return False
+        self.fly_pos = self.fly_pos + v * d
+        self._apply_fly_camera()
+        return True
+
+    def _fly_mouse(self, ev):
+        T = gui.MouseEvent.Type
+        if ev.type == T.WHEEL:
+            self.fly_speed = float(np.clip(self.fly_speed * (1.25 ** (-np.sign(ev.wheel_dy))), 0.1, 50))
+            self.set_status(f'Полёт: скорость {self.fly_speed:.1f} м/с')
+            return True
+        if ev.type == T.BUTTON_DOWN:
+            self._look = (ev.x, ev.y)
+            return True
+        if ev.type == T.DRAG and self._look is not None:
+            dx, dy = ev.x - self._look[0], ev.y - self._look[1]
+            self._look = (ev.x, ev.y)
+            sens = np.radians(0.2)
+            self.fly_yaw -= dx * sens
+            self.fly_pitch = float(np.clip(self.fly_pitch - dy * sens, -1.5, 1.5))
+            self._apply_fly_camera()
+            return True
+        if ev.type == T.BUTTON_UP:
+            self._look = None
             return True
         return False
 
@@ -794,6 +920,8 @@ class App:
                 self.app.post_to_main_thread(self.w, lambda: self.pick_world(np.asarray(W)))
             self.sw.scene.scene.render_to_depth_image(on_depth)
             return gui.Widget.EventCallbackResult.HANDLED
+        if self.fly and self._fly_mouse(ev):
+            return gui.Widget.EventCallbackResult.CONSUMED
         return gui.Widget.EventCallbackResult.IGNORED
 
     def pick_world(self, W):
