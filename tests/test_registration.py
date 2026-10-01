@@ -107,6 +107,26 @@ class TestSolve(unittest.TestCase):
         self.assertGreater(abs(info['weak'][0][0]), 0.99)   # вдоль коридора (X)
 
 
+class TestOpeningPair(unittest.TestCase):
+    def test_inside_outside_window(self):
+        """Окно в стене толщиной 0.45 м: изнутри (A) и снаружи (B)."""
+        delta = 0.45
+        # мир: внутренняя грань стены x=0 (комната x>0), наружная x=−delta
+        win_in = np.array([0.0, 2.0, 1.5])
+        win_out = np.array([-delta, 2.0, 1.5])
+        T_wA = pr.make_T(pr.rot_z(0.7), np.array([3.0, 1.0, 1.4]))     # сканер A в комнате
+        T_wB = pr.make_T(pr.rot_z(-2.0), np.array([-6.0, 4.0, 1.2]))   # сканер B снаружи
+        to_A, to_B = np.linalg.inv(T_wA), np.linalg.inv(T_wB)
+        cA = pr.transform(win_in[None], to_A)[0]
+        cB = pr.transform(win_out[None], to_B)[0]
+        nA = to_A[:3, :3] @ np.array([1.0, 0, 0])      # к сканеру A (в комнату)
+        nB = to_B[:3, :3] @ np.array([-1.0, 0, 0])     # к сканеру B (наружу)
+        T = pr.pose_from_opening_pair(cA, nA, cB, nB, delta)
+        dt, dang = pr.pose_delta(T, to_A @ T_wB)
+        self.assertLess(dt, 1e-9)
+        self.assertLess(dang, 1e-6)
+
+
 class TestRegisterPair(unittest.TestCase):
     CASES = [
         ((2.0, 1.8), 0.3, (6.8, 3.5), -1.1),

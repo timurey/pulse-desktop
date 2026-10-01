@@ -51,6 +51,19 @@ python export_cad.py in.pcd --format e57|las|xyz|pts|all
 python export_mesh.py in.pcd --format obj|stl|dxf|all --depth 9       # Poisson-меш
 ```
 
+Стыковка статических сканов по плоскостям (`planes.py`, `openings.py`, `plane_register.py`, `scan_project.py`; план и результаты — `docs/plan_plane_registration.md`):
+
+```bash
+python scan_project.py build static_*.e57 -o X.project.json [--reuse old.project.json]  # авто: пары → граф → позы
+python scan_project.py view X.project.json -o top.png       # вид сверху для проверки
+python scan_project.py merge X.project.json -o merged.e57   # склейка в системе опорного скана
+python scan_project.py openings X.project.json              # проёмы с номерами
+python scan_project.py attach X.project.json FACADE.e57 --pair ROOM.e57:K M   # ручная привязка по паре окон
+python -m unittest discover -s tests -v                     # синтетические тесты (лучевая «съёмка» комнаты)
+```
+
+Внутри стыковки всё считается в «канонической» системе скана: +Z вверх, начало — сканер. Вертикаль со знаком определяется по мёртвому конусу под штативом (`planes.detect_up`). Позы в `*.project.json` переводят точки скана **в его исходной системе** в исходную систему опорного скана; исходные файлы не меняются.
+
 Полный список флагов и клавиш вьювера — в `README.md`.
 
 ## Архитектура

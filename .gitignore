@@ -29,3 +29,6 @@ cloudcompare/
 # macOS
 .DS_Store
 *.planes.json
+*.openings.json
+*.project.json
+*.png

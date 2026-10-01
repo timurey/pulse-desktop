@@ -336,6 +336,8 @@ class ConsistencyScorer:
         self.pcdA = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(downA))
         self.riA, self.riB = RangeImage(downA), RangeImage(downB)
 
+    MIN_CLOSE = 0.01      # меньше — сканы не перекрываются вовсе, гипотеза пустая
+
     def score(self, T):
         import open3d as o3d
         PB = transform(self.B, T)
@@ -344,19 +346,90 @@ class ConsistencyScorer:
         close = float((d < self.CLOSE_DIST).mean())
         Ti = np.linalg.inv(T)
         viol = 0.5 * (self.riA.violations(PB) + self.riB.violations(transform(self.A, Ti)))
-        return close - self.VIOL_WEIGHT * viol, close, viol
+        s = close - self.VIOL_WEIGHT * viol
+        if close < self.MIN_CLOSE:
+            s -= 1.0
+        return s, close, viol
+
+
+class MultiScanScorer:
+    """
+    Как ConsistencyScorer, но A — несколько уже размещённых сканов (в общей системе).
+    Свободное пространство проверяется по карте дальностей каждого сканера A
+    в его собственной системе. Опционально — «окна» интереса: близость считается
+    только для точек B рядом с заданными центрами (проёмами), где перекрытие
+    между внутренним и фасадным сканом вообще возможно.
+    """
+    CLOSE_DIST = 0.05
+    VIOL_WEIGHT = 8.0
+
+    def __init__(self, scansA, downB, n_probe=30000, seed=0):
+        """scansA: [(down_canon, T_common_from_scan)], downB — канон. система B."""
+        import open3d as o3d
+        rng = np.random.default_rng(seed)
+        pick = lambda P, k: P if len(P) <= k else P[rng.choice(len(P), k, replace=False)]
+        self.B = pick(downB, n_probe)
+        allA = np.vstack([transform(d, T) for d, T in scansA])
+        self.pcdA = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(allA)).voxel_down_sample(0.05)
+        self.A = pick(np.asarray(self.pcdA.points), n_probe)
+        self.ris = [(RangeImage(d), np.linalg.inv(T)) for d, T in scansA]
+        self.riB = RangeImage(downB)
+
+    def score(self, T):
+        import open3d as o3d
+        PB = transform(self.B, T)
+        d = np.asarray(o3d.geometry.PointCloud(
+            o3d.utility.Vector3dVector(PB)).compute_point_cloud_distance(self.pcdA))
+        n_close = int((d < self.CLOSE_DIST).sum())
+        vA = max(ri.violations(transform(PB, Ti)) for ri, Ti in self.ris)
+        vB = self.riB.violations(transform(self.A, np.linalg.inv(T)))
+        viol = 0.5 * (vA + vB)
+        return n_close / len(PB) - self.VIOL_WEIGHT * viol, n_close, viol
+
+
+# ── пара проёмов (окно изнутри ↔ окно снаружи) ─────────────────────────────
+def pose_from_opening_pair(cA, nA, cB, nB, delta, same_side=False):
+    """
+    Поза B→A (канон. системы, только yaw + сдвиг) по паре проёмов.
+    nA, nB — нормали стен, направленные к своим сканерам. Если проём виден с
+    разных сторон стены (изнутри / снаружи), нормали после поворота
+    противоположны, а центры разнесены на толщину стены delta вдоль −nA.
+    same_side=True — оба скана видят проём с одной стороны (delta игнорируется).
+    """
+    nA, nB = np.asarray(nA, float), np.asarray(nB, float)
+    target = nA if same_side else -nA
+    yaw = np.arctan2(target[1], target[0]) - np.arctan2(nB[1], nB[0])
+    R = rot_z(yaw)
+    shift = 0.0 if same_side else delta
+    t = np.asarray(cA) - shift * nA - R @ np.asarray(cB)
+    return make_T(R, t)
+
+
+def search_opening_pair(scorer, cA, nA, cB, nB, deltas=np.arange(0.15, 0.95, 0.05),
+                        same_side=False):
+    """Перебор толщины стены по согласованности. → список (score, n_close, viol, delta, T)."""
+    out = []
+    for d in (deltas if not same_side else [0.0]):
+        T = pose_from_opening_pair(cA, nA, cB, nB, d, same_side)
+        s, nc, v = scorer.score(T)
+        out.append((s, nc, v, float(d), T))
+    out.sort(key=lambda x: -x[0])
+    return out
 
 
 # ── ICP ────────────────────────────────────────────────────────────────────
-def refine_icp(ptsA, ptsB, T0, voxels=ICP_VOXELS, max_dist=ICP_MAX_DIST):
+def refine_icp(ptsA, ptsB, T0, voxels=ICP_VOXELS, max_dist=ICP_MAX_DIST, max_src=40000):
     import open3d as o3d
     reg = o3d.pipelines.registration
     A = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(ptsA))
     B = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(ptsB))
     T = T0.copy()
     res = None
+    rng = np.random.default_rng(0)
     for v, d in zip(voxels, (max_dist, max_dist / 2)):
         a, b = A.voxel_down_sample(v), B.voxel_down_sample(v)
+        if len(b.points) > max_src:              # скорость: источник прореживаем
+            b = b.select_by_index(rng.choice(len(b.points), max_src, replace=False).tolist())
         a.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=v * 3, max_nn=30))
         res = reg.registration_icp(
             b, a, d, T, reg.TransformationEstimationPointToPlane(reg.TukeyLoss(k=d / 2)),
