@@ -28,3 +28,4 @@ cloudcompare/
 
 # macOS
 .DS_Store
+*.planes.json
