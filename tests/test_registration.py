@@ -105,6 +105,11 @@ class TestSolve(unittest.TestCase):
         _, info = pr.solve_translation(cons, np.eye(3))
         self.assertEqual(len(info['weak']), 1)
         self.assertGreater(abs(info['weak'][0][0]), 0.99)   # вдоль коридора (X)
+        # с приором: вдоль коридора скан остаётся, где был; поперёк — решено
+        t, _ = pr.solve_translation(cons, np.eye(3), prior=[3.0, 9.0, 9.0])
+        self.assertAlmostEqual(t[0], 3.0, places=4)
+        self.assertAlmostEqual(t[1], 0.5, places=4)
+        self.assertAlmostEqual(t[2], 0.0, places=4)
 
 
 class TestOpeningPair(unittest.TestCase):

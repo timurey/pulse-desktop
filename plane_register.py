@@ -116,7 +116,7 @@ def yaw_candidates(PA, PB, mode='manhattan', top=4):
 
 
 # ── решение позы по ограничениям ───────────────────────────────────────────
-def solve_translation(constraints, R):
+def solve_translation(constraints, R, prior=None):
     """
     Линейный МНК для t при известном повороте R.
       ('plane', nA, cA, nB, cB, w):  n·t = cA − cB,  n = норм(nA + R nB)
@@ -138,18 +138,26 @@ def solve_translation(constraints, R):
             for i in range(3):
                 if np.linalg.norm(P[i]) > 1e-9:
                     rows.append(P[i]); rhs.append(b[i]); wts.append(w)
-    A = np.array(rows); b = np.array(rhs); W = np.array(wts)
+    A = np.array(rows).reshape(-1, 3); b = np.array(rhs); W = np.array(wts)
     N = A.T @ (A * W[:, None])
     eig, vec = np.linalg.eigh(N)
     scale = max(eig[-1], 1e-12)
     weak = [vec[:, i].tolist() for i in range(3) if eig[i] < 1e-3 * scale]
-    t = np.linalg.lstsq(A * np.sqrt(W)[:, None], b * np.sqrt(W), rcond=None)[0]
+    if prior is not None:
+        # слабое притяжение к начальному сдвигу: определённые направления решают
+        # ограничения, неопределённые остаются там, где скан поставил пользователь
+        A2 = np.vstack([A, np.eye(3)])
+        b2 = np.concatenate([b, np.asarray(prior, float)])
+        W2 = np.concatenate([W, np.full(3, 1e-6 * max(scale, 1.0))])
+    else:
+        A2, b2, W2 = A, b, W
+    t = np.linalg.lstsq(A2 * np.sqrt(W2)[:, None], b2 * np.sqrt(W2), rcond=None)[0]
     resid = A @ t - b
     return t, {'eig': eig.tolist(), 'weak': weak,
                'rms': float(np.sqrt(np.mean(resid ** 2))) if len(resid) else 0.0}
 
 
-def solve_pose(pairs_planes, pairs_points=(), yaw=None):
+def solve_pose(pairs_planes, pairs_points=(), yaw=None, T_init=None):
     """
     Поза B→A по ручным парам.
       pairs_planes: [(PlaneA, PlaneB), ...]
@@ -169,15 +177,18 @@ def solve_pose(pairs_planes, pairs_points=(), yaw=None):
             diffs = [np.arctan2(da[1], da[0]) - np.arctan2(db[1], db[0])]
             w = [1.0]
         if not diffs:
-            raise ValueError("Нужна хотя бы одна пара стен или две пары точек для yaw")
-        yaw = float(np.angle(np.sum(np.array(w) * np.exp(1j * np.array(diffs)))))
+            if T_init is None:
+                raise ValueError("Нужна хотя бы одна пара стен или две пары точек для yaw")
+            yaw = float(np.arctan2(T_init[1, 0], T_init[0, 0]))     # поворот не задан — как есть
+        else:
+            yaw = float(np.angle(np.sum(np.array(w) * np.exp(1j * np.array(diffs)))))
     R = rot_z(yaw)
     cons = [('plane', a.normal, a.offset, b.normal, b.offset, min(a.area, b.area))
             for a, b in pairs_planes]
     for pp in pairs_points:
         P = pp[2] if len(pp) > 2 else np.eye(3)
         cons.append(('point', pp[0], pp[1], P, 10.0))
-    t, info = solve_translation(cons, R)
+    t, info = solve_translation(cons, R, None if T_init is None else np.asarray(T_init)[:3, 3])
     info['yaw_deg'] = float(np.degrees(yaw))
     return make_T(R, t), info
 

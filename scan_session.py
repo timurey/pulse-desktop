@@ -389,7 +389,7 @@ class Session:
             P = np.array([u / np.linalg.norm(u), [0, 0, 1.0], [0, 0, 0]])
             pts.append((pr.transform(np.asarray(fa['center'])[None], Tf)[0],
                         np.asarray(fb['center']), P))
-        T, info = pr.solve_pose(cp, pts)
+        T, info = pr.solve_pose(cp, pts, T_init=T_init)
         info['method'] = 'manual'
         return T, info
 
