@@ -15,7 +15,10 @@
 Сцена рисуется в общей системе (каноническая система опорного скана, Z вверх).
 
 Usage:
-    python scan_gui.py [project.json | scan1.e57 scan2.e57 ...]
+    python scan_gui.py [project.json | scan1.e57 scan2.e57 ...] [--web]
+
+    --web — показывать окно в браузере (http://localhost:8888) вместо нативного
+            окна; нужно, если нативное окно Open3D чёрное (macOS 15 + Metal)
 """
 
 import sys
@@ -1064,6 +1067,12 @@ def _fdesc(f):
 
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
+    if '--web' in argv:
+        # окно рендерится в фоне и показывается в браузере: http://localhost:8888
+        # (обход чёрного нативного окна Open3D на macOS 15 + Metal)
+        argv = [a for a in argv if a != '--web']
+        o3d.visualization.webrtc_server.enable_webrtc()
+        print('Откройте в браузере: http://localhost:8888', flush=True)
     app = gui.Application.instance
     app.initialize()
     setup_fonts(app)
