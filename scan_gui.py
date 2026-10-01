@@ -694,7 +694,12 @@ class App:
             y = ev.y - self.sw.frame.y
 
             def on_depth(depth):
-                z = np.asarray(depth)[y, x]
+                D = np.asarray(depth)
+                # на Mac карта глубины бывает в другом разрешении, чем виджет (Retina,
+                # Open3D issue #6999) — масштабируем координаты клика
+                yi = min(D.shape[0] - 1, int(y * D.shape[0] / max(1, self.sw.frame.height)))
+                xi = min(D.shape[1] - 1, int(x * D.shape[1] / max(1, self.sw.frame.width)))
+                z = D[yi, xi]
                 if z >= 1.0:
                     self.app.post_to_main_thread(self.w, lambda: self.set_status('мимо облака'))
                     return

@@ -33,3 +33,4 @@ cloudcompare/
 *.project.json
 *.png
 screenshots/
+.venv312/
