@@ -59,8 +59,11 @@ python scan_project.py view X.project.json -o top.png       # вид сверх�
 python scan_project.py merge X.project.json -o merged.e57   # склейка в системе опорного скана
 python scan_project.py openings X.project.json              # проёмы с номерами
 python scan_project.py attach X.project.json FACADE.e57 --pair ROOM.e57:K M   # ручная привязка по паре окон
+python reflections.py scan.e57 [-o clean.ply]               # удалить зеркальные отражения (стёкла, глянцевый пол)
 python -m unittest discover -s tests -v                     # синтетические тесты (лучевая «съёмка» комнаты)
 ```
+
+**Стёкла дают зеркальные «призраки» помещений** (за окном — копия комнаты). `merge`/`view` убирают их по умолчанию через `reflections.py`. При анализе сырых сканов учитывайте, что такие точки в них есть.
 
 Внутри стыковки всё считается в «канонической» системе скана: +Z вверх, начало — сканер. Вертикаль со знаком определяется по мёртвому конусу под штативом (`planes.detect_up`). Позы в `*.project.json` переводят точки скана **в его исходной системе** в исходную систему опорного скана; исходные файлы не меняются.
 

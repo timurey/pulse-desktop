@@ -5,6 +5,7 @@
   build  — анализ сканов, автоматическая стыковка пар, отбор надёжных рёбер,
            проверка циклов, оптимизация графа поз, запись project.json
   merge  — склейка сканов в позах проекта в один .e57/.pcd/.ply
+           (по умолчанию без зеркальных отражений, см. reflections.py)
   view   — PNG «вид сверху» (для быстрой проверки без GUI)
   openings — найти проёмы во всех сканах проекта, присвоить им номера
   attach — разместить скан по паре проёмов (ручная стыковка, напр. фасад ↔ комната)
@@ -177,22 +178,26 @@ def build(scans, out, ref=None, up='auto', yaw='manhattan', reuse=None):
     return proj
 
 
-def placed_clouds(proj, voxel):
+def placed_clouds(proj, voxel, clean=True):
     import open3d as o3d
     for s in proj['scans']:
         if s['pose'] is None:
             continue
-        pts = load_points(s['path'])
+        if clean:
+            from reflections import clean_scan
+            pts, _ = clean_scan(s['path'], s.get('up', 'auto'))
+        else:
+            pts = load_points(s['path'])
         pc = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pts))
         if voxel > 0:
             pc = pc.voxel_down_sample(voxel)
         yield s, pr.transform(np.asarray(pc.points), np.array(s['pose']))
 
 
-def merge(project, out, voxel=0.02):
+def merge(project, out, voxel=0.02, clean=True):
     import open3d as o3d
     proj = json.loads(Path(project).read_text())
-    parts = [p for _, p in placed_clouds(proj, voxel)]
+    parts = [p for _, p in placed_clouds(proj, voxel, clean)]
     pts = np.vstack(parts)
     pc = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pts))
     if voxel > 0:
@@ -210,13 +215,13 @@ def merge(project, out, voxel=0.02):
     print(f"{out}: {len(pts):,} точек из {len(parts)} сканов")
 
 
-def view(project, out, px=0.05):
+def view(project, out, px=0.05, clean=True):
     """Вид сверху (в канонической системе опорного скана): цвет = скан, яркость = высота."""
     import open3d as o3d
     proj = json.loads(Path(project).read_text())
     ref = next(s for s in proj['scans'] if s['id'] == proj['frame'])
     R = up_rotation(ref['up'])
-    clouds = [(s, p @ R.T) for s, p in placed_clouds(proj, 0.05)]
+    clouds = [(s, p @ R.T) for s, p in placed_clouds(proj, 0.05, clean)]
     allp = np.vstack([p for _, p in clouds])
     lo, hi = np.percentile(allp[:, :2], 0.5, axis=0), np.percentile(allp[:, :2], 99.5, axis=0)
     W, H = (np.ceil((hi - lo) / px).astype(int) + 1)
@@ -346,10 +351,13 @@ def main():
     m.add_argument('project')
     m.add_argument('-o', '--output', default='merged.e57')
     m.add_argument('--voxel', type=float, default=0.02)
+    m.add_argument('--keep-reflections', action='store_true',
+                   help='не удалять зеркальные отражения (стёкла, глянцевый пол)')
     v = sub.add_parser('view')
     v.add_argument('project')
     v.add_argument('-o', '--output', default='top.png')
     v.add_argument('--px', type=float, default=0.05)
+    v.add_argument('--keep-reflections', action='store_true')
     o = sub.add_parser('openings')
     o.add_argument('project')
     t = sub.add_parser('attach')
@@ -364,9 +372,9 @@ def main():
     if a.cmd == 'build':
         build(a.scans, a.output, a.ref, a.up, a.yaw, a.reuse)
     elif a.cmd == 'merge':
-        merge(a.project, a.output, a.voxel)
+        merge(a.project, a.output, a.voxel, not a.keep_reflections)
     elif a.cmd == 'view':
-        view(a.project, a.output, a.px)
+        view(a.project, a.output, a.px, not a.keep_reflections)
     elif a.cmd == 'openings':
         openings_cmd(a.project)
     else:
