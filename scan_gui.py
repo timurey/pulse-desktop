@@ -3,26 +3,29 @@
 Интерактивный инструмент стыковки статических сканов (Open3D GUI).
 
 Вкладки:
-  Проект    — открыть/сохранить проект, добавить сканы, видимость, опорный скан, вид
-  Пары      — автостыковка всех пар, граф рёбер: принять / отклонить / как решит автоматика
-  Ручная    — стыковка пары: Ctrl(⌘)+клик по облакам выбирает признаки (плоскость,
+  Проект    - открыть/сохранить проект, добавить сканы, видимость, опорный скан, вид
+  Пары      - автостыковка всех пар, граф рёбер: принять / отклонить / как решит автоматика
+  Ручная    - стыковка пары: Ctrl(Cmd)+клик по облакам выбирает признаки (плоскость,
               проём, точка) поочерёдно в неподвижном и подвижном скане; «Решить»,
               ICP, подвижка кнопками, «Принять»
-  Кандидаты — автоматические гипотезы позы для трудного скана (фасад): просмотр,
+  Кандидаты - автоматические гипотезы позы для трудного скана (фасад): просмотр,
               выбор, доработка вручную
-  Чистка    — зеркальные отражения (показать/убирать), экспорт склейки
+  Чистка    - зеркальные отражения (показать/убирать), экспорт склейки
 
 Сцена рисуется в общей системе (каноническая система опорного скана, Z вверх).
 
 Usage:
     python scan_gui.py [project.json | scan1.e57 scan2.e57 ...] [--web]
 
-    --web — показывать окно в браузере (http://localhost:8888) вместо нативного
+    --web - показывать окно в браузере (http://localhost:8888) вместо нативного
             окна; нужно, если нативное окно Open3D чёрное (macOS 15 + Metal)
 """
 
+import os
 import sys
 import time
+import shutil
+import platform
 import threading
 import subprocess
 import traceback
@@ -37,33 +40,110 @@ import plane_register as pr
 gui = o3d.visualization.gui
 rendering = o3d.visualization.rendering
 
-FONT = next((p for p in ('/System/Library/Fonts/Supplemental/Arial Unicode.ttf',
-                         '/Library/Fonts/Arial Unicode.ttf') if Path(p).exists()), None)
+SYSTEM = platform.system()          # Darwin | Windows | Linux
+
+# Шрифт с кириллицей. PULSE_GUI_FONT — путь к своему .ttf, если найденный не подходит.
+FONT_CANDIDATES = {
+    'Darwin': ['/System/Library/Fonts/Supplemental/Arial Unicode.ttf',
+               '/Library/Fonts/Arial Unicode.ttf',
+               '/System/Library/Fonts/Supplemental/Arial.ttf'],
+    'Windows': [os.path.join(os.environ.get('WINDIR', r'C:\Windows'), 'Fonts', n)
+                for n in ('segoeui.ttf', 'arial.ttf', 'tahoma.ttf')],
+    'Linux': ['/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',
+              '/usr/share/fonts/dejavu/DejaVuSans.ttf',
+              '/usr/share/fonts/TTF/DejaVuSans.ttf',
+              '/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf',
+              '/usr/share/fonts/noto/NotoSans-Regular.ttf',
+              '/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf'],
+}
+
+
+def find_font():
+    env = os.environ.get('PULSE_GUI_FONT')
+    if env and Path(env).exists():
+        return env
+    for p in FONT_CANDIDATES.get(SYSTEM, []):
+        if Path(p).exists():
+            return p
+    if shutil.which('fc-match'):                         # Linux: спросить fontconfig
+        try:
+            p = subprocess.run(['fc-match', '-f', '%{file}', 'sans:lang=ru'],
+                               capture_output=True, text=True, timeout=5).stdout.strip()
+            if p and Path(p).exists():
+                return p
+        except Exception:                                # noqa: BLE001
+            pass
+    return None
+
+
+FONT = find_font()
 PANEL_W = 26          # ширина панели, em
 PICK_COLORS = [(0.9, 0.1, 0.1), (0.1, 0.6, 0.1), (0.1, 0.3, 0.9), (0.9, 0.6, 0.0),
                (0.6, 0.1, 0.8), (0.0, 0.7, 0.7), (0.5, 0.5, 0.0), (0.9, 0.3, 0.6)]
 
 
 def screen_size():
-    """Размер рабочего стола в точках (macOS), иначе 1280×800."""
+    """Размер основного экрана в логических точках; при неудаче 1280×800."""
     try:
-        out = subprocess.run(['osascript', '-e',
-                              'tell application "Finder" to get bounds of window of desktop'],
-                             capture_output=True, text=True, timeout=5).stdout
-        x0, y0, x1, y1 = (int(v) for v in out.strip().split(','))
-        return x1 - x0, y1 - y0
+        if SYSTEM == 'Darwin':
+            out = subprocess.run(['osascript', '-e',
+                                  'tell application "Finder" to get bounds of window of desktop'],
+                                 capture_output=True, text=True, timeout=5).stdout
+            x0, y0, x1, y1 = (int(v) for v in out.strip().split(','))
+            return x1 - x0, y1 - y0
+        if SYSTEM == 'Windows':
+            import ctypes
+            u = ctypes.windll.user32
+            try:
+                ctypes.windll.shcore.SetProcessDpiAwareness(0)   # логические пиксели
+            except Exception:                            # noqa: BLE001
+                pass
+            return u.GetSystemMetrics(0), u.GetSystemMetrics(1)
+        if shutil.which('xrandr'):
+            out = subprocess.run(['xrandr', '--current'], capture_output=True, text=True,
+                                 timeout=5).stdout
+            for line in out.splitlines():
+                if '*' in line:
+                    w, h = line.split()[0].split('x')
+                    return int(w), int(h)
     except Exception:                                    # noqa: BLE001
-        return 1280, 800
+        pass
+    return 1280, 800
+
+
+def capture_window(rect, path):
+    """
+    Снимок области экрана (окна) средствами ОС. Возвращает True при успехе.
+    macOS — screencapture (нужно разрешение «Запись экрана» у терминала),
+    Linux — ImageMagick import, Windows — Pillow ImageGrab (если установлен).
+    """
+    x, y, w, h = rect
+    try:
+        if SYSTEM == 'Darwin':
+            subprocess.run(['screencapture', '-x', '-R', f'{x},{y},{w},{h}', str(path)],
+                           timeout=10, check=True)
+            return True
+        if SYSTEM == 'Linux' and shutil.which('import'):
+            subprocess.run(['import', '-window', 'root', '-crop', f'{w}x{h}+{x}+{y}', str(path)],
+                           timeout=10, check=True)
+            return True
+        from PIL import ImageGrab                        # Windows (и др.), если есть Pillow
+        ImageGrab.grab(bbox=(x, y, x + w, y + h)).save(path)
+        return True
+    except Exception as e:                               # noqa: BLE001
+        print('снимок окна недоступен:', e)
+        return False
 
 
 def setup_fonts(app):
     if FONT is None:
         return
-    font = gui.FontDescription()
-    cps = list(range(0x0400, 0x0500)) + [0x00D7, 0x00B0, 0x00AB, 0x00BB, 0x2014, 0x2013,
-                                          0x2190, 0x2192, 0x2194, 0x2713, 0x2717, 0x00B7,
-                                          0x2026, 0x00B2, 0x2265, 0x2264, 0x00B1, 0x2318]
-    font.add_typeface_for_code_points(FONT, cps)
+    # Open3D: язык, отличный от известных (ja/ko/th/vi/zh), загружает диапазон
+    # «латиница + кириллица». add_typeface_for_code_points в 0.19 не работает
+    # (таблица символов уничтожается раньше построения атласа) — не использовать.
+    # В интерфейсе — только латиница/кириллица/Latin-1: стрелки, ✓ и т.п. не отрисуются.
+    font = gui.FontDescription(FONT)
+    font.add_typeface_for_language(FONT, 'ru')
     app.set_font(gui.Application.DEFAULT_FONT_ID, font)
 
 
@@ -92,8 +172,8 @@ class App:
     def _build(self):
         W, H = screen_size()
         # окно не больше экрана: если macOS ужимает окно, буфер рендера Metal остаётся
-        # прежнего размера — чёрный экран с полосами
-        self.w = self.app.create_window("Стыковка сканов — Pulse", int(W * 0.92), int(H * 0.88))
+        # прежнего размера - чёрный экран с полосами
+        self.w = self.app.create_window("Стыковка сканов - Pulse", int(W * 0.92), int(H * 0.88))
         w = self.w
         em = w.theme.font_size
         self.em = em
@@ -156,11 +236,11 @@ class App:
     # ── вкладка «Проект» ─────────────────────────────────────────────────
     def _tab_project(self):
         v = gui.Vert(0.3 * self.em)
-        v.add_child(self._row(self._btn('Открыть проект…', self.on_open),
-                              self._btn('Добавить скан…', self.on_add_scan)))
+        v.add_child(self._row(self._btn('Открыть проект...', self.on_open),
+                              self._btn('Добавить скан...', self.on_add_scan)))
         v.add_child(self._row(self._btn('Сохранить', self.on_save),
-                              self._btn('Сохранить как…', self.on_save_as)))
-        v.add_child(gui.Label('Сканы (галочка — видимость):'))
+                              self._btn('Сохранить как...', self.on_save_as)))
+        v.add_child(gui.Label('Сканы (галочка - видимость):'))
         self.scan_list = gui.WidgetProxy()          # содержимое пересоздаётся целиком
         v.add_child(self.scan_list)
         self.ref_combo = gui.Combobox()
@@ -183,7 +263,7 @@ class App:
             cb = gui.Checkbox(f"{s.id}  {'опорный' if s.id == self.s.frame else ('размещён' if s.pose is not None else 'НЕ размещён')}")
             cb.checked = s.visible
             cb.set_on_checked(lambda c, s=s: self.on_visible(s, c))
-            lab = gui.Label('■')
+            lab = gui.Label('##')
             lab.text_color = gui.Color(*s.color)
             new.add_child(self._row(lab, cb))
         self.scan_list.set_widget(new)
@@ -201,7 +281,7 @@ class App:
         self.reuse_cb.checked = True
         v.add_child(self._btn('Автостыковка всех пар', self.on_auto))
         v.add_child(self.reuse_cb)
-        v.add_child(gui.Label('✓ активно  ✗ отклонено  · неактивно\nоценка / нарушения / отрыв'))
+        v.add_child(gui.Label('+ активно  x отклонено  · неактивно\nоценка / нарушения / отрыв'))
         self.pair_list = gui.ListView()
         self.pair_list.set_max_visible_items(16)
         self.pair_list.set_on_selection_changed(self.on_pair_selected)
@@ -216,18 +296,18 @@ class App:
     def refresh_pairs(self):
         items = []
         for e in self.s.edges:
-            mark = '✓' if self.s.edge_active(e) else ('✗' if e.get('user') == 'reject' else '·')
+            mark = '+' if self.s.edge_active(e) else ('x' if e.get('user') == 'reject' else '·')
             user = {'accept': ' [принято]', 'reject': ' [отклонено]'}.get(e.get('user'), '')
             if e.get('method') == 'manual':
-                items.append(f"{mark} {_short(e['A'])}–{_short(e['B'])}  вручную ({e.get('source', '')}){user}")
+                items.append(f"{mark} {_short(e['A'])}-{_short(e['B'])}  вручную ({e.get('source', '')}){user}")
             else:
-                items.append(f"{mark} {_short(e['A'])}–{_short(e['B'])}  {e['score']:+.2f} / "
+                items.append(f"{mark} {_short(e['A'])}-{_short(e['B'])}  {e['score']:+.2f} / "
                              f"{e['violations']:.3f} / {e['margin']:.2f}{user}")
         self.pair_list.set_items(items)
         loops = self.s.loops()
         bad = [l for l in loops if not l['ok']]
         self.loops_label.text = (f"Циклов: {len(loops)}, несогласованных: {len(bad)}" +
-                                 ''.join(f"\n ✗ {'→'.join(_short(x) for x in l['loop'])}: "
+                                 ''.join(f"\n x {'->'.join(_short(x) for x in l['loop'])}: "
                                          f"{l['dt'] * 100:.1f} см {l['deg']:.2f}°" for l in bad[:5]))
 
     # ── вкладка «Ручная» ─────────────────────────────────────────────────
@@ -243,14 +323,14 @@ class App:
         for k in ('авто', 'плоскость', 'проём', 'точка'):
             self.pick_kind.add_item(k)
         v.add_child(self._row(gui.Label('Признак:'), self.pick_kind))
-        v.add_child(gui.Label('Ctrl/⌘ + клик: сначала неподвижный, затем подвижный'))
+        v.add_child(gui.Label('Ctrl/Cmd + клик: сначала неподвижный, затем подвижный'))
         self.manual_pairs = gui.ListView()
         self.manual_pairs.set_max_visible_items(6)
         v.add_child(self.manual_pairs)
         self.auto_solve = gui.Checkbox('Решать сразу при изменении пар')
         self.auto_solve.checked = True
         v.add_child(self.auto_solve)
-        v.add_child(gui.Label('Shift+тянуть — двигать подвижный, Alt(⌥)+тянуть — поворот'))
+        v.add_child(gui.Label('Shift+тянуть - сдвиг; Alt(Option)+тянуть или Shift+правая - поворот'))
         self.dof_label = gui.Label('')
         v.add_child(self.dof_label)
         v.add_child(self._row(self._btn('Удалить выбранную', self.on_manual_delete_selected),
@@ -264,11 +344,11 @@ class App:
         self.step_deg.double_value = 0.5
         v.add_child(self._row(gui.Label('Шаг, м'), self.step, gui.Label('°'), self.step_deg))
         n = self._nudge
-        v.add_child(self._row(self._btn('X−', lambda: n(dx=-1)), self._btn('X+', lambda: n(dx=1)),
-                              self._btn('Y−', lambda: n(dy=-1)), self._btn('Y+', lambda: n(dy=1)),
-                              self._btn('Z−', lambda: n(dz=-1)), self._btn('Z+', lambda: n(dz=1))))
-        v.add_child(self._row(self._btn('↺ yaw', lambda: n(dyaw=1)),
-                              self._btn('↻ yaw', lambda: n(dyaw=-1))))
+        v.add_child(self._row(self._btn('X-', lambda: n(dx=-1)), self._btn('X+', lambda: n(dx=1)),
+                              self._btn('Y-', lambda: n(dy=-1)), self._btn('Y+', lambda: n(dy=1)),
+                              self._btn('Z-', lambda: n(dz=-1)), self._btn('Z+', lambda: n(dz=1))))
+        v.add_child(self._row(self._btn('< yaw', lambda: n(dyaw=1)),
+                              self._btn('> yaw', lambda: n(dyaw=-1))))
         self.manual_score = gui.Label('')
         v.add_child(self.manual_score)
         v.add_child(self._row(self._btn('Оценить', self.on_manual_score),
@@ -321,7 +401,7 @@ class App:
         self.voxel = gui.NumberEdit(gui.NumberEdit.DOUBLE)
         self.voxel.double_value = 0.01
         v.add_child(self._row(gui.Label('Воксель, м'), self.voxel))
-        v.add_child(self._btn('Экспорт… (.e57 / .pcd / .ply)', self.on_export))
+        v.add_child(self._btn('Экспорт... (.e57 / .pcd / .ply)', self.on_export))
         return v
 
     def refresh_clean(self):
@@ -334,10 +414,10 @@ class App:
             if r['kind'] == 'window':
                 w, h = r['size']
                 lines.append(f"окно {w:.2f}×{h:.2f}: {r['match']:.2f} "
-                             f"{'ЗЕРКАЛО, −' + str(r['removed']) if r['mirror'] else '—'}")
+                             f"{'ЗЕРКАЛО, -' + str(r['removed']) if r['mirror'] else '-'}")
             else:
                 lines.append(f"пол: {r['match']:.2f} "
-                             f"{'ЗЕРКАЛО, −' + str(r['removed']) if r['mirror'] else '—'}")
+                             f"{'ЗЕРКАЛО, -' + str(r['removed']) if r['mirror'] else '-'}")
         self.clean_report.text = '\n'.join(lines) or 'отражений не найдено'
 
     # ── фоновые задачи ───────────────────────────────────────────────────
@@ -386,7 +466,7 @@ class App:
                 s.ghost_mask()
                 s._display = self.s.display_points(s)
             return True
-        self.run_bg('анализ сканов…', work, lambda _: self.after_load())
+        self.run_bg('анализ сканов...', work, lambda _: self.after_load())
 
     def after_load(self):
         self.redraw_all()
@@ -545,15 +625,15 @@ class App:
             self.refresh_scan_list()
             self.refresh_manual_combos()
             self.set_status(f'Автостыковка: размещено {len(self.s.placed())} из {len(self.s.scans)}')
-        self.run_bg('автостыковка…', work, done)
+        self.run_bg('автостыковка...', work, done)
 
     def on_pair_selected(self, value, dbl):
         i = self.pair_list.selected_index
         if 0 <= i < len(self.s.edges):
             e = self.s.edges[i]
             self.only_show({e['A'], e['B']})
-            self.set_status(f"Пара {e['A']} – {e['B']}: показаны только эти два скана "
-                            f"(«Все видимы» — вернуть)")
+            self.set_status(f"Пара {e['A']} - {e['B']}: показаны только эти два скана "
+                            f"(«Все видимы» - вернуть)")
 
     def on_pair_user(self, state):
         i = self.pair_list.selected_index
@@ -582,7 +662,7 @@ class App:
         self.redraw_all()
         self.refresh_manual()
         self.tabs.selected_tab_index = 2
-        self.set_status('Ctrl/⌘ + клик по облаку: признак в неподвижном, затем такой же в подвижном')
+        self.set_status('Ctrl/Cmd + клик по облаку: признак в неподвижном, затем такой же в подвижном')
 
     def _scan_under(self, W):
         """Какой из двух сканов ближе к точке W (общая система)."""
@@ -611,11 +691,7 @@ class App:
         out.mkdir(exist_ok=True)
         stem = out / time.strftime('shot_%Y%m%d_%H%M%S')
         f = self.w.os_frame
-        try:
-            subprocess.run(['screencapture', '-x', '-R', f'{f.x},{f.y},{f.width},{f.height}',
-                            f'{stem}_window.png'], timeout=10, check=False)
-        except Exception as e:                           # noqa: BLE001
-            print('screencapture:', e)
+        capture_window((f.x, f.y, f.width, f.height), f'{stem}_window.png')
         img = self.app.render_to_image(self.sw.scene, self.sw.frame.width, self.sw.frame.height)
         o3d.io.write_image(f'{stem}_scene.png', img)
         Path(f'{stem}_ui.txt').write_text(self.ui_state(), encoding='utf-8')
@@ -634,8 +710,8 @@ class App:
         lines += ['', f'рёбер: {len(self.s.edges)}, активных: {len(self.s.active_edges())}',
                   self.loops_label.text]
         if self.moving is not None:
-            lines += ['', f'ручная: {self.fixed.id} ← {self.moving.id}',
-                      'пары:'] + [f'  {i + 1}. {_fdesc(a)} ↔ {_fdesc(b)}' for i, (a, b) in enumerate(self.pairs)]
+            lines += ['', f'ручная: {self.fixed.id} <- {self.moving.id}',
+                      'пары:'] + [f'  {i + 1}. {_fdesc(a)} <-> {_fdesc(b)}' for i, (a, b) in enumerate(self.pairs)]
             lines += [f'степени свободы: {self.dof_label.text}', f'оценка: {self.manual_score.text}',
                       'поза подвижного (общая система):', np.array2string(self.T_moving, precision=3)]
         if self.candidates:
@@ -657,10 +733,16 @@ class App:
         t = (z0 - p0[2]) / d[2]
         return p0 + t * d
 
+    def _rotate_drag(self, ev):
+        # Alt+тянуть; на Linux Alt+тянуть часто перехватывает оконный менеджер —
+        # поэтому также Shift + правая кнопка
+        return ev.is_modifier_down(gui.KeyModifier.ALT) or (
+            ev.is_modifier_down(gui.KeyModifier.SHIFT) and ev.is_button_down(gui.MouseButton.RIGHT))
+
     def _on_drag(self, ev):
-        """Shift+тянуть — сдвиг подвижного скана в плане, Alt+тянуть — поворот вокруг вертикали."""
+        """Shift+тянуть - сдвиг подвижного скана в плане, Alt+тянуть - поворот вокруг вертикали."""
         shift = ev.is_modifier_down(gui.KeyModifier.SHIFT)
-        alt = ev.is_modifier_down(gui.KeyModifier.ALT)
+        alt = self._rotate_drag(ev)
         T = gui.MouseEvent.Type
         if ev.type == T.BUTTON_DOWN and (shift or alt):
             z0 = float(self.T_moving[2, 3])
@@ -696,7 +778,7 @@ class App:
             def on_depth(depth):
                 D = np.asarray(depth)
                 # на Mac карта глубины бывает в другом разрешении, чем виджет (Retina,
-                # Open3D issue #6999) — масштабируем координаты клика
+                # Open3D issue #6999) - масштабируем координаты клика
                 yi = min(D.shape[0] - 1, int(y * D.shape[0] / max(1, self.sw.frame.height)))
                 xi = min(D.shape[1] - 1, int(x * D.shape[1] / max(1, self.sw.frame.width)))
                 z = D[yi, xi]
@@ -727,7 +809,7 @@ class App:
         if scan is self.fixed:
             self.pending = f
             self._draw_feature(f, self.s.Tc(self.fixed), color, f'pick:{k}:A')
-            self.set_status(f'неподвижный: {_fdesc(f)} — теперь такой же признак в подвижном')
+            self.set_status(f'неподвижный: {_fdesc(f)} - теперь такой же признак в подвижном')
         else:
             if self.pending is None:
                 self.set_status('сначала выберите признак в неподвижном скане')
@@ -739,7 +821,7 @@ class App:
             self.pairs.append((self.pending, f))
             self._draw_feature(f, self.T_moving, color, f'pick:{k}:B', moving=True)
             self.pending = None
-            self.set_status(f'пара {k + 1}: {_fdesc(self.pairs[-1][0])} ↔ {_fdesc(f)}')
+            self.set_status(f'пара {k + 1}: {_fdesc(self.pairs[-1][0])} <-> {_fdesc(f)}')
             self._pairs_changed()
             return f
         self.refresh_manual()
@@ -838,9 +920,9 @@ class App:
         self._pairs_changed()
 
     def refresh_manual(self):
-        self.manual_pairs.set_items([f'{i + 1}. {_fdesc(a)} ↔ {_fdesc(b)}'
+        self.manual_pairs.set_items([f'{i + 1}. {_fdesc(a)} <-> {_fdesc(b)}'
                                      for i, (a, b) in enumerate(self.pairs)] +
-                                    ([f'… {_fdesc(self.pending)} ↔ ?'] if self.pending else []))
+                                    ([f'... {_fdesc(self.pending)} <-> ?'] if self.pending else []))
         if self.fixed is not None:
             self.dof_label.text = self.s.dof_status(self.fixed, self.moving, self.pairs)['text']
 
@@ -875,14 +957,14 @@ class App:
             self._update_moving()
             extra = ''
             if info.get('weak'):
-                extra = ' — есть неопределённые направления, уточните ICP или добавьте пару'
+                extra = ' - есть неопределённые направления, уточните ICP или добавьте пару'
             if info.get('method') == 'opening':
                 side = ('с одной стороны стены' if info['same_side']
                         else f"сквозь стену, толщина {info['delta']:.2f} м")
-                extra = f" — проём {side}, нарушений {info['violations']:.3f}"
+                extra = f" - проём {side}, нарушений {info['violations']:.3f}"
             self.set_status(f"решено: yaw {np.degrees(np.arctan2(T[1, 0], T[0, 0])):.1f}°{extra}")
             self.live_score()
-        self.run_bg('решение позы…', work, done)
+        self.run_bg('решение позы...', work, done)
 
     def on_manual_icp(self):
         if self.moving is None:
@@ -901,7 +983,7 @@ class App:
             self.set_status(f"ICP: fitness {info['fitness']:.2f}, rmse {info['rmse'] * 100:.1f} см, "
                             f"сдвиг {dt * 100:.1f} см {da:.2f}°")
             self.live_score()
-        self.run_bg('ICP…', work, done)
+        self.run_bg('ICP...', work, done)
 
     def _nudge(self, dx=0, dy=0, dz=0, dyaw=0):
         if self.moving is None:
@@ -915,7 +997,7 @@ class App:
         if self.moving is None:
             return
         moving, T = self.moving, self.T_moving
-        self.run_bg('оценка…', lambda p: self.s.score_pose(moving, T),
+        self.run_bg('оценка...', lambda p: self.s.score_pose(moving, T),
                     lambda r: setattr(self.manual_score, 'text',
                                       'нет других размещённых сканов' if r is None else
                                       f"оценка {r['score']:+.3f}, совпало {r['n_close']}, "
@@ -933,7 +1015,7 @@ class App:
         def done(_):
             self.on_manual_cancel()
             self.set_status(f'{moving.id}: поза принята (ручное ребро к {fixed.id})')
-        self.run_bg('пересчёт графа…', work, done)
+        self.run_bg('пересчёт графа...', work, done)
 
     def on_manual_cancel(self):
         self.moving = self.fixed = None
@@ -956,8 +1038,8 @@ class App:
             self.cand_list.set_items([
                 f"{x['score']:+.3f} / {x['n_close']} / {x['violations']:.3f} / {x['method']}"
                 for x in c])
-            self.set_status(f'кандидатов: {len(c)} — выберите, чтобы посмотреть')
-        self.run_bg('поиск кандидатов…', lambda p: self.s.candidates(s, p), done)
+            self.set_status(f'кандидатов: {len(c)} - выберите, чтобы посмотреть')
+        self.run_bg('поиск кандидатов...', lambda p: self.s.candidates(s, p), done)
 
     def on_cand_selected(self, value, dbl):
         i = self.cand_list.selected_index
@@ -989,7 +1071,7 @@ class App:
             self.refresh_scan_list()
             self.refresh_manual_combos()
             self.set_status(f'{s.id}: кандидат принят')
-        self.run_bg('пересчёт графа…', work, done)
+        self.run_bg('пересчёт графа...', work, done)
 
     def on_cand_manual(self):
         i = self.cand_list.selected_index
@@ -1036,7 +1118,7 @@ class App:
         voxel = self.voxel.double_value
 
         def go(path):
-            self.run_bg('экспорт…', lambda p: self.s.export(path, voxel, p),
+            self.run_bg('экспорт...', lambda p: self.s.export(path, voxel, p),
                         lambda n: self.set_status(f'Экспорт: {path} ({n:,} точек)'))
         self._file_dialog(gui.FileDialog.SAVE, 'Экспорт склейки',
                           [('.e57', 'E57'), ('.pcd', 'PCD'), ('.ply', 'PLY')], go)
@@ -1045,16 +1127,16 @@ class App:
 def _incompatible(fa, fb):
     """Причина, по которой признаки нельзя сопоставить, или None."""
     if fa['type'] != fb['type'] and 'point' not in (fa['type'], fb['type']):
-        return f"{_fdesc(fa)} и {_fdesc(fb)} — разные типы признаков"
+        return f"{_fdesc(fa)} и {_fdesc(fb)} - разные типы признаков"
     if fa['type'] == 'plane' and fb['type'] == 'plane':
         ka, kb = fa.get('kind'), fb.get('kind')
         if ka != kb:
-            return f"{_fdesc(fa)} ↔ {_fdesc(fb)}: разные виды плоскостей"
+            return f"{_fdesc(fa)} <-> {_fdesc(fb)}: разные виды плоскостей"
     return None
 
 
 def _short(sid):
-    """static_20260922_231157.e57 → 231157"""
+    """static_20260922_231157.e57 -> 231157"""
     stem = Path(sid).stem
     return stem.split('_')[-1] if '_' in stem else stem
 
@@ -1071,7 +1153,14 @@ def _fdesc(f):
 
 
 def main(argv=None):
+    for stream in (sys.stdout, sys.stderr):              # русский текст в консоли Windows
+        try:
+            stream.reconfigure(encoding='utf-8', errors='replace')
+        except Exception:                                # noqa: BLE001
+            pass
     argv = sys.argv[1:] if argv is None else argv
+    if FONT is None:
+        print('Не найден шрифт с кириллицей: укажите PULSE_GUI_FONT=/путь/к/шрифту.ttf')
     if '--web' in argv:
         # окно рендерится в фоне и показывается в браузере: http://localhost:8888
         # (обход чёрного нативного окна Open3D на macOS 15 + Metal)

@@ -33,11 +33,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Окружение
 
 ```bash
-source .venv/bin/activate      # venv на Python 3.14
-pip install -r requirements.txt
+.venv312/bin/python ...        # Python 3.12 + Open3D 0.19.0 — основное окружение (GUI работает)
+.venv/bin/python ...           # Python 3.14 + Open3D 0.20 — CLI работает, но окно GUI чёрное
 ```
 
-В venv стоит Open3D 0.20, он работает на Python 3.14. Утверждение README, что Open3D не поддерживает 3.13+, устарело. Без Open3D работают `offline_deskew.py` и `world_map.py`. Тестов, линтера и сборки нет. Изменения проверяют прогоном на реальном bag из `../bags/` (имена `static_YYYYMMDD_HHMMSS/`) и визуально, во `flythrough.py` или CloudCompare.
+**Open3D закреплён на 0.19.0** (`requirements.txt`): в 0.20 нативное окно и режим `--web` показывают чёрный экран с артефактами на macOS 15.5 + Metal (M1 Max). При этом `render_to_image` работает — вероятно, из-за нового вывода SceneWidget через текстуру (см. Open3D #7446). Колёса 0.19.0 есть только для Python ≤3.12.
+
+**Целевые платформы — macOS, Windows, Linux.** Не используйте платформенно-зависимые вызовы без ветвления по `platform.system()` (см. `scan_gui.screen_size`, `capture_window`, `find_font`). Файлы читайте и пишите с `encoding='utf-8'`. В проектах храните пути относительно файла проекта (`scan_project.rel_path` / `abs_path`). CI: `.github/workflows/tests.yml` запускает тесты на трёх ОС.
+
+**Шрифт GUI.** В Open3D 0.19 `add_typeface_for_code_points` не работает (выводит «?»). Кириллица подключается через `add_typeface_for_language(path, 'ru')`: любой «неизвестный» код языка даёт диапазон латиница + кириллица. Символы вне него (стрелки, ✓, ⌘, длинное тире) не отрисуются, поэтому в текстах интерфейса их не используйте. Без Open3D работают `offline_deskew.py` и `world_map.py`. Тестов, линтера и сборки нет. Изменения проверяют прогоном на реальном bag из `../bags/` (имена `static_YYYYMMDD_HHMMSS/`) и визуально, во `flythrough.py` или CloudCompare.
 
 ## Команды
 

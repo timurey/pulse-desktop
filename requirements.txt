@@ -1,5 +1,7 @@
 numpy>=1.25
-open3d>=0.17
+# Open3D 0.19.0: в 0.20 нативное окно GUI (scan_gui.py) чёрное на macOS 15 + Metal.
+# Колёса 0.19.0 есть для Python 3.10–3.12 на macOS / Windows / Linux.
+open3d==0.19.0
 mcap>=1.1
 mcap-ros2-support>=0.4
 pye57>=0.4

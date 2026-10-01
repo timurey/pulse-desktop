@@ -203,7 +203,7 @@ def main():
             print(f"   стена {o.wall_id:3d} {o.kind:6s} {o.width:.2f}×{o.height:.2f} м  "
                   f"низ {sill} м  центр {np.round(o.center, 2)}  сквозь {o.through:.2f}")
         out = Path(s).with_suffix('.openings.json')
-        out.write_text(json.dumps([o.to_json() for o in ops], indent=1, ensure_ascii=False))
+        out.write_text(json.dumps([o.to_json() for o in ops], indent=1, ensure_ascii=False), encoding="utf-8")
 
 
 if __name__ == '__main__':

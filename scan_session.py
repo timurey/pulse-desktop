@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Сеанс стыковки статических сканов — логика интерактивного инструмента (scan_gui.py)
+Сеанс стыковки статических сканов - логика интерактивного инструмента (scan_gui.py)
 без зависимости от окна: её можно тестировать и вызывать из скриптов.
 
 Системы координат:
-  - исходная система скана (как в файле; у экспорта HMI «вверх» = −Z);
-  - каноническая система скана (planes.py): +Z вверх, начало — сканер;
+  - исходная система скана (как в файле; у экспорта HMI «вверх» = -Z);
+  - каноническая система скана (planes.py): +Z вверх, начало - сканер;
   - ОБЩАЯ система сеанса = каноническая система опорного скана. В ней
-    рисуется сцена, выбираются точки и хранятся позы `Tc` (канон. скана → общая).
-  - в project.json, как и раньше, `pose` — исходная скана → исходная опорного.
+    рисуется сцена, выбираются точки и хранятся позы `Tc` (канон. скана -> общая).
+  - в project.json, как и раньше, `pose` - исходная скана -> исходная опорного.
 
 Рёбра графа: автоматические пары (plane_register.register_pair) и ручные
 (ручная стыковка, принятый кандидат). Пользователь может принудительно
@@ -47,7 +47,7 @@ class Scan:
         self.path = str(Path(path).resolve())
         self.id = sid or Path(path).name
         self.up = up
-        self.pose = None if pose is None else np.asarray(pose, float)   # исходная → исходная опорного
+        self.pose = None if pose is None else np.asarray(pose, float)   # исходная -> исходная опорного
         self.visible = True
         self.clean = True            # убирать отражения
         self.color = PALETTE[0]
@@ -56,7 +56,7 @@ class Scan:
         self._reflect_report = None
         self._openings = None
 
-    # анализ — лениво и один раз
+    # анализ - лениво и один раз
     @property
     def res(self):
         if self._res is None:
@@ -113,7 +113,7 @@ class Session:
     @classmethod
     def from_project(cls, path):
         s = cls()
-        proj = json.loads(Path(path).read_text())
+        proj = sp.load_project(path)
         for e in proj['scans']:
             sc = Scan(e['path'], e.get('up', 'auto'), e.get('pose'), e['id'])
             sc.clean = e.get('clean', True)
@@ -150,7 +150,7 @@ class Session:
                 'scans': [s.to_json() for s in self.scans],
                 'pairs': [_jsonable(e) for e in auto],
                 'manual_edges': [_jsonable(e) for e in manual]}
-        Path(path).write_text(json.dumps(proj, indent=1, ensure_ascii=False))
+        sp.save_project(proj, path)
         self.project_path = str(path)
         return path
 
@@ -167,7 +167,7 @@ class Session:
 
     # ── системы координат ────────────────────────────────────────────────
     def Tc(self, scan):
-        """Канон. система скана → общая. None, если скан не размещён."""
+        """Канон. система скана -> общая. None, если скан не размещён."""
         if scan.pose is None:
             return None
         return homog(self.ref.R_up) @ scan.pose @ homog(scan.R_up).T
@@ -179,7 +179,7 @@ class Session:
         return [s for s in self.scans if s.pose is not None]
 
     def display_points(self, scan, voxel=DISPLAY_VOXEL):
-        """Точки скана для показа, в его канонической системе (поза — отдельно)."""
+        """Точки скана для показа, в его канонической системе (поза - отдельно)."""
         import open3d as o3d
         pc = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(scan.down))
         if voxel > (scan.res['voxel'] or 0):
@@ -196,7 +196,7 @@ class Session:
         edges = []
         for i, (a, b) in enumerate(combos):
             if progress:
-                progress(i / max(1, len(combos)), f"стыковка {a} ← {b}")
+                progress(i / max(1, len(combos)), f"стыковка {a} <- {b}")
             if reuse and (a, b) in old and 'T_canon' in old[(a, b)]:
                 e = dict(old[(a, b)])
             else:
@@ -273,7 +273,7 @@ class Session:
         Признак скана под точкой p (канон. система скана):
           проём (если точка внутри прямоугольника проёма ±10 см),
           иначе плоскость (точка ближе max_plane_dist и рядом с её инлайерами),
-          иначе — сама точка.
+          иначе - сама точка.
         """
         p = np.asarray(p_canon, float)
         if kind in ('auto', 'opening'):
@@ -312,7 +312,7 @@ class Session:
         return {'type': 'point', 'scan': scan.id, 'p': p.tolist()}
 
     def manual_constraints(self, fixed, moving, pairs, T_fixed=None):
-        """Пары признаков → ограничения в общей системе (A = fixed в общей, B = moving канон.)."""
+        """Пары признаков -> ограничения в общей системе (A = fixed в общей, B = moving канон.)."""
         Tf = self.Tc(fixed) if T_fixed is None else T_fixed
         Rf = Tf[:3, :3]
         cons_planes, cons_points, walls = [], [], []
@@ -361,13 +361,13 @@ class Session:
         return {'z': z, 'yaw': yaw, 'xy_rank': rank, 'text': txt}
 
     def solve_manual(self, fixed, moving, pairs, T_init=None):
-        """Поза moving (канон. → общая) по выбранным парам. → (Tc, info)."""
+        """Поза moving (канон. -> общая) по выбранным парам. -> (Tc, info)."""
         Tf, cp, cpt, walls = self.manual_constraints(fixed, moving, pairs)
         if walls and not cp and not cpt:
-            # только проёмы: первый задаёт позу, толщина стены — перебором
+            # только проёмы: первый задаёт позу, толщина стены - перебором
             # только проёмы: первый задаёт позу. Видят ли сканы проём с одной стороны
-            # стены (две комнаты) или с разных (комната ↔ фасад) — пробуем оба варианта,
-            # толщину стены — перебором; лучший по согласованности.
+            # стены (две комнаты) или с разных (комната <-> фасад) - пробуем оба варианта,
+            # толщину стены - перебором; лучший по согласованности.
             fa, fb = walls[0]
             cA = pr.transform(np.asarray(fa['center'])[None], Tf)[0]
             nA = Tf[:3, :3] @ np.asarray(fa['normal'])
@@ -394,7 +394,7 @@ class Session:
         return T, info
 
     def refine_icp(self, fixed_list, moving, T):
-        """ICP moving → объединение fixed_list (все в общей системе)."""
+        """ICP moving -> объединение fixed_list (все в общей системе)."""
         A = np.vstack([pr.transform(s.down, self.Tc(s)) for s in fixed_list])
         T2, fit, rmse = pr.refine_icp(A, moving.down, np.asarray(T))
         return T2, {'fitness': fit, 'rmse': rmse, 'shift': pr.pose_delta(T, T2)}
@@ -424,7 +424,7 @@ class Session:
         """
         anchor = anchor or self.ref
         TA = self.Tc(anchor)
-        T_canon = np.linalg.inv(TA) @ np.asarray(Tc)          # канон. moving → канон. anchor
+        T_canon = np.linalg.inv(TA) @ np.asarray(Tc)          # канон. moving -> канон. anchor
         self.edges = [e for e in self.edges if not (e.get('method') == 'manual' and
                                                      {e['A'], e['B']} == {anchor.id, moving.id})]
         e = {'A': anchor.id, 'B': moving.id, 'T_canon': T_canon.tolist(), 'method': 'manual',
@@ -440,7 +440,7 @@ class Session:
         """
         Гипотезы позы для moving относительно уже размещённых сканов:
           1) автоматическая стыковка с каждым размещённым сканом (по плоскостям);
-          2) по «уличным» точкам — что размещённые сканы видели сквозь проёмы
+          2) по «уличным» точкам - что размещённые сканы видели сквозь проёмы
              (для фасадов).
         Все гипотезы оцениваются одинаково (MultiScanScorer) и сортируются.
         """
@@ -450,10 +450,10 @@ class Session:
         out = []
         for i, s in enumerate(placed):
             if progress:
-                progress(i / (len(placed) + 1), f"плоскости: {moving.id} → {s.id}")
+                progress(i / (len(placed) + 1), f"плоскости: {moving.id} -> {s.id}")
             r = pr.register_pair(_clean_res(s), _clean_res(moving), 'manhattan', top=3,
                                  verbose=False)
-            out.append({'Tc': self.Tc(s) @ np.asarray(r['T_canon']), 'method': f'плоскости ↔ {s.id}',
+            out.append({'Tc': self.Tc(s) @ np.asarray(r['T_canon']), 'method': f'плоскости <-> {s.id}',
                         'pair_score': r['score']})
         if progress:
             progress(len(placed) / (len(placed) + 1), "уличные точки сквозь проёмы")
@@ -483,7 +483,7 @@ class Session:
                 n = np.asarray(o.normal)
                 c = float(n @ np.asarray(o.corners)[0])
                 m = reflections._through_aperture(down, n, c, o.corners) & ~ghost
-                # сквозь проём, но далеко от остальных размещённых сканов — «улица»
+                # сквозь проём, но далеко от остальных размещённых сканов - «улица»
                 if m.sum() > 200:
                     pts.append(pr.transform(down[m], self.Tc(s)))
         return np.vstack(pts) if pts else np.zeros((0, 3))

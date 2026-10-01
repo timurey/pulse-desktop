@@ -304,7 +304,7 @@ def analyze_scan(path, up='auto', voxel=VOXEL, cache=True):
         out = path.with_suffix('.planes.json')
         js = {k: v for k, v in res.items() if k not in ('planes', 'down')}
         js['planes'] = [p.to_json() for p in planes]
-        out.write_text(json.dumps(js, indent=1, ensure_ascii=False))
+        out.write_text(json.dumps(js, indent=1, ensure_ascii=False), encoding="utf-8")
         res['cache'] = str(out)
     return res
 

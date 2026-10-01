@@ -34,6 +34,38 @@ from planes import analyze_scan, load_points, up_rotation
 import plane_register as pr
 
 
+def rel_path(path, project_file):
+    """Путь скана для project.json: относительно папки проекта (переносимо между
+    машинами и ОС), иначе абсолютный (другой диск в Windows)."""
+    import os
+    p = Path(path).resolve()
+    base = Path(project_file).resolve().parent
+    try:
+        return Path(os.path.relpath(p, base)).as_posix()
+    except ValueError:
+        return str(p)
+
+
+def abs_path(path, project_file):
+    p = Path(path)
+    return str(p if p.is_absolute() else (Path(project_file).resolve().parent / p).resolve())
+
+
+def load_project(project_file):
+    """project.json с путями сканов, приведёнными к абсолютным."""
+    proj = json.loads(Path(project_file).read_text(encoding='utf-8'))
+    for e in proj['scans']:
+        e['path'] = abs_path(e['path'], project_file)
+    return proj
+
+
+def save_project(proj, project_file):
+    out = json.loads(json.dumps(proj))
+    for e in out['scans']:
+        e['path'] = rel_path(e['path'], project_file)
+    Path(project_file).write_text(json.dumps(out, indent=1, ensure_ascii=False), encoding='utf-8')
+
+
 # пороги надёжного ребра
 EDGE_MIN_SCORE  = 0.05
 EDGE_MAX_VIOL   = 0.02
@@ -127,7 +159,7 @@ def build(scans, out, ref=None, up='auto', yaw='manhattan', reuse=None):
     # пары из прошлого проекта (те же сканы) — без повторной стыковки
     cached = {}
     if reuse:
-        for p in json.loads(Path(reuse).read_text())['pairs']:
+        for p in json.loads(Path(reuse).read_text(encoding='utf-8'))['pairs']:
             if 'T_canon' in p:
                 cached[(p['A'], p['B'])] = p
     pairs = []
@@ -171,7 +203,7 @@ def build(scans, out, ref=None, up='auto', yaw='manhattan', reuse=None):
             entry['pose'] = None                  # не связан с ref — нужна ручная стыковка
         proj['scans'].append(entry)
     proj['pairs'] = pairs
-    Path(out).write_text(json.dumps(proj, indent=1, ensure_ascii=False))
+    save_project(proj, out)
     placed = sum(1 for s in proj['scans'] if s['pose'] is not None)
     print(f"\nОпорный скан: {ref}. Размещено {placed}/{len(names)}, рёбер {len(edges)}, "
           f"несогласованных циклов {len(bad)}. → {out}  ({time.time() - t0:.0f} c)")
@@ -196,7 +228,7 @@ def placed_clouds(proj, voxel, clean=True):
 
 def merge(project, out, voxel=0.02, clean=True):
     import open3d as o3d
-    proj = json.loads(Path(project).read_text())
+    proj = load_project(project)
     parts = [p for _, p in placed_clouds(proj, voxel, clean)]
     pts = np.vstack(parts)
     pc = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pts))
@@ -218,7 +250,7 @@ def merge(project, out, voxel=0.02, clean=True):
 def view(project, out, px=0.05, clean=True):
     """Вид сверху (в канонической системе опорного скана): цвет = скан, яркость = высота."""
     import open3d as o3d
-    proj = json.loads(Path(project).read_text())
+    proj = load_project(project)
     ref = next(s for s in proj['scans'] if s['id'] == proj['frame'])
     R = up_rotation(ref['up'])
     clouds = [(s, p @ R.T) for s, p in placed_clouds(proj, 0.05, clean)]
@@ -261,7 +293,7 @@ def _T_common(proj, entry, res):
 def openings_cmd(project):
     """Находит проёмы во всех сканах проекта и сохраняет их с номерами."""
     from openings import find_openings
-    proj = json.loads(Path(project).read_text())
+    proj = load_project(project)
     for e in proj['scans']:
         res = _scan_res(e)
         ops = find_openings(res)
@@ -275,7 +307,7 @@ def openings_cmd(project):
             sill = f"{o.sill:.2f}" if o.sill is not None else '—'
             print(f"   [{k:2d}] {o.kind:6s} {o.width:.2f}×{o.height:.2f} м  низ {sill} м  "
                   f"центр {np.round(c, 2)}{' (в системе проекта)' if e['pose'] is not None else ''}")
-    Path(project).write_text(json.dumps(proj, indent=1, ensure_ascii=False))
+    save_project(proj, project)
 
 
 def attach(project, scan, pair, delta='auto', same_side=False):
@@ -284,7 +316,7 @@ def attach(project, scan, pair, delta='auto', same_side=False):
     скана A ↔ проём m скана scan. Толщина стены — перебором (delta='auto') или
     заданная. Результат проверяется по свободному пространству всех размещённых сканов.
     """
-    proj = json.loads(Path(project).read_text())
+    proj = load_project(project)
     byid = {e['id']: e for e in proj['scans']}
     name = Path(scan).name
     if name not in byid:
@@ -331,7 +363,7 @@ def attach(project, scan, pair, delta='auto', same_side=False):
     eB['pose'] = T.tolist()
     eB['method'] = {'opening_pair': [a_id, k, m], 'delta': d, 'score': s,
                     'n_close': nclose, 'violations': viol}
-    Path(project).write_text(json.dumps(proj, indent=1, ensure_ascii=False))
+    save_project(proj, project)
     print(f"   принято δ={d:.2f} м → {project}")
     if viol > EDGE_MAX_VIOL:
         print(f"   ВНИМАНИЕ: нарушений {viol:.3f} > {EDGE_MAX_VIOL} — пара проёмов, вероятно, неверна")

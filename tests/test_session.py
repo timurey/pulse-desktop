@@ -115,6 +115,20 @@ class TestSession(unittest.TestCase):
         dt, da = pr.pose_delta(Tc, T2)
         self.assertAlmostEqual(da, 5, places=6)
 
+    def test_project_portable(self):
+        """Пути сканов в проекте относительные: папку можно перенести (другая машина/ОС)."""
+        import shutil
+        src = Path(tempfile.mkdtemp()) / 'proj'
+        shutil.copytree(self.tmp, src)
+        s = Session.from_scans([str(src / n) for n in POSES])
+        s.save(src / 'p.json')
+        raw = json.loads((src / 'p.json').read_text(encoding='utf-8'))
+        self.assertEqual(raw['scans'][0]['path'], 'A.ply')
+        dst = Path(tempfile.mkdtemp()) / 'moved'
+        shutil.move(str(src), dst)
+        s2 = Session.from_project(dst / 'p.json')
+        self.assertTrue(all(Path(sc.path).exists() for sc in s2.scans))
+
     def test_export(self):
         s = Session.from_scans(self.paths)
         s.run_auto()

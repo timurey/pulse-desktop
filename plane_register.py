@@ -541,9 +541,9 @@ def main():
     print(f"{resA['scan']} ← {resB['scan']}")
     r = register_pair(resA, resB, args.yaw, args.top, not args.no_icp)
     print(json.dumps({k: v for k, v in r.items() if k not in ('T', 'T_canon')},
-                     indent=1, ensure_ascii=False))
+                     indent=1, ensure_ascii=False), encoding="utf-8")
     if args.output:
-        Path(args.output).write_text(json.dumps(r, indent=1, ensure_ascii=False))
+        Path(args.output).write_text(json.dumps(r, indent=1, ensure_ascii=False), encoding="utf-8")
 
 
 if __name__ == '__main__':

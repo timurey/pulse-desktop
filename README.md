@@ -16,6 +16,44 @@ The pipeline has three stages:
 
 
 
+## Интерактивная стыковка статических сканов (macOS / Windows / Linux)
+
+`scan_gui.py` — окно для стыковки статических сканов: автоматическая стыковка пар, ручная правка (выбор плоскостей, проёмов, точек мышью; сдвиг и поворот перетаскиванием), кандидаты для трудных сканов (фасады), удаление зеркальных отражений стёкол, экспорт склейки. Подробности — `docs/plan_plane_registration.md`.
+
+### Установка
+
+Нужен **Python 3.10–3.12**: для 3.13+ нет колёс Open3D 0.19.0. Open3D закреплён на **0.19.0**, потому что в 0.20 нативное окно чёрное на macOS 15.
+
+```bash
+# macOS / Linux
+python3.12 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+
+# Windows (PowerShell)
+py -3.12 -m venv .venv
+.venv\Scripts\pip install -r requirements.txt
+```
+
+**Linux**: нужны OpenGL-библиотеки и шрифт с кириллицей. Debian/Ubuntu: `sudo apt install libgl1 libgomp1 fonts-dejavu-core`.
+
+### Запуск
+
+```bash
+.venv/bin/python scan_gui.py static_20260922.project.json     # Windows: .venv\Scripts\python ...
+.venv/bin/python scan_gui.py scan1.e57 scan2.e57 scan3.e57      # новый проект из сканов
+```
+
+- **Шрифт.** Шрифт с кириллицей ищется автоматически: Arial на macOS, Segoe UI или Arial на Windows, DejaVu или Noto на Linux. Свой шрифт задаётся так: `PULSE_GUI_FONT=/путь/к/шрифту.ttf`.
+- **Чёрное окно.** Если окно всё равно чёрное, есть вариант `--web`: окно открывается в браузере по адресу http://localhost:8888.
+- **Скриншот.** F12 сохраняет в `screenshots/` рендер сцены, текстовое состояние окна и снимок окна. Снимок окна работает на macOS, если у терминала есть разрешение «Запись экрана»; на Linux, если установлен ImageMagick; на Windows, если установлен Pillow.
+- **Пути в проекте.** Пути к сканам в `*.project.json` хранятся относительно файла проекта, поэтому папку можно переносить между машинами и ОС.
+
+| Действие | Как |
+|---|---|
+| выбрать признак (плоскость / проём / точку) | Ctrl + клик (на macOS также Cmd + клик): сначала в неподвижном скане, затем в подвижном |
+| сдвинуть подвижный скан | Shift + перетаскивание |
+| повернуть вокруг вертикали | Alt (Option) + перетаскивание или Shift + правая кнопка |
+
 ## Requirements
 
 **Python 3.11 recommended** — Open3D does not support Python 3.13+.
