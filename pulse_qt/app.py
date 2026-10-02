@@ -48,9 +48,11 @@ def main(argv=None):
     app, theme = make_app()
     from .main_window import MainWindow
     win = MainWindow(session_from_args(args), theme)
-    px = QSettings('Pulse', 'PulseScan').value('point_px')
-    if px:
-        win.view.set_point_size(float(px))
+    prefs = QSettings('Pulse', 'PulseScan')
+    if prefs.value('point_px'):
+        win.set_point_size(int(float(prefs.value('point_px'))))
+    if prefs.value('parallel') in (True, 'true', '1', 1):
+        win.toggle_projection(True)
     win.show()
     code = app.exec()
     sys.stdout.flush()

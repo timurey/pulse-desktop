@@ -18,7 +18,7 @@ from pathlib import Path
 import numpy as np
 from PySide6.QtCore import Qt, QTimer, QSettings
 from PySide6.QtGui import QKeySequence, QShortcut
-from PySide6.QtWidgets import (QMainWindow, QWidget, QFrame, QHBoxLayout, QVBoxLayout, QSplitter, QLabel,
+from PySide6.QtWidgets import (QMainWindow, QWidget, QFrame, QHBoxLayout, QVBoxLayout, QSplitter, QLabel, QSlider,
                                QStackedWidget, QProgressBar, QMenu, QFileDialog, QMessageBox, QApplication,
                                QToolButton)
 
@@ -114,17 +114,36 @@ class Viewport(QWidget):
         self.tools.lay.setSpacing(2)
         self.b_fit = W.tool(t.icon('mdi6.fit-to-screen-outline'), tip='Показать всё', cb=win.fit_all,
                             icon_only=True)
-        self.b_size = W.tool(t.icon('mdi6.dots-grid'), tip='Размер точек', icon_only=True)
-        m = QMenu(self.b_size)
-        for px in (1, 2, 3, 4, 6):
-            a = m.addAction(f'{px} пикс.')
-            a.triggered.connect(lambda _=False, px=px: win.set_point_size(px))
-        self.b_size.setMenu(m)
-        self.b_size.setPopupMode(QToolButton.InstantPopup)
+        self.b_proj = W.tool(t.icon('mdi6.perspective-less', 'ink2', 'accent'),
+                             tip='Ортогональная проекция (O); выключено — перспектива',
+                             cb=win.toggle_projection, checkable=True, icon_only=True)
+        # размер точек — всегда на виду: ползунок 1…8 пикселей ([ и ] — с клавиатуры)
+        size_icon = QLabel()
+        size_icon.setPixmap(t.icon('mdi6.dots-grid', 'ink3').pixmap(16, 16))
+        size_icon.setToolTip('Размер точек')
+        self.size_slider = QSlider(Qt.Horizontal)
+        self.size_slider.setRange(1, 8)
+        self.size_slider.setFixedWidth(84)
+        self.size_slider.setValue(int(round(self.view.point_px)))
+        self.size_slider.setToolTip('Размер точек, пикс. ([ и ])')
+        self.size_slider.setFocusPolicy(Qt.NoFocus)
+        self.size_slider.valueChanged.connect(lambda v: win.set_point_size(v))
+        self.size_text = QLabel(f'{int(self.view.point_px)}')
+        self.size_text.setObjectName('GlassMono')
+        self.size_text.setFixedWidth(12)
         self.b_shot = W.tool(t.icon('mdi6.camera-outline'), tip='Скриншот (F12)', cb=win.save_screenshot,
                              icon_only=True)
-        for b in (self.b_fit, self.b_size, self.b_shot):
+
+        def vsep():
+            f = QFrame()
+            f.setObjectName('ToolSep')
+            f.setFixedSize(1, 20)
+            return f
+        for b in (self.b_fit, self.b_proj, vsep(), size_icon, self.size_slider, self.size_text, vsep(),
+                  self.b_shot):
             self.tools.lay.addWidget(b)
+        self.tools.lay.setSpacing(6)
+        self.tools.lay.setContentsMargins(6, 4, 4, 4)
         self.banner = QFrame(self)
         self.banner.setObjectName('Banner')
         bl = QHBoxLayout(self.banner)
@@ -168,13 +187,15 @@ class Viewport(QWidget):
             text, ic = 'Вид сверху · общая система · Z вверх', 'mdi6.map-outline'
         else:
             text, ic = '3D · общая система · Z вверх', 'mdi6.cube-outline'
+        if v.parallel and not v.fly:
+            text += ' · ортогональная'
         if text != self.crumb_text.text():
             self.crumb_text.setText(text)
             self.crumb_icon.setPixmap(t.icon(ic).pixmap(16, 16))
         c = v.eye() if v.fly else v.center()
         self.coord_text.setText(f'x {c[0]:.2f}   y {c[1]:.2f}   z {c[2]:.2f}')
         # масштабная линейка: метров на 56 пикселей у центра вращения
-        mpp = 2 * v.distance() * np.tan(np.radians(v.FOV / 2)) / max(1, v.height())
+        mpp = v.world_per_px()
         target = 56 * mpp
         nice = min((x for x in (0.1, 0.2, 0.5, 1, 2, 5, 10, 20, 50, 100) if x >= target * 0.6), default=100)
         px = int(np.clip(nice / max(mpp, 1e-9), 16, 120))
@@ -202,6 +223,7 @@ class MainWindow(QMainWindow):
         # ручной режим
         self.fixed = self.moving = None
         self.T_moving = None
+        self._manual_T0 = None                   # поза подвижного при входе в ручную стыковку
         self.pairs = []
         self.pending = None
         self._drag = None
@@ -470,7 +492,10 @@ class MainWindow(QMainWindow):
         for key, fn in (('Ctrl+N', self.on_new_project), ('Ctrl+O', self.on_open), ('Ctrl+S', self.on_save),
                         ('Ctrl+Shift+S', self.on_save_as), ('F12', self.save_screenshot),
                         ('Escape', self.on_escape), ('R', self.toggle_select), ('F', self.toggle_fly),
-                        ('T', self.view_top), ('Delete', self.on_erase), ('Backspace', self.on_erase),
+                        ('T', self.view_top), ('O', self.toggle_projection),
+                        ('[', lambda: self.set_point_size(self.view.point_px - 1)),
+                        (']', lambda: self.set_point_size(self.view.point_px + 1)),
+                        ('Delete', self.on_erase), ('Backspace', self.on_erase),
                         ('Ctrl+Z', self.on_undo_erase)):
             sc = QShortcut(QKeySequence(key), self)
             sc.setContext(Qt.WindowShortcut)
@@ -481,6 +506,7 @@ class MainWindow(QMainWindow):
         """Тема меняется пересборкой окна: значки рисуются цветами темы при создании."""
         R, c, d = self.view.basis(), self.view.center(), self.view.distance()
         fly = self.view.fly
+        par, px = self.view.parallel, self.view.point_px
         status = self.st_text.text()
         sizes = (self.split.sizes(), self.vsplit.sizes())
         self.theme.set(not self.theme.dark)
@@ -493,6 +519,9 @@ class MainWindow(QMainWindow):
         self.refresh_all()
         self.redraw_all()
         self.view.set_basis(R, c, d)
+        self.set_point_size(px)
+        if par:
+            self.toggle_projection(True)
         if fly:
             self.toggle_fly()
         self.set_mode(self.mode, force=True)
@@ -672,8 +701,25 @@ class MainWindow(QMainWindow):
         self.view.fit(lo, hi, R[:, 2], R[:, 1])
 
     def set_point_size(self, px):
+        px = int(np.clip(px, 1, 8))
         self.view.set_point_size(px)
         self.settings.setValue('point_px', px)
+        sl = self.vp.size_slider
+        if sl.value() != px:
+            sl.blockSignals(True)
+            sl.setValue(px)
+            sl.blockSignals(False)
+        self.vp.size_text.setText(str(px))
+
+    def toggle_projection(self, on=None):
+        on = (not self.view.parallel) if on is None else bool(on)
+        if on and self.view.fly:
+            self.toggle_fly()
+        self.view.set_parallel(on)
+        self.vp.b_proj.setChecked(on)
+        self.settings.setValue('parallel', on)
+        self.set_status('проекция: ортогональная (размеры без перспективных искажений)' if on
+                        else 'проекция: перспектива', log=False)
 
     # ── загрузка ─────────────────────────────────────────────────────────
     def load_all(self):
@@ -759,6 +805,8 @@ class MainWindow(QMainWindow):
         return str(Path(p).resolve().parent) if p else self.settings.value('last_dir', str(Path.home()))
 
     def confirm_discard(self, what='Продолжить'):
+        if not self.confirm_leave_manual(what):
+            return False
         if not self.dirty():
             return True
         r = QMessageBox.question(self, 'Несохранённые изменения',
@@ -1253,7 +1301,10 @@ class MainWindow(QMainWindow):
         if self.mode == 'clean' and mode != 'clean' and self.select_mode:
             self.toggle_select()
         if self.mode == 'manual' and mode != 'manual' and self.moving is not None and not force:
-            self.on_manual_cancel()
+            if self.on_manual_cancel() and mode != 'inspect':
+                self.set_mode(mode)
+            else:
+                self.b_clean.setChecked(self.mode == 'clean')
             return
         self.mode = mode
         self.right.setCurrentWidget({'inspect': self.inspector, 'manual': self.manual,
@@ -1367,7 +1418,14 @@ class MainWindow(QMainWindow):
     def start_manual(self, fixed_id=None, moving_id=None, T_init=None):
         """Начать ручную стыковку; по умолчанию подвижный — выбранный в дереве или неразмещённый."""
         if self.mode == 'manual' and self.moving is not None and fixed_id is None and moving_id is None:
-            return self.on_manual_cancel()
+            if not self.on_manual_cancel():
+                self.b_manual.setChecked(True)          # остались в ручной стыковке
+            return
+        if self.moving is not None and (fixed_id, moving_id) != (self.fixed.id, self.moving.id):
+            if not self.confirm_leave_manual('Перейти к другой паре сканов'):
+                self.manual.set_scans(self.manual_items(), self.fixed.id, self.moving.id)
+                self.b_manual.setChecked(True)
+                return
         s = self.s
         if moving_id is None:
             sel = s.by_id(self.tree_sel) if self.tree_sel else None
@@ -1392,6 +1450,7 @@ class MainWindow(QMainWindow):
         self.fixed, self.moving = fixed, moving
         self.T_moving = np.asarray(T_init) if T_init is not None else (
             s.Tc(moving) if moving.pose is not None else s.Tc(fixed))
+        self._manual_T0 = self.T_moving.copy()
         self.pairs, self.pending = [], None
         self.manual_score = None
         self.mode = 'inspect'
@@ -1581,14 +1640,66 @@ class MainWindow(QMainWindow):
         moving, fixed, T = self.moving, self.fixed, self.T_moving
 
         def done(_):
-            self.on_manual_cancel()
+            self.on_manual_cancel(ask=False)
             self.set_status(f'{short(moving.id)}: поза принята (ручное ребро к {short(fixed.id)})')
         self.run_bg('пересчёт графа…', lambda p: self.s.accept_pose(moving, T, anchor=fixed, method='ручная'),
                     done)
 
-    def on_manual_cancel(self):
+    def manual_dirty(self):
+        """Поза подвижного изменена после входа в ручную стыковку и не принята."""
+        return (self.moving is not None and self.T_moving is not None and self._manual_T0 is not None
+                and not np.allclose(self.T_moving, self._manual_T0, atol=1e-7))
+
+    def confirm_leave_manual(self, what='Выйти из ручной стыковки'):
+        """
+        Перед уходом из ручной стыковки с непринятой позой — вопрос пользователю.
+        True — можно уходить (поза принята или изменения отброшены), False — остаться.
+        """
+        if not self.manual_dirty():
+            return True
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle('Поза не принята')
+        box.setText(f'Поза скана {short(self.moving.id)} изменена, но не принята.')
+        box.setInformativeText(f'{what}: принять новую позу или отказаться от изменений?')
+        b_acc = box.addButton('Принять позу', QMessageBox.AcceptRole)
+        b_drop = box.addButton('Не принимать', QMessageBox.DestructiveRole)
+        b_stay = box.addButton('Остаться', QMessageBox.RejectRole)
+        box.setDefaultButton(b_acc)
+        box.setEscapeButton(b_stay)
+        box.exec()
+        if box.clickedButton() is b_acc:
+            return self._accept_now()
+        if box.clickedButton() is b_drop:
+            self.set_status(f'{short(self.moving.id)}: изменения позы не приняты')
+            return True
+        return False
+
+    def _accept_now(self):
+        """Принять позу подвижного сразу (без фоновой задачи) — перед уходом из ручной стыковки."""
+        if self.busy:
+            self.set_status('Подождите окончания текущей операции и примите позу ещё раз')
+            return False
+        moving, fixed, T = self.moving, self.fixed, self.T_moving
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            self.s.accept_pose(moving, T, anchor=fixed, method='ручная')
+        except Exception as e:                           # noqa: BLE001
+            self.set_status(f'поза не принята: {e}')
+            return False
+        finally:
+            QApplication.restoreOverrideCursor()
+        self._manual_T0 = T.copy()
+        self.set_status(f'{short(moving.id)}: поза принята (ручное ребро к {short(fixed.id)})')
+        return True
+
+    def on_manual_cancel(self, ask=True):
+        """Выйти из ручной стыковки. → False, если пользователь решил остаться."""
+        if ask and not self.confirm_leave_manual('Выйти из ручной стыковки'):
+            return False
         self.moving = self.fixed = None
         self.T_moving = None
+        self._manual_T0 = None
         self.pairs, self.pending = [], None
         self._clear_markers()
         self.mode = 'manual'
@@ -1596,6 +1707,7 @@ class MainWindow(QMainWindow):
         self.restore_visibility()
         self.redraw_all()
         self.refresh_all()
+        return True
 
     def _scan_of(self, name):
         return self.s.by_id(name[5:]) if name and name.startswith('scan:') else None
@@ -1733,6 +1845,7 @@ class MainWindow(QMainWindow):
             return self.fly_to_scan(self.s.frame)
         self.view.set_fly(on)
         self.b_fly.setChecked(on)
+        self.vp.b_proj.setChecked(self.view.parallel)     # полёт — только в перспективе
         self.view.setFocus()
         self._banner()
         self.set_status(f'полёт: WASD, Space/E — вверх, C/Q — вниз, мышь — обзор, колесо — скорость '
@@ -1745,6 +1858,7 @@ class MainWindow(QMainWindow):
         T = self.s.Tc(sc)
         self.view.set_fly(True, eye=T[:3, 3], forward=T[:3, 0])
         self.b_fly.setChecked(True)
+        self.vp.b_proj.setChecked(False)
         self.view.setFocus()
         self._banner()
         self.set_status(f'полёт из точки {short(sc.id)}: WASD, мышь — обзор, Esc — выход', log=False)
@@ -2085,6 +2199,9 @@ class MainWindow(QMainWindow):
         return '\n'.join(lines) + '\n'
 
     def closeEvent(self, ev):
+        if not self._closing_ok and not self.confirm_leave_manual('Закрыть окно'):
+            ev.ignore()
+            return
         if self.dirty() and not self._closing_ok:
             box = QMessageBox(self)
             box.setWindowTitle('Закрыть')

@@ -236,6 +236,10 @@ QSplitter::handle {{ background: {c['line']}; }}
 QSplitter::handle:horizontal {{ width: 1px; }}
 QSplitter::handle:vertical {{ height: 1px; }}
 
+QSlider::groove:horizontal {{ height: 4px; background: {c['bg3']}; border-radius: 2px; }}
+QSlider::sub-page:horizontal {{ background: {c['accent']}; border-radius: 2px; }}
+QSlider::handle:horizontal {{ background: {c['ink']}; width: 12px; height: 12px; margin: -4px 0; border-radius: 6px; }}
+QSlider::handle:horizontal:hover {{ background: {c['accent']}; }}
 #Glass {{ background: {c['glass']}; border: 1px solid {c['line']}; border-radius: 8px; }}
 #Glass QLabel {{ color: {c['ink2']}; font-size: 12px; background: transparent; }}
 #GlassMono {{ font-family: "{MONO}"; font-size: 11px; color: {c['ink3']}; background: transparent; }}

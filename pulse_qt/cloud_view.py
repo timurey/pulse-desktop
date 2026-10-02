@@ -116,6 +116,7 @@ class CloudView(QWidget):
         self.cam.SetViewAngle(self.FOV)
         self.items = {}
         self.point_px = 2.0                  # размер точки облака в логических пикселях
+        self.parallel = False                # ортогональная проекция
         self._img = None
         self._pending = False
         self._buf = vtkUnsignedCharArray()
@@ -383,7 +384,33 @@ class CloudView(QWidget):
         aspect = max(0.2, self.width() / max(1, self.height()))
         half_h = max(np.abs(q[:, 1]).max(), np.abs(q[:, 0]).max() / aspect, 0.5)
         d = half_h / np.tan(np.radians(self.FOV / 2)) * 1.08 + np.abs(q[:, 2]).max()
+        if self.parallel:
+            self.cam.SetParallelScale(half_h * 1.08)
         self.look_at(c, c + R[:, 2] * d, R[:, 1])
+
+    # ── проекция ─────────────────────────────────────────────────────────
+    def set_parallel(self, on):
+        """Ортогональная (True) или перспективная проекция; видимый масштаб у центра сохраняется."""
+        on = bool(on)
+        if on == self.parallel:
+            return
+        half = np.tan(np.radians(self.FOV / 2))
+        if on:
+            self.cam.SetParallelScale(max(0.05, self.distance() * half))
+            self.cam.ParallelProjectionOn()
+        else:
+            R, c = self.basis(), self.center()
+            d = max(0.5, self.cam.GetParallelScale() / half)
+            self.cam.ParallelProjectionOff()
+            self.look_at(c, c + R[:, 2] * d, R[:, 1])
+        self.parallel = on
+        self.update_view()
+
+    def world_per_px(self):
+        """Метров на пиксель экрана у центра вращения."""
+        if self.parallel:
+            return 2 * self.cam.GetParallelScale() / max(1, self.height())
+        return 2 * self.distance() * np.tan(np.radians(self.FOV / 2)) / max(1, self.height())
 
     def orbit(self, dx_deg, dy_deg):
         R = self.basis()
@@ -406,8 +433,7 @@ class CloudView(QWidget):
 
     def pan(self, dx_px, dy_px):
         R = self.basis()
-        s = 2 * self.distance() * np.tan(np.radians(self.FOV / 2)) / max(1, self.height())
-        d = (-dx_px * R[:, 0] + dy_px * R[:, 1]) * s
+        d = (-dx_px * R[:, 0] + dy_px * R[:, 1]) * self.world_per_px()
         self.look_at(self.center() + d, self.eye() + d, R[:, 1])
 
     def zoom_at(self, x, y, factor):
@@ -421,6 +447,16 @@ class CloudView(QWidget):
         else:
             t = ((c - o) @ R[:, 2]) / denom
             target = o + t * v if t > 0 else c
+        if self.parallel:
+            # ортогональная: меняется масштаб, точка под курсором остаётся на месте
+            sc = self.cam.GetParallelScale() * factor
+            if sc < 0.02 or sc > 5000:
+                return
+            shift = (target - c) * (1 - factor)
+            shift -= (shift @ R[:, 2]) * R[:, 2]
+            self.cam.SetParallelScale(sc)
+            self.look_at(c + shift, self.eye() + shift, R[:, 1])
+            return
         eye = target + (self.eye() - target) * factor
         foc = target + (c - target) * factor
         if np.linalg.norm(eye - foc) < 0.05:
@@ -467,9 +503,10 @@ class CloudView(QWidget):
         Ph = np.column_stack([Pw, np.ones(len(Pw))])
         clip = Ph @ (P @ V).T
         w = clip[:, 3]
-        front = w > 1e-9
-        ndc = clip[:, :2] / np.where(front, w, 1.0)[:, None]
-        return np.column_stack([(ndc[:, 0] + 1) * 0.5 * W, (1 - ndc[:, 1]) * 0.5 * H]), w, front
+        depth = -(Ph @ V[2])                             # глубина вдоль взгляда (и в ортогональной)
+        front = (w > 1e-9) & (depth > 0)
+        ndc = clip[:, :2] / np.where(w > 1e-9, w, 1.0)[:, None]
+        return np.column_stack([(ndc[:, 0] + 1) * 0.5 * W, (1 - ndc[:, 1]) * 0.5 * H]), depth, front
 
     def pick_point(self, x, y, tol_px=7, names=None):
         """Ближайшая к глазу точка облаков под курсором. → (имя, точка мира) или None."""
@@ -551,6 +588,8 @@ class CloudView(QWidget):
                 Qt.Key_Shift}
 
     def set_fly(self, on, eye=None, forward=None):
+        if on and self.parallel:
+            self.set_parallel(False)
         self.fly = on
         self.fly_keys.clear()
         self._fly_last = None

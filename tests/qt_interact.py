@@ -47,6 +47,24 @@ def wheel(view, x, y, dy):
     QApplication.sendEvent(view, ev)
 
 
+def answer(button_text, delay=300):
+    """Ответить на ближайший модальный вопрос кнопкой с этим текстом. → {'text': текст вопроса}."""
+    from PySide6.QtCore import QTimer
+    from PySide6.QtWidgets import QMessageBox
+    got = {'text': None}
+
+    def click():
+        box = QApplication.activeModalWidget()
+        if isinstance(box, QMessageBox):
+            got['text'] = box.text()
+            for b in box.buttons():
+                if b.text() == button_text:
+                    b.click()
+                    return
+    QTimer.singleShot(delay, click)
+    return got
+
+
 def main():
     from pulse_qt.app import make_app, session_from_args
     app, theme = make_app()
@@ -141,10 +159,56 @@ def main():
     w.on_manual_action('nudge', {'dz': 1})
     check('кнопка Z+ поднимает', abs(w.T_moving[2, 3] - T1[2, 3] - 0.05) < 1e-6)
     wait(lambda: not w._score_pending, 30)
+    # выход с непринятой позой — вопрос пользователю
+    asked = answer('Остаться')
+    w.on_manual_cancel()
+    check('выход с непринятой позой спрашивает', asked['text'] is not None, asked['text'] or '')
+    check('«Остаться» — ручная стыковка продолжается', w.moving is moving and w.mode == 'manual')
+    asked = answer('Не принимать')
     w.on_manual_cancel()
     pump()
-    check('отмена ручной — поза не изменилась', np.allclose(sess.Tc(moving), T0),
+    check('«Не принимать» — поза не изменилась', np.allclose(sess.Tc(moving), T0),
           'и видимость восстановлена' if all(x.visible for x in sess.scans) else 'видимость НЕ восстановлена')
+    w.start_manual(fixed.id, moving.id)
+    asked = answer('Не принимать')
+    w.on_manual_cancel()
+    check('без изменений позы выход без вопроса', asked['text'] is None and w.moving is None)
+    w.start_manual(fixed.id, moving.id)
+    w.on_manual_action('nudge', {'dx': 1})
+    T_new = w.T_moving.copy()
+    wait(lambda: not w._score_pending, 30)
+    answer('Принять позу')
+    w.set_mode('clean')
+    pump()
+    # поза идёт в граф ручным ребром; итог — после оптимизации вместе с другими рёбрами скана
+    manual_edge = any(e.get('method') == 'manual' and {e['A'], e['B']} == {fixed.id, moving.id}
+                      for e in sess.edges)
+    moved = np.linalg.norm(sess.Tc(moving)[:3, 3] - T0[:3, 3])
+    check('«Принять позу» при переходе в чистку — ручное ребро добавлено', manual_edge and w.mode == 'clean'
+          and w.moving is None, f'ребро {manual_edge}, режим {w.mode}, поза сдвинулась на {moved * 100:.1f} см '
+          f'(выставлено {np.linalg.norm(T_new[:3, 3] - T0[:3, 3]) * 100:.1f} см)')
+    w.set_mode('inspect')
+
+    # проекция и размер точек
+    w.view_top()
+    w.toggle_projection(True)
+    pump()
+    sc0 = v.cam.GetParallelScale()
+    wheel(v, cx, cy, 240)
+    check('ортогональная: колесо меняет масштаб', v.parallel and v.cam.GetParallelScale() < sc0 * 0.9,
+          f'{sc0:.1f} → {v.cam.GetParallelScale():.1f}')
+    w.view_top()
+    pump()
+    P = pr.transform(fixed._display[::200], sess.Tc(fixed))
+    s, depth, front = v.project(P)
+    inside = front & (s[:, 0] > 50) & (s[:, 0] < W - 50) & (s[:, 1] > 50) & (s[:, 1] < H - 50)
+    k = np.flatnonzero(inside)[len(np.flatnonzero(inside)) // 2]
+    hit = v.pick_point(s[k, 0], s[k, 1], names={f'scan:{fixed.id}'})
+    check('ортогональная: выбор точки', hit is not None and np.linalg.norm(hit[1][:2] - P[k, :2]) < 0.5)
+    w.set_point_size(5)
+    check('размер точек: ползунок и облако', w.vp.size_slider.value() == 5 and v.point_px == 5)
+    w.vp.size_slider.setValue(2)
+    check('ползунок меняет размер точек', v.point_px == 2)
 
     # чистка: рамка вокруг центра опорного скана
     w.clean_scan = fixed
@@ -165,9 +229,12 @@ def main():
 
     w.toggle_fly()
     pump(0.3)
-    check('полёт включается', v.fly and abs(v.basis()[2, 2]) < 0.5)
+    check('полёт включается (и выключает ортогональную)', v.fly and abs(v.basis()[2, 2]) < 0.5
+          and not v.parallel and not w.vp.b_proj.isChecked())
     w.on_escape()
     check('Esc выходит из полёта', not v.fly)
+    w.settings.setValue('parallel', False)               # настройки пользователя не трогаем
+    w.settings.setValue('point_px', 2)
 
     print('ИТОГ:', 'всё прошло' if not fails else f'ошибок {len(fails)}: {fails}', flush=True)
     w._closing_ok = True
