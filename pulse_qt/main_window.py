@@ -2010,6 +2010,10 @@ class MainWindow(QMainWindow):
         sp.set_meshes(rows)
         sp.sw_points.setChecked(not self.points_hidden)
 
+    def _mesh_finished(self):
+        self._mesh_building = False
+        self.surface_panel.b_build.setText('Построить')
+
     def _draw_meshes(self, force=False):
         show = self.tree_panel.layer('mesh')
         names = set()
@@ -2033,29 +2037,52 @@ class MainWindow(QMainWindow):
             if not tg:
                 self.set_status('нечего строить: выберите размещённый скан или включите видимые сканы')
                 return
+            if self.busy and getattr(self, '_mesh_building', False):
+                return self.on_surface_action('stop', None)
             prm = sp.params()
             sess = self.s
             sig = sess.state_signature()
+            self._mesh_cancel = False
+
+            def work(p):
+                try:
+                    return surface.build(sess, tg, prm['method'], prm['acc'], prm['trim'], p,
+                                         cancel=lambda: self._mesh_cancel)
+                except surface.Cancelled:
+                    return None
+                finally:
+                    bg.post(self._mesh_finished)
 
             def done(m):
+                if m is None:
+                    self.set_status('построение сетки остановлено')
+                    return
                 if sess is not self.s:
                     return
                 if len(tg) == 1:
                     key, title = tg[0].id, f'скан {short(tg[0].id)}'
-                    rgb = self.scan_color(tg[0].id)[0]
-                    color = tuple(0.55 + 0.45 * c for c in rgb)
+                    color = (0.80, 0.80, 0.77)
                 else:
                     k = 1 + sum(1 for x in sess.meshes if x.startswith('scene'))
-                    key, title, color = f'scene{k}', f'сцена {k} ({len(tg)} скан.)', (0.82, 0.84, 0.88)
+                    key, title, color = f'scene{k}', f'сцена {k} ({len(tg)} скан.)', (0.80, 0.80, 0.77)
                 sess.meshes[key] = dict(m, title=title, color=color, visible=True, sig=sig)
                 self.view.remove(f'mesh:{key}')
+                if not self.tree_panel.layer('mesh'):
+                    self.tree_panel.switches['mesh'].setChecked(True)
                 self._draw_meshes()
+                self.set_points_visible(False)           # иначе сетка не видна среди точек
+                V = m['V']
+                if len(V):
+                    R = self.view.basis()
+                    self.view.fit(np.percentile(V, 1, axis=0), np.percentile(V, 99, axis=0), R[:, 2], R[:, 1])
                 self.refresh_surface()
                 i = m['info']
-                self.set_status(f"{title}: {i['triangles']:,} треугольников за {i['seconds']} c".replace(',', ' '))
-            self.run_bg(f"поверхность ({'Пуассон' if prm['method'] == 'poisson' else 'ball pivoting'}, "
-                        f"{prm['acc'] * 100:.0f} см)…",
-                        lambda p: surface.build(sess, tg, prm['method'], prm['acc'], prm['trim'], p), done)
+                self.set_status(f"{title}: {i['triangles']:,} треугольников за {i['seconds']} c; точки сканов "
+                                f"скрыты — слой «Точки сканов» вернёт их".replace(',', ' '))
+            if self.run_bg(f"поверхность ({'Пуассон' if prm['method'] == 'poisson' else 'ball pivoting'}, "
+                           f"{prm['acc'] * 100:.0f} см)…", work, done):
+                self._mesh_building = True
+                sp.b_build.setText('Остановить')
         elif name == 'mesh_visible':
             key, vis = arg
             if key in self.s.meshes:
@@ -2079,11 +2106,24 @@ class MainWindow(QMainWindow):
                 surface.export(m, path)
                 self.set_status(f'сетка сохранена: {path}')
         elif name == 'points':
-            self.points_hidden = not arg
-            self.apply_visibility()
+            self.set_points_visible(arg)
+        elif name == 'stop':
+            self._mesh_cancel = True
+            self.set_status('построение сетки останавливается…')
 
     # ── найденные объекты ────────────────────────────────────────────────
+    def set_points_visible(self, on):
+        """Точки сканов на экране (сетки иначе тонут в точках, по которым построены)."""
+        self.points_hidden = not on
+        self.tree_panel.switches['points'].setChecked(on)
+        self.surface_panel.sw_points.setChecked(on)
+        self.apply_visibility()
+
     def on_layer(self, key, on):
+        if key == 'points':
+            if self.points_hidden == on:
+                self.set_points_visible(on)
+            return
         if key == 'mesh':
             self._draw_meshes()
             return
@@ -2446,7 +2486,10 @@ class MainWindow(QMainWindow):
 
     # ── прочее ───────────────────────────────────────────────────────────
     def on_escape(self):
-        if self.downloading:
+        if getattr(self, '_mesh_building', False):
+            self._mesh_cancel = True
+            self.set_status('построение сетки останавливается…')
+        elif self.downloading:
             self._dl_cancel = True
             self.set_status('загрузка останавливается… (повторный импорт продолжит с места)')
         elif self.view.fly:

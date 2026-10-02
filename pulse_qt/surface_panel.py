@@ -38,7 +38,6 @@ class SurfacePanel(_Panel):
 
     def __init__(self):
         super().__init__('Поверхность β', closable=True)
-        t = W.THEME
         s0 = self.add(W.Section())
         s0.add(W.label('Экспериментальный режим: сетка строится по точкам полного разрешения без '
                        'отражений и удалённого; хранится только до закрытия проекта, сохраняется экспортом.',
@@ -74,10 +73,11 @@ class SurfacePanel(_Panel):
         self.method.changed.connect(lambda m: self.trim_row.setVisible(m == 'poisson'))
         self.hint = W.label('Пуассон — гладкая поверхность, дыры и окна затягиваются (лишнее срезается); '
                             'ball pivoting — строго по точкам, дыры остаются, медленнее. Мельче точность — '
-                            'дольше: комната 5 см ~10 с, 2 см ~20 с.', 'Hint', wrap=True)
+                            'дольше: комната 5 см ~10 с, 2 см ~20 с; вся сцена Пуассоном 5 см ~1,5 мин. Ball pivoting — '
+                            'для отдельного скана; больше 800 тыс. точек — точность загрубляется. После '
+                            'построения точки сканов скрываются (слой «Точки сканов»).', 'Hint', wrap=True)
         s2.add(self.hint)
-        self.b_build = W.button('Построить', lambda: self.action.emit('build', None), primary=True,
-                                icon=t.icon('mdi6.vector-triangle', 'onaccent'))
+        self.b_build = W.button('Построить', lambda: self.action.emit('build', None), primary=True)
         s2.add(self.b_build)
         s3 = self.add(W.Section('Построенные'))
         self.list = QVBoxLayout()
@@ -85,7 +85,7 @@ class SurfacePanel(_Panel):
         s3.add(self.list)
         self.empty = W.label('пока нет', 'Hint')
         s3.add(self.empty)
-        self.sw_points = W.Switch(True)
+        self.sw_points = W.Switch(True)                   # то же, что слой «Точки сканов»
         self.sw_points.toggled.connect(lambda v: self.action.emit('points', v))
         s3.add(W.hbox(QLabel('Показывать точки сканов'), None, self.sw_points))
         self.finish()
