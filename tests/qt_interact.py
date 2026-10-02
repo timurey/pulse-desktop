@@ -234,6 +234,25 @@ def main():
     tp.switches['quality'].setChecked(False, emit=True)
     check('качество: слой выключается', not v.has('qual'))
 
+    # движущиеся объекты: найти, порог без пересчёта, удалить, отменить
+    w.clean_scan = next(x for x in sess.scans if x.id != sess.frame and x.pose is not None)
+    w.set_mode('clean')
+    w.on_dyn_find()
+    wait(lambda: not w.busy, 60)
+    n_found = sum(int(m.sum()) for m in w.dyn_masks.values())
+    check('движущиеся: поиск', n_found > 0, f'{n_found} точек')
+    w.clean.dyn_slider.setValue(90)
+    n90 = sum(int(m.sum()) for m in w.dyn_masks.values())
+    check('движущиеся: порог выше — меньше найдено', n90 <= n_found, f'{n_found} → {n90}')
+    w.clean.dyn_slider.setValue(60)
+    sc = w.clean_scan
+    nd0 = len(sc.down)
+    w.on_dyn_delete()
+    check('движущиеся: удаление', len(sc.drop) > 0 and len(sc.down) < nd0, f'вокселей {len(sc.drop)}')
+    w.on_undo_erase()
+    check('движущиеся: Ctrl+Z возвращает', len(sc.drop) == 0 and len(sc.down) == nd0)
+    w.set_mode('inspect')
+
     # чистка: рамка вокруг центра опорного скана
     w.clean_scan = fixed
     w.set_mode('clean')

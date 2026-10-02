@@ -156,6 +156,16 @@ def main():
         shot('05_clean')
         w.clear_selection()
         w.toggle_select()
+        # движущиеся объекты во всех видимых сканах
+        w.clean.sw_dyn_all.setChecked(True)
+        w.on_dyn_find()
+        wait(lambda: not w.busy, step_dynamic, 120)
+
+    def step_dynamic():
+        QTimer.singleShot(300, lambda: (shot('05b_dynamic'), step_dynamic_done()))
+
+    def step_dynamic_done():
+        w.clean.sw_dyn_all.setChecked(False)
         w.set_mode('inspect')
         QTimer.singleShot(200, step_import)
 

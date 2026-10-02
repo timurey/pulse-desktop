@@ -35,6 +35,8 @@ from offline_deskew import (read_bag, parse_pointcloud2, deskew_cloud,
                             INVERT_ROTATION, ENCODER_TIME_OFFSET_MS, MOUNT_RPY_DEG, MOUNT_AXES)
 
 DEFAULTS = {'voxel': 0.01, 'min_range': 0.3, 'max_range': 60.0, 'min_enc_samples': 5}
+# версия оценки движущихся объектов: при смене повторный импорт пересчитывает сканы
+from dynamic import DYN_VERSION, pass_scores, pass_id, dyn_path      # noqa: E402
 
 
 # ── поиск bag'ов ─────────────────────────────────────────────────────────
@@ -81,9 +83,10 @@ def bag_name(bag):
 
 # ── обработка кадров (без ввода-вывода — тестируется синтетикой) ─────────
 def process_frames(frames, angle_times, angle_values, R_tilt=None, voxel=0.01, min_range=0.3,
-                   max_range=60.0, min_enc_samples=5, progress=None, deskew_params=None):
+                   max_range=60.0, min_enc_samples=5, progress=None, deskew_params=None, dynamic=True):
     """
     frames: [(stamp_ns, structured array x,y,z[,time])]; угол — времена (нс) и радианы.
+    dynamic — оценка движущихся объектов по полуоборотам (статистика 'dyn', порядок точек).
     → (точки N×3 float32, статистика).
     """
     import open3d as o3d
@@ -95,6 +98,8 @@ def process_frames(frames, angle_times, angle_values, R_tilt=None, voxel=0.01, m
     angle_times = np.asarray(angle_times, np.float64)
     angle_values = np.asarray(angle_values, np.float64)
     parts, used, skipped = [], 0, 0
+    pids = []
+    unwrapped = np.unwrap(angle_values) if len(angle_values) else angle_values
     for i, (stamp, pts) in enumerate(frames):
         if progress and i % 10 == 0:
             progress(i / max(1, len(frames)), f'кадр {i + 1}/{len(frames)}')
@@ -111,6 +116,7 @@ def process_frames(frames, angle_times, angle_values, R_tilt=None, voxel=0.01, m
         c = c[(r >= min_range) & (r <= max_range)]
         if len(c):
             parts.append(c.astype(np.float32))
+            pids.append(int(pass_id(np.interp(stamp, angle_times, unwrapped))))
             used += 1
     if not parts:
         raise ValueError('нет пригодных кадров (нет данных энкодера или облаков)')
@@ -122,9 +128,16 @@ def process_frames(frames, angle_times, angle_values, R_tilt=None, voxel=0.01, m
         pc = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(P.astype(np.float64)))
         P = np.asarray(pc.voxel_down_sample(voxel).points, np.float32)
     span = float(np.ptp(np.unwrap(angle_values))) if len(angle_values) else 0.0
-    return P, {'frames_total': len(frames), 'frames_used': used, 'frames_skipped': skipped,
-               'points_raw': int(n_raw), 'points': int(len(P)),
-               'rotations': round(span / (2 * np.pi), 2)}
+    stats = {'frames_total': len(frames), 'frames_used': used, 'frames_skipped': skipped,
+             'points_raw': int(n_raw), 'points': int(len(P)),
+             'rotations': round(span / (2 * np.pi), 2)}
+    if dynamic:
+        if progress:
+            progress(0.95, 'движущиеся объекты по полуоборотам')
+        # карты дальности — в системе до поправки наклона (там сканер в начале)
+        P_lidar = P if R_tilt is None else P @ np.asarray(R_tilt, np.float32)
+        stats['dyn'], stats['passes'] = pass_scores(parts, pids, P_lidar)
+    return P, stats
 
 
 # ── bag целиком ──────────────────────────────────────────────────────────
@@ -207,9 +220,14 @@ def reconstruct(bag, voxel=DEFAULTS['voxel'], min_range=DEFAULTS['min_range'],
     meta = {'bag': str(Path(bag).resolve()), 'name': bag_name(bag), 'angle_source': angle_source,
             'level': level, 'imu': imu_info,
             'params': {'voxel': voxel, 'min_range': min_range, 'max_range': max_range,
-                       'tilt': tilt},
+                       'tilt': tilt, 'dyn_version': DYN_VERSION},
             'processed': time.strftime('%Y-%m-%d %H:%M:%S'),
             'seconds': round(time.time() - t0, 1), **stats}
+    dyn = meta.pop('dyn', None)
+    if dyn is not None:
+        meta['_dyn'] = dyn                               # save_scan запишет рядом со сканом
+        meta['dynamic'] = {'passes': meta.pop('passes', 0), 'version': DYN_VERSION,
+                           'flagged_06': int((dyn >= 0.6).sum())}
     return P, meta
 
 
@@ -229,6 +247,9 @@ def save_scan(P, path, meta=None):
         o3d.io.write_point_cloud(str(path), o3d.geometry.PointCloud(
             o3d.utility.Vector3dVector(np.asarray(P, np.float64))))
     if meta is not None:
+        dyn = meta.pop('_dyn', None)                     # массив — не в метаданные (и не в проект)
+        if dyn is not None:                              # оценка движущихся объектов, порядок точек файла
+            np.save(dyn_path(path), np.asarray(dyn, np.float16))
         path.with_suffix('.json').write_text(json.dumps(meta, indent=1, ensure_ascii=False),
                                              encoding='utf-8')
     return path

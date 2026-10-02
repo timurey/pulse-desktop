@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (QMainWindow, QWidget, QFrame, QHBoxLayout, QVBoxL
 import plane_register as pr
 import manual_clean
 import quality
+import dynamic
 from scan_session import Session
 from scan_tree import KINDS
 
@@ -242,6 +243,7 @@ class MainWindow(QMainWindow):
         self._sel_frusta = []
         self.ghost_shown = set()
         self.clean_scan = None
+        self.dyn_masks = {}                      # найденные движущиеся объекты: id скана → маска res['down']
         # дерево, слои
         self.tree_sel = None
         self._vis_backup = None
@@ -978,7 +980,7 @@ class MainWindow(QMainWindow):
         gname = v.get('group') or 'Импорт'
         gid = self.s.tree.add_group('root', gname, 'прочее')
         params = {'voxel': v['voxel'], 'min_range': br.DEFAULTS['min_range'], 'max_range': v['max_range'],
-                  'tilt': v['tilt']}
+                  'tilt': v['tilt'], 'dyn_version': br.DYN_VERSION}
         added = []
 
         def work(progress):
@@ -1227,7 +1229,9 @@ class MainWindow(QMainWindow):
                 ana = [('плоскостей', len(pl)), ('проёмов', odesc or 'нет'),
                        ('отражения', f"{len(refl)} · убрано {sum(r.get('removed', 0) for r in refl):,} т."
                         if refl else 'нет'),
-                       ('ручная чистка', f'{len(sc.erase)} обл.' if sc.erase else 'нет'),
+                       ('ручная чистка', ', '.join(x for x in (f'{len(sc.erase)} обл.' if sc.erase else '',
+                                                               f'{len(sc.drop)} вокс.' if len(sc.drop) else '') if x)
+                        or 'нет'),
                        ('вертикаль файла', sc.up)]
             else:
                 ana = [('анализ', 'выполняется в фоне…')]
@@ -1318,6 +1322,9 @@ class MainWindow(QMainWindow):
             return
         if self.mode == 'clean' and mode != 'clean' and self.select_mode:
             self.toggle_select()
+        if self.mode == 'clean' and mode != 'clean' and self.dyn_masks:
+            self.dyn_masks = {}
+            self.view.remove_prefix('dyn:')
         if self.mode == 'manual' and mode != 'manual' and self.moving is not None and not force:
             if self.on_manual_cancel() and mode != 'inspect':
                 self.set_mode(mode)
@@ -2086,6 +2093,84 @@ class MainWindow(QMainWindow):
             self.s.clear_erase(sc)
             self._refresh_scans([sc.id])
             self.set_status(f'{short(sc.id)}: ручная чистка сброшена')
+        elif name == 'dyn_find':
+            self.on_dyn_find()
+        elif name == 'dyn_thr':
+            self._dyn_apply_threshold(arg)
+        elif name == 'dyn_delete':
+            self.on_dyn_delete()
+
+    # ── движущиеся объекты ───────────────────────────────────────────────
+    def _dyn_targets(self):
+        if self.clean.sw_dyn_all.isChecked():
+            return [sc for sc in self.s.scans if sc.visible and sc.analyzed]
+        sc = self.clean_scan
+        return [sc] if sc is not None and sc.analyzed else []
+
+    def on_dyn_find(self):
+        targets = self._dyn_targets()
+        if not targets:
+            self.set_status('нет проанализированного скана для поиска')
+            return
+        use_cross, use_pass = self.clean.cb_cross.isChecked(), self.clean.cb_pass.isChecked()
+        if not (use_cross or use_pass):
+            self.set_status('отметьте хотя бы один признак: между сканами или по полуоборотам')
+            return
+        thr = self.clean.dyn_threshold()
+        sess = self.s
+
+        def work(progress):
+            out = {}
+            for k, sc in enumerate(targets):
+                progress(k / len(targets), f'движущиеся объекты: {short(sc.id)}')
+                cross = use_cross and sc.pose is not None and len(sess.placed()) > 1
+                out[sc.id] = dynamic.find(sess, sc, thr, use_cross=cross, use_pass=use_pass)
+            return out
+
+        def done(res):
+            self.dyn_masks = {sid: m for sid, (m, _) in res.items()}
+            no_pass = [short(sid) for sid, (_, info) in res.items() if use_pass and info['pass'] is None]
+            self._dyn_draw()
+            n = sum(int(m.sum()) for m in self.dyn_masks.values())
+            msg = f'найдено {n:,} точек в {sum(1 for m in self.dyn_masks.values() if m.any())} скан.'.replace(',', ' ')
+            if no_pass:
+                msg += f"; нет данных полуоборотов: {', '.join(no_pass[:6])}{' …' if len(no_pass) > 6 else ''}"
+            self.clean.dyn_label.setText(msg)
+            self.set_status(msg + ' — «Удалить найденное» уберёт их (Ctrl+Z — вернуть)')
+        self.run_bg('поиск движущихся объектов…', work, done)
+
+    def _dyn_apply_threshold(self, thr):
+        if not self.dyn_masks:
+            return
+        self.dyn_masks = {sid: dynamic.mask(self.s.by_id(sid), thr) for sid in self.dyn_masks
+                          if self.s.by_id(sid) is not None}
+        self._dyn_draw()
+        n = sum(int(m.sum()) for m in self.dyn_masks.values())
+        self.clean.dyn_label.setText(f'найдено {n:,} точек (порог {thr:.2f})'.replace(',', ' '))
+
+    def _dyn_draw(self):
+        self.view.remove_prefix('dyn:')
+        for sid, m in self.dyn_masks.items():
+            sc = self.s.by_id(sid)
+            T = self.pose_of(sc) if sc is not None else None
+            if T is None or not m.any() or not sc.visible:
+                continue
+            self.view.set_cloud(f'dyn:{sid}', sc.res['down'][m], (0.95, 0.30, 0.90), T,
+                                size=self.view.point_px + 2, on_top=True)
+
+    def on_dyn_delete(self):
+        items = [(self.s.by_id(sid), self.s.by_id(sid).res['down'][m]) for sid, m in self.dyn_masks.items()
+                 if self.s.by_id(sid) is not None and m.any()]
+        if not items:
+            self.set_status('нечего удалять: сначала «Найти»')
+            return
+        n = self.s.drop_points(items)
+        self.dyn_masks = {}
+        self.view.remove_prefix('dyn:')
+        self._refresh_scans([sc.id for sc, _ in items])
+        self.clean.dyn_label.setText('')
+        self.set_status(f"удалено вокселей 5 см: {n} из {', '.join(short(sc.id) for sc, _ in items)} "
+                        f"(Ctrl+Z — вернуть)")
 
     def _draw_ghosts(self, sc):
         if sc is None:

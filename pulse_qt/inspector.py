@@ -2,7 +2,7 @@
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QPixmap, QIcon
-from PySide6.QtWidgets import (QFrame, QVBoxLayout, QHBoxLayout, QGridLayout, QScrollArea, QWidget,
+from PySide6.QtWidgets import (QFrame, QVBoxLayout, QHBoxLayout, QGridLayout, QScrollArea, QWidget, QSlider,
                                QComboBox, QLabel, QCheckBox)
 
 from . import widgets as W
@@ -376,6 +376,38 @@ class CleanPanel(_Panel):
         self.b_ghosts = W.button('Показать отражения красным', lambda: self.action.emit('ghosts', None),
                                  icon=t.icon('mdi6.blur'))
         s1.add(self.b_ghosts)
+        # движущиеся объекты: неподтверждённые точки
+        sd = self.add(W.Section('Движущиеся объекты'))
+        self.cb_cross = QCheckBox('между сканами (по текущим позам)')
+        self.cb_cross.setChecked(True)
+        self.cb_pass = QCheckBox('по полуоборотам (сканы из bag)')
+        self.cb_pass.setChecked(True)
+        sd.add(self.cb_cross)
+        sd.add(self.cb_pass)
+        self.dyn_slider = QSlider(Qt.Horizontal)
+        self.dyn_slider.setRange(30, 95)
+        self.dyn_slider.setValue(60)
+        self.dyn_slider.setFocusPolicy(Qt.NoFocus)
+        self.dyn_slider.setToolTip('Порог оценки: меньше — находит больше (и больше ложных)')
+        self.dyn_value = W.label('0.60', 'KV_v')
+        self.dyn_value.setFixedWidth(34)
+        self.dyn_slider.valueChanged.connect(self._dyn_thr)
+        sd.add(W.hbox(W.label('порог'), self.dyn_slider, self.dyn_value, spacing=6))
+        self.sw_dyn_all = W.Switch(False)
+        sd.add(W.hbox(QLabel('Все видимые сканы'), None, self.sw_dyn_all))
+        self.dyn_label = W.label('', 'KV_v', wrap=True)
+        sd.add(self.dyn_label)
+        g0 = QGridLayout()
+        g0.setSpacing(6)
+        g0.addWidget(W.button('Найти', lambda: self.action.emit('dyn_find', None),
+                              icon=t.icon('mdi6.walk')), 0, 0)
+        g0.addWidget(W.button('Удалить найденное', lambda: self.action.emit('dyn_delete', None),
+                              icon=t.icon('mdi6.delete-outline')), 0, 1)
+        sd.add(g0)
+        sd.add(W.label('Найденное — пурпурным, удаление отменяется Ctrl+Z. Сравнение сканов пропускает '
+                       'большие плоскости (пол, стены): их расхождение — ошибка совмещения, см. слой '
+                       '«Качество». «По полуоборотам» есть только у сканов, импортированных из bag этой '
+                       'версией (иначе — переимпортируйте bag).', 'Hint', wrap=True))
         s2 = self.add(W.Section('Выделение прямоугольником'))
         self.b_select = W.button('Выделять (R)', lambda: self.action.emit('select', None),
                                  icon=t.icon('mdi6.selection-drag'))
@@ -399,6 +431,13 @@ class CleanPanel(_Panel):
                              icon=t.icon('mdi6.restore')), 1, 1)
         s2.add(g)
         self.finish()
+
+    def dyn_threshold(self):
+        return self.dyn_slider.value() / 100.0
+
+    def _dyn_thr(self, v):
+        self.dyn_value.setText(f'{v / 100:.2f}')
+        self.action.emit('dyn_thr', v / 100.0)
 
     def set_scans(self, items, current):
         self.scan.blockSignals(True)

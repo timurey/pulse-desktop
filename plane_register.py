@@ -413,6 +413,21 @@ class RangeImage:
         j = np.clip(((el + np.pi / 2) / self.res).astype(np.int64), 0, self.H - 1)
         return j * self.W + i, r
 
+    def masks(self, P, margin=0.15, rel=0.03):
+        """
+        На точку: (видел насквозь — точка в пустоте, которую видел этот сканер;
+                   подтвердил — у этого сканера здесь поверхность на той же дальности).
+        Точки, закрытые от сканера (дальше его поверхности), — ни то, ни другое.
+        """
+        idx, r = self._index(P)
+        rA = self.img[idx]
+        known = np.isfinite(rA)
+        tol = np.maximum(margin, rel * np.where(known, rA, 0))
+        with np.errstate(invalid="ignore"):
+            through = known & (r < rA - tol)
+            confirm = known & (np.abs(r - rA) <= tol)
+        return through, confirm
+
     def violations(self, P, margin=0.15, rel=0.03):
         idx, r = self._index(P)
         rA = self.img[idx]

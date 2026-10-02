@@ -1242,7 +1242,7 @@ class App:
         import bag_reconstruct as br
         gid = self.s.tree.add_group('root', group_name or 'Импорт', 'прочее') if group_name else None
         params = {'voxel': voxel, 'min_range': br.DEFAULTS['min_range'], 'max_range': max_range,
-                  'tilt': tilt}
+                  'tilt': tilt, 'dyn_version': br.DYN_VERSION}
         post = lambda fn: self.app.post_to_main_thread(self.w, fn)
         added = []
 

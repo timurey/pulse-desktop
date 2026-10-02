@@ -38,6 +38,7 @@ PALETTE = np.array([[31, 119, 180], [255, 127, 14], [44, 160, 44], [214, 39, 40]
                     [148, 103, 189], [140, 86, 75], [227, 119, 194], [127, 127, 127],
                     [188, 189, 34], [23, 190, 207]]) / 255.0
 DISPLAY_VOXEL = 0.04
+DROP_VOXEL = 0.05          # удалённые точки (движущиеся объекты) — воксели этого размера
 MANUAL_INFO = 1e3          # «жёсткость» ручных рёбер в оптимизации графа
 
 
@@ -55,6 +56,8 @@ class Scan:
         self.visible = True
         self.clean = True            # убирать отражения
         self.erase = []              # ручная чистка: области (4 плоскости) в канон. системе
+        self.drop = np.zeros(0, np.int64)   # удалённые воксели DROP_VOXEL (канон. система)
+        self.dyn = None              # оценка «движущийся объект» по точкам res['down'] (кеш)
         self._down_cache = None
         self.color = PALETTE[0]
         self._res = None
@@ -104,27 +107,32 @@ class Scan:
                 self._quick_R = planes.up_rotation(label)
         pc = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pts @ self.R_up.T))
         P = np.asarray(pc.voxel_down_sample(voxel).points)
-        if self.erase:
+        if self.erase or len(self.drop):
             P = P[self.keep_mask(P)]
         return P
 
     @property
     def down(self):
         """Даунсемпл в канонической системе с учётом чистки отражений и ручной чистки."""
-        key = (self.clean, len(self.erase))
+        key = (self.clean, len(self.erase), len(self.drop))
         if self._down_cache is None or self._down_cache[0] != key:
             d = self.res['down']
             drop = self.ghost_mask() if self.clean else np.zeros(len(d), bool)
             if self.erase:
                 drop = drop | manual_clean.inside_regions(d, self.erase)
+            if len(self.drop):
+                drop = drop | np.isin(voxel_keys(d), self.drop)
             self._down_cache = (key, d[~drop])
         return self._down_cache[1]
 
     def keep_mask(self, P_canon, clean=None):
         """Маска сохраняемых точек произвольного облака в канон. системе (ручная чистка)."""
-        if not self.erase:
-            return np.ones(len(P_canon), bool)
-        return ~manual_clean.inside_regions(P_canon, self.erase)
+        keep = np.ones(len(P_canon), bool)
+        if self.erase:
+            keep &= ~manual_clean.inside_regions(P_canon, self.erase)
+        if len(self.drop):
+            keep &= ~np.isin(voxel_keys(P_canon), self.drop)
+        return keep
 
     def ghost_mask(self):
         with self._lock:
@@ -204,6 +212,7 @@ class Scan:
                 'pose': None if self.pose is None else self.pose.tolist(),
                 'clean': self.clean,
                 'erase': [np.asarray(r).tolist() for r in self.erase],
+                'drop': np.asarray(self.drop).tolist(),
                 'source': self.source}
 
 
@@ -228,6 +237,7 @@ class Session:
             sc = Scan(e['path'], e.get('up', 'auto'), e.get('pose'), e['id'])
             sc.clean = e.get('clean', True)
             sc.erase = [np.asarray(r, float) for r in e.get('erase', [])]
+            sc.drop = np.asarray(e.get('drop', []), np.int64)
             sc.source = e.get('source')
             s.scans.append(sc)
         s.frame = proj.get('frame') or s.scans[0].id
@@ -454,7 +464,7 @@ class Session:
         """Сводка состояния для проверки «есть несохранённые изменения»."""
         parts = [self.frame, np.round(self.level, 6).tobytes()]
         for sc in self.scans:
-            parts += [sc.id, sc.clean, len(sc.erase),
+            parts += [sc.id, sc.clean, len(sc.erase), len(sc.drop),
                       None if sc.pose is None else np.round(sc.pose, 6).tobytes()]
         for e in self.edges:
             parts += [e['A'], e['B'], e.get('user'), e.get('method')]
@@ -851,19 +861,48 @@ class Session:
             self.erase_undo.append(rec)
         return rec
 
+    def drop_points(self, items):
+        """
+        Удалить точки из сканов: items — [(скан, точки в его канон. системе)]; удаляются
+        воксели DROP_VOXEL вокруг точек (движущиеся объекты). Одно действие для отмены.
+        → число новых вокселей.
+        """
+        rec = []
+        for scan, P_canon in items:
+            keys = np.setdiff1d(np.unique(voxel_keys(np.asarray(P_canon, float))), scan.drop)
+            if len(keys):
+                scan.drop = np.union1d(scan.drop, keys)
+                rec.append(('drop', scan.id, keys))
+        if rec:
+            self.erase_undo.append(rec)
+        return sum(len(r[2]) for r in rec)
+
     def undo_erase(self):
+        """Отменить последнее удаление. → [(id скана, …)] или None."""
         if not self.erase_undo:
             return None
         rec = self.erase_undo.pop()
-        for sid, k in rec:
-            sc = self.by_id(sid)
-            if sc is not None:
-                del sc.erase[len(sc.erase) - k:]
-        return rec
+        out = []
+        for item in rec:
+            if item[0] == 'drop':
+                sc = self.by_id(item[1])
+                if sc is not None:
+                    sc.drop = np.setdiff1d(sc.drop, item[2])
+                out.append((item[1], len(item[2])))
+            else:
+                sid, k = item
+                sc = self.by_id(sid)
+                if sc is not None:
+                    del sc.erase[len(sc.erase) - k:]
+                out.append((sid, k))
+        return out
 
     def clear_erase(self, scan):
+        """Сбросить ручную чистку скана: области и удалённые воксели."""
         scan.erase = []
-        self.erase_undo = [[x for x in r if x[0] != scan.id] for r in self.erase_undo]
+        scan.drop = np.zeros(0, np.int64)
+        sid_of = lambda x: x[1] if x[0] == 'drop' else x[0]
+        self.erase_undo = [[x for x in r if sid_of(x) != scan.id] for r in self.erase_undo]
         self.erase_undo = [r for r in self.erase_undo if r]
 
     # ── экспорт ──────────────────────────────────────────────────────────
@@ -884,7 +923,7 @@ class Session:
                 pts, _ = reflections.clean_scan(s.path, s.up)
             else:
                 pts = planes.load_points(s.path)
-            if s.erase:                                        # ручная чистка (канон. система)
+            if s.erase or len(s.drop):                         # ручная чистка (канон. система)
                 pts = pts[s.keep_mask(pts @ s.R_up.T)]
             pc = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pts))
             if voxel > 0:
@@ -908,6 +947,12 @@ class Session:
         if progress:
             progress(1.0, f"{path.name}: {len(pts):,} точек")
         return len(pts)
+
+
+def voxel_keys(P, size=DROP_VOXEL):
+    """Ключи вокселей (int64) точек P — для хранения удалённых областей скана."""
+    q = np.floor(np.asarray(P, float) / size).astype(np.int64) + (1 << 20)
+    return (q[:, 0] << 42) | (q[:, 1] << 21) | q[:, 2]
 
 
 def _clean_res(scan):
