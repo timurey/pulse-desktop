@@ -1,0 +1,5 @@
+# Новое окно Pulse Scan (scan_qt.py): Qt + VTK поверх тех же модулей логики.
+-r requirements.txt
+PySide6>=6.6
+vtk>=9.3
+qtawesome>=1.3     # значки Material Design Icons

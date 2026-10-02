@@ -44,8 +44,11 @@ def unit(v):
 
 
 class ViewCube:
-    def __init__(self, font_path=None):
+    def __init__(self, font_path=None, style=None):
         self.font_path = font_path
+        # цвета (для тем нового окна): bg, face, edge, label, hover — RGB-кортежи
+        self.style = {'bg': BG, 'face': FACE_FILL, 'edge': EDGE_COLOR, 'label': LABEL_COLOR,
+                      'hover': HOVER, **(style or {})}
         self.hover = None             # ('face'|'edge'|'corner', index)
         self._fonts = {}
 
@@ -102,7 +105,7 @@ class ViewCube:
             tP, td = self._project(tip[None], R, W, H)
             if td[0] <= 0:
                 continue
-            c = col if edge_vis else tuple(int(255 - (255 - x) * 0.45) for x in col)
+            c = col if edge_vis else _mix(self.style['bg'], col, 0.45)
             a0, a1 = oP[0], tP[0]
             d.line([tuple(a0), tuple(a1)], fill=c, width=max(2, int(1.6 * k)))
             if np.linalg.norm(a1 - a0) > 4:
@@ -115,9 +118,11 @@ class ViewCube:
                 d.text((float(lp[0]), float(lp[1])), lab, fill=c, font=self._font(12 * k),
                        anchor='mm')
 
-    def render(self, R, W, H):
-        """Картинка куба (RGB, W×H) для ориентации камеры R."""
-        img = Image.new('RGBA', (W, H), BG + (255,))
+    def render(self, R, W, H, rgba=False):
+        """Картинка куба (RGB, W×H) для ориентации камеры R; rgba=True — прозрачный фон."""
+        st = self.style
+        HOVER, FACE_FILL, EDGE_COLOR, LABEL_COLOR = st['hover'], st['face'], st['edge'], st['label']
+        img = Image.new('RGBA', (W, H), (0, 0, 0, 0) if rgba else tuple(st['bg']) + (255,))
         d = ImageDraw.Draw(img)
         pts, depth = self._geometry(R, W, H)
         e = R[:, 2]                                   # направление на глаз
@@ -135,11 +140,11 @@ class ViewCube:
                 continue
             poly = [tuple(pts[j]) for j in vi]
             if hov:
-                fill = HOVER + (235,)
+                fill = tuple(HOVER) + (235,)
             else:
                 b = max(0.55, min(1.0, 0.6 + 0.45 * ndot))
-                fill = tuple(int(255 - (255 - c) * b) for c in FACE_FILL) + (215,)
-            dl.polygon(poly, fill=fill, outline=EDGE_COLOR + (255,))
+                fill = _mix(st['bg'], FACE_FILL, b) + (215,)
+            dl.polygon(poly, fill=fill, outline=tuple(EDGE_COLOR) + (255,))
             if ndot > 0.4:
                 labels.append((i, ndot, hov))
         img = Image.alpha_composite(img, layer)
@@ -156,7 +161,7 @@ class ViewCube:
             if tw > 0.85 * min(width, height * 2):        # подогнать под грань
                 f = self._font(px * 0.85 * min(width, height * 2) / tw)
             alpha = min(1.0, 0.35 + (ndot - 0.4) * 2.0)
-            col = (255, 255, 255) if hov else tuple(int(255 - (255 - x) * alpha) for x in LABEL_COLOR)
+            col = (255, 255, 255) if hov else _mix(st['bg'], LABEL_COLOR, alpha)
             d.text((float(c[0]), float(c[1])), FACES[i][1], fill=col, font=f, anchor='mm')
         for i, (a, b) in enumerate(EDGES):
             if self.hover == ('edge', i):
@@ -166,7 +171,7 @@ class ViewCube:
             r = 6 * k
             d.ellipse([p[0] - r, p[1] - r, p[0] + r, p[1] + r], fill=HOVER)
         self._draw_axes(d, R, W, H, k, 'visible')
-        return img.convert('RGB')
+        return img if rgba else img.convert('RGB')
 
     # ── попадание мышью ─────────────────────────────────────────────────
     def hit(self, R, W, H, mx, my):
@@ -224,6 +229,11 @@ class ViewCube:
         v = ViewCube.snap_direction(h)
         parts = [names[a][0 if v[a] > 0 else 1] for a in (2, 1, 0) if abs(v[a]) > 1e-6]
         return 'вид: ' + '-'.join(parts)
+
+
+def _mix(a, b, t):
+    """Цвет между a (t=0) и b (t=1)."""
+    return tuple(int(round(x + (y - x) * t)) for x, y in zip(a, b))
 
 
 def _in_poly(p, poly):
