@@ -23,6 +23,7 @@ Usage:
 
 import os
 import sys
+import json
 import time
 import shutil
 import platform
@@ -304,7 +305,9 @@ class App:
     # ── вкладка «Проект» ─────────────────────────────────────────────────
     def _tab_project(self):
         v = gui.Vert(0.3 * self.em)
-        v.add_child(self._row(self._btn('Открыть проект...', self.on_open),
+        v.add_child(self._row(self._btn('Новый проект', self.on_new_project),
+                              self._btn('Открыть проект...', self.on_open)))
+        v.add_child(self._row(self._btn('Импорт bag...', self.on_import_bags),
                               self._btn('Добавить скан...', self.on_add_scan)))
         v.add_child(self._row(self._btn('Сохранить', self.on_save),
                               self._btn('Сохранить как...', self.on_save_as)))
@@ -854,6 +857,10 @@ class App:
                 def done():
                     self.analyzing = False
                     self.refresh_clean()
+                    nxt = getattr(self, '_after_analysis', None)
+                    self._after_analysis = None
+                    if nxt is not None and gen == self._load_gen:
+                        nxt()
                 post(done)
         threading.Thread(target=work, daemon=True).start()
 
@@ -1015,12 +1022,165 @@ class App:
         self.load_all()
 
     def on_add_scan(self):
-        self._file_dialog(gui.FileDialog.OPEN, 'Добавить скан',
-                          [('.e57 .pcd .ply .las .laz', 'Облака точек')], self.add_scan)
+        self._file_dialog(gui.FileDialog.OPEN, 'Добавить скан или bag',
+                          [('.e57 .pcd .ply .las .laz', 'Облака точек'),
+                           ('.mcap .zstd', 'Bag (MCAP)')], self.add_scan)
 
     def add_scan(self, path):
-        self.s.add_scan(path)
-        self.load_all()
+        if str(path).endswith(('.mcap', '.mcap.zstd')):
+            return self.import_bags_dialog(path)
+        sc = self.s.add_scan(path)
+        self._ingest([sc])
+
+    # ── новый проект / импорт bag ────────────────────────────────────────
+    def on_new_project(self):
+        def reset():
+            self._load_gen += 1                          # остановить фоновый анализ старого
+            self.s = Session()
+            self.sw.scene.clear_geometry()
+            self.moving = self.fixed = None
+            self.T_moving = None
+            self.selection, self._sel_frusta = {}, []
+            self.tree_sel = None
+            self._saved_sig = self.s.state_signature()
+            self.refresh_scan_list()
+            self.refresh_pairs()
+            self.refresh_manual_combos()
+            self.set_status('Новый проект: «Импорт bag...» или «Добавить скан...»')
+        if self.dirty():
+            self._ask('Новый проект', [('Несохранённые изменения будут потеряны. Продолжить?',
+                                        'combo', 'Да', ['Да', 'Нет'])],
+                      lambda ans: reset() if ans == 'Да' else None)
+        else:
+            reset()
+
+    def on_import_bags(self):
+        self._file_dialog(gui.FileDialog.OPEN_DIR, 'Папка bag или папка с bag-ами',
+                          [], self.import_bags_dialog)
+
+    def _scans_dir(self, first_bag):
+        """Куда писать сканы: <папка проекта>/scans, иначе <папка над bag-ами>/scans."""
+        if self.s.project_path:
+            return Path(self.s.project_path).resolve().parent / 'scans'
+        b = Path(first_bag).resolve()
+        return (b.parent.parent if b.is_file() else b.parent) / 'scans'
+
+    def import_bags_dialog(self, path):
+        import bag_reconstruct as br
+        bags = br.find_bags(path)
+        if not bags:
+            self.set_status(f'bag не найден: {path}')
+            return
+        out_default = str(self._scans_dir(bags[0]))
+        group_default = Path(path).name if len(bags) > 1 else 'Импорт'
+        em = self.em
+        dlg = gui.Dialog('Импорт bag')
+        v = gui.Vert(0.5 * em, gui.Margins(em, em, em, em))
+        v.add_child(gui.Label(f'Найдено bag: {len(bags)}' +
+                              (f"  ({', '.join(br.bag_name(b) for b in bags[:4])}{', ...' if len(bags) > 4 else ''})")))
+        tilt = gui.Combobox()
+        for t in ('по полу и стенам', 'по IMU (плата осью X вверх)', 'не исправлять'):
+            tilt.add_item(t)
+        voxel = gui.NumberEdit(gui.NumberEdit.DOUBLE)
+        voxel.double_value = br.DEFAULTS['voxel']
+        rmax = gui.NumberEdit(gui.NumberEdit.DOUBLE)
+        rmax.double_value = br.DEFAULTS['max_range']
+        outdir = gui.TextEdit()
+        outdir.text_value = out_default
+        group = gui.TextEdit()
+        group.text_value = group_default
+        auto = gui.Checkbox('После импорта - автостыковка (по дереву)')
+        auto.checked = True
+        v.add_child(self._row(gui.Label('Наклон оси:'), tilt))
+        v.add_child(self._row(gui.Label('Воксель, м'), voxel, gui.Label('Макс. дальность, м'), rmax))
+        v.add_child(self._row(gui.Label('Папка сканов'), outdir))
+        v.add_child(self._row(gui.Label('Группа в дереве'), group))
+        v.add_child(auto)
+
+        def ok():
+            self.w.close_dialog()
+            mode = ['geometry', 'imu_x', 'none'][max(0, tilt.selected_index)]
+            self.import_bags(bags, Path(outdir.text_value.strip() or out_default), mode,
+                             voxel.double_value, rmax.double_value, group.text_value.strip(),
+                             auto.checked)
+        v.add_child(self._row(self._btn('Импортировать', ok), self._btn('Отмена', self.w.close_dialog)))
+        dlg.add_child(v)
+        self.w.show_dialog(dlg)
+
+    def import_bags(self, bags, out_dir, tilt='geometry', voxel=0.01, max_range=60.0,
+                    group_name='Импорт', auto_register=True):
+        """Реконструкция bag-ов в фоне; каждый готовый скан сразу добавляется в проект."""
+        import bag_reconstruct as br
+        gid = self.s.tree.add_group('root', group_name or 'Импорт', 'прочее') if group_name else None
+        params = {'voxel': voxel, 'min_range': br.DEFAULTS['min_range'], 'max_range': max_range,
+                  'tilt': tilt}
+        post = lambda fn: self.app.post_to_main_thread(self.w, fn)
+        added = []
+
+        def work(progress):
+            for k, b in enumerate(bags):
+                name = br.bag_name(b)
+                out = Path(out_dir) / f'{name}.ply'
+                meta_path = out.with_suffix('.json')
+                meta = None
+                if out.exists() and meta_path.exists():   # уже реконструирован с теми же параметрами
+                    try:
+                        old = json.loads(meta_path.read_text(encoding='utf-8'))
+                        if old.get('params') == params and Path(b).stat().st_mtime <= out.stat().st_mtime:
+                            meta = old
+                    except Exception:                    # noqa: BLE001
+                        meta = None
+                if meta is None:
+                    def prog(f, msg, k=k):
+                        progress((k + f) / len(bags), f'[{k + 1}/{len(bags)}] {msg}')
+                    try:
+                        P, meta = br.reconstruct(b, voxel, params['min_range'], max_range, tilt, prog)
+                    except Exception as e:               # noqa: BLE001
+                        post(lambda e=e, name=name: self.set_status(f'{name}: пропущен ({e})'))
+                        continue
+                    br.save_scan(P, out, meta)
+                post(lambda out=out, meta=meta: added.append(self._add_imported(out, meta, gid)))
+            return True
+
+        def done(_):
+            scans = [sc for sc in added if sc is not None]
+            self.refresh_scan_list()
+            self.refresh_manual_combos()
+            self.set_status(f'импортировано сканов: {len(scans)} -> {out_dir}; анализ в фоне...')
+            self._ingest(scans, show=False, then_auto=auto_register)
+        self.run_bg(f'импорт {len(bags)} bag...', work, done)
+
+    def _add_imported(self, path, meta, gid):
+        if self.s.by_id(Path(path).name) is not None:
+            return None
+        sc = self.s.add_scan(path, source=meta, group=gid)
+        sc._display = sc.quick_points(max(scan_gui_display_voxel(), 0.03))
+        self.s.apply_visibility()
+        self._show_scan(sc)
+        self.refresh_scan_list()
+        if len(self.s.scans) == 1:
+            self.view_top()
+        return sc
+
+    def _ingest(self, scans, show=True, then_auto=False):
+        """Показать новые сканы (сырыми), затем анализ в фоне и, по желанию, автостыковка."""
+        if not scans:
+            return
+        if show:
+            for sc in scans:
+                if getattr(sc, '_display', None) is None:
+                    sc._display = sc.quick_points(max(scan_gui_display_voxel(), 0.03))
+                self._show_scan(sc)
+            self.refresh_scan_list()
+            self.refresh_manual_combos()
+        todo = [sc for sc in scans if not sc.analyzed]
+        if then_auto:
+            self._after_analysis = self.on_auto
+        if todo:
+            self._analyze_bg(todo, self._load_gen)
+        elif then_auto:
+            self._after_analysis = None
+            self.on_auto()
 
     def on_save(self):
         if not self.s.project_path:

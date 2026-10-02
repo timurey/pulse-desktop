@@ -62,6 +62,7 @@ class Scan:
         self._reflect_report = None
         self._openings = None
         self._quick_R = None         # вертикаль до полного анализа (быстрый показ)
+        self.source = None           # откуда скан: метаданные реконструкции из bag
         self.from_cache = False      # анализ взят из кеша проекта
         self.cache_dirty = False     # анализ посчитан и ещё не записан в кеш
         self._lock = threading.RLock()
@@ -202,7 +203,8 @@ class Scan:
         return {'id': self.id, 'path': self.path, 'up': self.up,
                 'pose': None if self.pose is None else self.pose.tolist(),
                 'clean': self.clean,
-                'erase': [np.asarray(r).tolist() for r in self.erase]}
+                'erase': [np.asarray(r).tolist() for r in self.erase],
+                'source': self.source}
 
 
 # ── сеанс ──────────────────────────────────────────────────────────────────
@@ -226,6 +228,7 @@ class Session:
             sc = Scan(e['path'], e.get('up', 'auto'), e.get('pose'), e['id'])
             sc.clean = e.get('clean', True)
             sc.erase = [np.asarray(r, float) for r in e.get('erase', [])]
+            sc.source = e.get('source')
             s.scans.append(sc)
         s.frame = proj.get('frame') or s.scans[0].id
         s.level = np.asarray(proj.get('level', np.eye(3).tolist()), float)
@@ -243,12 +246,15 @@ class Session:
             s.add_scan(p)
         return s
 
-    def add_scan(self, path):
+    def add_scan(self, path, source=None, group=None):
         sc = Scan(path)
         if self.by_id(sc.id) is not None:
             return self.by_id(sc.id)
+        sc.source = source
         self.scans.append(sc)
         self.tree.sync([x.id for x in self.scans])
+        if group and self.tree.group(group) is not None:
+            self.tree.move(sc.id, group)
         if self.frame is None:
             self.frame = sc.id
             sc.pose = np.eye(4)
