@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (QMainWindow, QWidget, QFrame, QHBoxLayout, QVBoxL
 
 import plane_register as pr
 import manual_clean
+import quality
 from scan_session import Session
 from scan_tree import KINDS
 
@@ -244,6 +245,11 @@ class MainWindow(QMainWindow):
         # дерево, слои
         self.tree_sel = None
         self._vis_backup = None
+        # качество совмещения: результат, ключ состояния, для которого он посчитан
+        self.qual = {'res': None, 'key': None, 'busy': False, 'areas': []}
+        self._qual_timer = QTimer(self)
+        self._qual_timer.setSingleShot(True)
+        self._qual_timer.timeout.connect(self._quality_areas)
         self.setWindowTitle('Pulse Scan')
         self._build()
         self._shortcuts()
@@ -279,6 +285,7 @@ class MainWindow(QMainWindow):
         self.tree_panel.moved.connect(self.on_tree_move_drop)
         self.tree_panel.action.connect(self.on_tree_action)
         self.tree_panel.layerToggled.connect(self.on_layer)
+        self.tree_panel.qualityChanged.connect(lambda thr, m: self.quality_refresh())
         self.tree_panel.setMinimumWidth(220)
         self.split.addWidget(self.tree_panel)
         self.vsplit = QSplitter(Qt.Vertical)
@@ -296,6 +303,7 @@ class MainWindow(QMainWindow):
         self.dock.candSearch.connect(self.on_cand_search)
         self.dock.candSelected.connect(self.on_cand_selected)
         self.dock.candAction.connect(self.on_cand_action)
+        self.dock.qualitySelected.connect(self.on_quality_selected)
         self.dock.setMinimumHeight(120)
         self.vsplit.addWidget(self.dock)
         self.vsplit.setStretchFactor(0, 1)
@@ -509,6 +517,8 @@ class MainWindow(QMainWindow):
         par, px = self.view.parallel, self.view.point_px
         status = self.st_text.text()
         sizes = (self.split.sizes(), self.vsplit.sizes())
+        layers = {k: sw.isChecked() for k, sw in self.tree_panel.switches.items()}
+        q_thr, q_method = self.tree_panel.q_slider.value(), self.tree_panel.q_method.value()
         self.theme.set(not self.theme.dark)
         self.settings.setValue('dark', self.theme.dark)
         QApplication.instance().setStyleSheet(self.theme.qss())
@@ -525,6 +535,12 @@ class MainWindow(QMainWindow):
         if fly:
             self.toggle_fly()
         self.set_mode(self.mode, force=True)
+        tp = self.tree_panel
+        tp.q_slider.setValue(q_thr)
+        tp.q_method.group.button(tp.q_method.values.index(q_method)).setChecked(True)
+        for k, on in layers.items():
+            tp.switches[k].setChecked(on, emit=on != (k == 'grid'))
+        self.quality_refresh()
         self.set_status(status, log=False)
 
     # ── состояние ────────────────────────────────────────────────────────
@@ -651,6 +667,7 @@ class MainWindow(QMainWindow):
         self.draw_features()
         self.update_grid()
         self.refresh_stats()
+        self.quality_refresh()
 
     def apply_visibility(self):
         for sc in self.s.scans:
@@ -658,6 +675,7 @@ class MainWindow(QMainWindow):
         self.draw_features()
         for sid in list(self.ghost_shown):
             self._draw_ghosts(self.s.by_id(sid))
+        self.quality_refresh()
 
     def _visible_bbox(self):
         pts = []
@@ -1863,9 +1881,89 @@ class MainWindow(QMainWindow):
         self._banner()
         self.set_status(f'полёт из точки {short(sc.id)}: WASD, мышь — обзор, Esc — выход', log=False)
 
+    # ── качество совмещения ──────────────────────────────────────────────
+    def _quality_key(self):
+        _, method = self.tree_panel.quality_params()
+        return (method, self.s.state_signature(), tuple((sc.id, sc.visible, sc.analyzed) for sc in self.s.scans))
+
+    def quality_refresh(self):
+        """
+        Слой качества: пересчёт в фоне, только если изменились позы, видимость, чистка
+        или способ; иначе (ползунок порога) — перекраска уже посчитанного.
+        """
+        if not self.tree_panel.layer('quality'):
+            self.view.remove('qual')
+            self.dock.set_quality([])
+            return
+        key = self._quality_key()
+        if self.qual['res'] is not None and self.qual['key'] == key:
+            self._quality_draw()
+            return
+        if self.qual['busy']:
+            return                                       # по окончании расчёта проверим ключ снова
+        if len([sc for sc in self.s.placed() if sc.visible]) < 2:
+            self.view.remove('qual')
+            self.tree_panel.q_info.setText('нужны хотя бы два видимых размещённых скана')
+            self.dock.set_quality([])
+            return
+        self.qual['busy'] = True
+        self.tree_panel.q_info.setText('пересчёт…')
+        method = key[0]
+        sess = self.s
+        t0 = time.time()
+
+        def done(res):
+            self.qual['busy'] = False
+            if sess is not self.s:
+                return
+            self.qual['res'], self.qual['key'] = res, key
+            self.tree_panel.q_info.setText(
+                f"{'по плоскостям' if method == 'planes' else 'локально'}: ячеек {len(res):,}, "
+                f'{time.time() - t0:.1f} c'.replace(',', ' '))
+            self.quality_refresh()                       # ключ мог измениться за время расчёта
+
+        def fail(e):
+            self.qual['busy'] = False
+            self.tree_panel.q_info.setText(f'ошибка: {e}')
+        bg.run(lambda: quality.compute(sess, method), done, fail)
+
+    def _quality_draw(self):
+        thr, _ = self.tree_panel.quality_params()
+        P, C = quality.colors(self.qual['res'], thr)
+        self.view.set_cloud('qual', P, (1, 0.8, 0.2), colors=C, size=self.view.point_px + 1, on_top=True)
+        self._qual_timer.start(150)                      # список мест — после остановки ползунка
+
+    def _quality_areas(self):
+        res = self.qual['res']
+        if res is None or not self.tree_panel.layer('quality'):
+            return
+        thr, _ = self.tree_panel.quality_params()
+        areas = quality.problem_areas(res, thr)
+        self.qual['areas'] = areas
+        kind_ru = {'wall': 'стена', 'floor': 'пол', 'ceiling': 'потолок', 'local': 'участок'}
+        rows = [(kind_ru.get(a['kind'], a['kind']), f"{a['max'] * 100:.1f}", f"{a['median'] * 100:.1f}",
+                 f"{a['area']:.2f}", ', '.join(short(x) for x in a['scans'])) for a in areas]
+        self.dock.set_quality(rows, None if rows else f'толще {thr * 100:.1f} см мест нет')
+
+    def on_quality_selected(self, i):
+        areas = self.qual.get('areas') or []
+        if not (0 <= i < len(areas)) or self.view.fly:
+            return
+        res, a = self.qual['res'], areas[i]
+        C = res.center[a['cells']]
+        lo, hi = C.min(axis=0) - 1.0, C.max(axis=0) + 1.0
+        R = self.view.basis()
+        self.view.fit(lo, hi, R[:, 2], R[:, 1])
+        self.set_status(f"{a['kind']}: до {a['max'] * 100:.1f} см, сканы "
+                        f"{', '.join(short(x) for x in a['scans'])}", log=False)
+
     # ── найденные объекты ────────────────────────────────────────────────
     def on_layer(self, key, on):
-        if key == 'grid':
+        if key == 'quality':
+            if on:
+                self.dock.tabs.setCurrentIndex(4)
+            self.quality_refresh()
+        elif key == 'grid':
             self.update_grid()
         elif key == 'ghosts':
             self.ghost_shown = {sc.id for sc in self.s.scans if sc.analyzed} if on else set()

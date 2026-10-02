@@ -112,7 +112,14 @@ class CloudView(QWidget):
         self.ren = vtkRenderer()
         self.ren.SetNearClippingPlaneTolerance(0.0005)
         self.rw.AddRenderer(self.ren)
+        # верхний слой: подсветка (качество, найденное) видна сквозь облака; камера общая
+        self.rw.SetNumberOfLayers(2)
+        self.ren_top = vtkRenderer()
+        self.ren_top.SetLayer(1)
+        self.ren_top.InteractiveOff()
+        self.rw.AddRenderer(self.ren_top)
         self.cam = self.ren.GetActiveCamera()
+        self.ren_top.SetActiveCamera(self.cam)
         self.cam.SetViewAngle(self.FOV)
         self.items = {}
         self.point_px = 2.0                  # размер точки облака в логических пикселях
@@ -143,28 +150,33 @@ class CloudView(QWidget):
     def remove(self, name):
         it = self.items.pop(name, None)
         if it is not None:
-            self.ren.RemoveActor(it.actor)
+            self._ren_of(it).RemoveActor(it.actor)
             self.update_view()
 
     def remove_prefix(self, prefix):
         for n in [n for n in self.items if n.startswith(prefix)]:
-            self.ren.RemoveActor(self.items.pop(n).actor)
+            it = self.items.pop(n)
+            self._ren_of(it).RemoveActor(it.actor)
         self.update_view()
 
     def clear(self):
         for it in self.items.values():
-            self.ren.RemoveActor(it.actor)
+            self._ren_of(it).RemoveActor(it.actor)
         self.items = {}
         self.update_view()
 
-    def _add(self, name, pd, T, kind, P, color=None, size=None, width=None, scalars=False, opacity=1.0):
+    def _add(self, name, pd, T, kind, P, color=None, size=None, width=None, scalars=False, opacity=1.0,
+             point_scalars=False, on_top=False):
         old = self.items.pop(name, None)
         if old is not None:
-            self.ren.RemoveActor(old.actor)
+            self._ren_of(old).RemoveActor(old.actor)
         m = vtkPolyDataMapper()
         m.SetInputData(pd)
-        if scalars:
-            m.SetScalarModeToUseCellData()
+        if scalars or point_scalars:
+            if point_scalars:
+                m.SetScalarModeToUsePointData()
+            else:
+                m.SetScalarModeToUseCellData()
             m.SetColorModeToDirectScalars()
             m.ScalarVisibilityOn()
         else:
@@ -185,17 +197,27 @@ class CloudView(QWidget):
             pr.SetRenderLinesAsTubes(False)
         if T is not None:
             a.SetUserMatrix(_vtk_matrix(T))
-        self.ren.AddActor(a)
+        (self.ren_top if on_top else self.ren).AddActor(a)
+        a._on_top = on_top
         self.items[name] = _Item(a, P, None if T is None else np.asarray(T, float), kind, size)
         self.update_view()
         return a
 
-    def set_cloud(self, name, P, color, T=None, visible=True, size=None):
+    def _ren_of(self, it):
+        return self.ren_top if getattr(it.actor, '_on_top', False) else self.ren
+
+    def set_cloud(self, name, P, color, T=None, visible=True, size=None, colors=None, on_top=False):
+        """colors — цвет на точку (N×3 uint8), иначе один цвет color; on_top — поверх облаков."""
         P = np.asarray(P)
         if len(P) == 0:
             self.remove(name)
             return None
-        a = self._add(name, points_polydata(P), T, 'points', P, color, size)
+        pd = points_polydata(P)
+        if colors is not None:
+            arr = numpy_to_vtk(np.ascontiguousarray(colors, np.uint8), deep=True)
+            arr.SetName('colors')
+            pd.GetPointData().SetScalars(arr)
+        a = self._add(name, pd, T, 'points', P, color, size, point_scalars=colors is not None, on_top=on_top)
         a.SetVisibility(bool(visible))
         return a
 

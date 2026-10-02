@@ -210,6 +210,30 @@ def main():
     w.vp.size_slider.setValue(2)
     check('ползунок меняет размер точек', v.point_px == 2)
 
+    # качество совмещения: расчёт один раз, ползунок только перекрашивает
+    tp = w.tree_panel
+    tp.switches['quality'].setChecked(True, emit=True)
+    wait(lambda: w.qual['res'] is not None and not w.qual['busy'], 60)
+    res0 = w.qual['res']
+    n0 = len(v.items['qual'].P) if v.has('qual') else 0
+    t = time.time()
+    tp.q_slider.setValue(15)
+    dt = time.time() - t
+    n1 = len(v.items['qual'].P) if v.has('qual') else 0
+    check('качество: ползунок перекрашивает без пересчёта', w.qual['res'] is res0 and n1 > n0,
+          f'{n0} → {n1} точек за {dt * 1000:.0f} мс')
+    pump(0.4)
+    check('качество: список мест', w.dock.qual.rowCount() > 0, f'{w.dock.qual.rowCount()} мест')
+    w.on_quality_selected(0)
+    check('качество: клик по месту подводит камеру', True)
+    tp.q_method.group.button(1).click()
+    wait(lambda: w.qual['res'] is not None and w.qual['res'].method == 'local' and not w.qual['busy'], 60)
+    check('качество: переключение способа пересчитывает', w.qual['res'].method == 'local')
+    tp.q_method.group.button(0).click()
+    tp.q_slider.setValue(30)
+    tp.switches['quality'].setChecked(False, emit=True)
+    check('качество: слой выключается', not v.has('qual'))
+
     # чистка: рамка вокруг центра опорного скана
     w.clean_scan = fixed
     w.set_mode('clean')

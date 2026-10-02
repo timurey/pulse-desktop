@@ -112,6 +112,23 @@ def main():
         shot('03_features')
         w.tree_panel.switches['planes'].setChecked(False, emit=True)
         w.tree_panel.switches['openings'].setChecked(False, emit=True)
+        w.tree_panel.switches['quality'].setChecked(True, emit=True)
+        wait(lambda: w.qual['res'] is not None and not w.qual['busy'], step_quality, 60)
+
+    def step_quality():
+        QTimer.singleShot(400, lambda: (shot('03b_quality'), step_quality_local()))
+
+    def step_quality_local():
+        w.tree_panel.q_method.group.button(1).click()
+        wait(lambda: w.qual['res'] is not None and w.qual['res'].method == 'local' and not w.qual['busy'],
+             lambda: QTimer.singleShot(400, lambda: (shot('03c_quality_local'), step_quality_off())), 60)
+
+    def step_quality_off():
+        w.tree_panel.switches['quality'].setChecked(False, emit=True)
+        w.tree_panel.q_method.group.button(0).click()
+        step_manual_start()
+
+    def step_manual_start():
         unplaced = [x for x in sess.scans if x.pose is None]
         moving = unplaced[0] if unplaced else sess.scans[-1]
         w.start_manual(sess.frame, moving.id)

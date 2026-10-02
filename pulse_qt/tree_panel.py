@@ -2,7 +2,7 @@
 
 from PySide6.QtCore import Qt, Signal, QSize
 from PySide6.QtGui import QIcon
-from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QTreeWidget, QTreeWidgetItem,
+from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QTreeWidget, QTreeWidgetItem, QSlider,
                                QAbstractItemView, QLabel, QFrame, QMenu, QToolButton, QLineEdit)
 
 from scan_tree import Group
@@ -100,11 +100,13 @@ class TreePanel(QFrame):
     moved = Signal(str, str)
     action = Signal(str, object)                   # имя действия, ключ
     layerToggled = Signal(str, bool)
+    qualityChanged = Signal(float, str)            # порог, м; способ: planes | local
 
     LAYERS = [('planes', 'Поверхности', 'mdi6.layers-outline', False),
               ('openings', 'Проёмы', 'mdi6.window-closed-variant', False),
               ('ghosts', 'Отражения', 'mdi6.blur', False),
-              ('grid', 'Сетка 1 м', 'mdi6.grid', True)]
+              ('grid', 'Сетка 1 м', 'mdi6.grid', True),
+              ('quality', 'Качество совмещения', 'mdi6.texture-box', False)]
 
     def __init__(self):
         super().__init__()
@@ -168,7 +170,38 @@ class TreePanel(QFrame):
             name.setStyleSheet(f"color: {t.q('ink2').name()};")
             ll.addWidget(W.hbox(icl, name, None, sw, spacing=8))
             self.switches[key] = sw
+        # качество: порог толщины и способ — видны, пока слой включён
+        self.q_box = QWidget()
+        ql = QVBoxLayout(self.q_box)
+        ql.setContentsMargins(26, 0, 0, 0)
+        ql.setSpacing(6)
+        self.q_slider = QSlider(Qt.Horizontal)
+        self.q_slider.setRange(5, 150)                 # мм / 10 → 0.5…15 см
+        self.q_slider.setValue(30)
+        self.q_slider.setFocusPolicy(Qt.NoFocus)
+        self.q_slider.setToolTip('Подсвечивать места, где поверхность из разных сканов толще порога')
+        self.q_value = W.label('3.0 см', 'KV_v')
+        self.q_value.setFixedWidth(46)
+        self.q_value.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        ql.addWidget(W.hbox(W.label('порог'), self.q_slider, self.q_value, spacing=6))
+        self.q_method = W.Segmented([('по плоскостям', 'planes'), ('локально', 'local')], 'planes')
+        ql.addWidget(self.q_method)
+        self.q_info = W.label('', 'Hint', wrap=True)
+        ql.addWidget(self.q_info)
+        self.q_box.setVisible(False)
+        ll.addWidget(self.q_box)
+        self.switches['quality'].toggled.connect(self.q_box.setVisible)
+        self.q_slider.valueChanged.connect(self._q_changed)
+        self.q_method.changed.connect(lambda _: self._q_changed())
         lay.addWidget(layers)
+
+    def quality_params(self):
+        return self.q_slider.value() / 1000.0, self.q_method.value()
+
+    def _q_changed(self, *_):
+        thr, m = self.quality_params()
+        self.q_value.setText(f'{thr * 100:.1f} см')
+        self.qualityChanged.emit(thr, m)
 
     def _toggle_filter(self, on):
         self._fw.setVisible(on)

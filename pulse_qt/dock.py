@@ -47,6 +47,7 @@ class Dock(QFrame):
     candSelected = Signal(int)
     candAction = Signal(str, int)
     autoRequested = Signal()
+    qualitySelected = Signal(int)
 
     def __init__(self):
         super().__init__()
@@ -65,7 +66,8 @@ class Dock(QFrame):
         self.tabs.setFocusPolicy(Qt.NoFocus)
         t = W.THEME
         for ic, text in (('mdi6.graph-outline', 'Пары'), ('mdi6.sync', 'Циклы'),
-                         ('mdi6.target', 'Кандидаты'), ('mdi6.text-box-outline', 'Журнал')):
+                         ('mdi6.target', 'Кандидаты'), ('mdi6.text-box-outline', 'Журнал'),
+                         ('mdi6.texture-box', 'Качество')):
             self.tabs.addTab(t.icon(ic, 'ink3'), text)
         hl.addWidget(self.tabs)
         hl.addStretch(1)
@@ -127,6 +129,22 @@ class Dock(QFrame):
         self.log.setFrameShape(QFrame.NoFrame)
         self.log.setStyleSheet('background: transparent; padding: 6px 10px;')
         self.stack.addWidget(self.log)
+        # качество совмещения
+        qw = QWidget()
+        ql = QVBoxLayout(qw)
+        ql.setContentsMargins(0, 0, 0, 0)
+        ql.setSpacing(0)
+        self.qual = _table(['№', 'Поверхность', 'Макс., см', 'Медиана, см', 'Площадь, м²', 'Сканы'],
+                           numeric=(2, 3, 4))
+        self.qual.itemSelectionChanged.connect(lambda: self.qualitySelected.emit(self._row(self.qual)))
+        self.qual.cellClicked.connect(lambda r, c: self.qualitySelected.emit(r))
+        self.qual_empty = W.label('Включите слой «Качество совмещения» в панели слоёв: здесь появятся '
+                                  'места, где поверхность из разных сканов толще порога.', 'Hint', wrap=True)
+        self.qual_empty.setAlignment(Qt.AlignCenter)
+        ql.addWidget(self.qual, 1)
+        ql.addWidget(self.qual_empty, 1)
+        self.qual.setVisible(False)
+        self.stack.addWidget(qw)
 
     # ── пары ─────────────────────────────────────────────────────────────
     def set_pairs(self, rows):
@@ -210,6 +228,28 @@ class Dock(QFrame):
 
     def _cand_row(self):
         r = self.cands.selectionModel().selectedRows()
+        return r[0].row() if r else -1
+
+    # ── качество ─────────────────────────────────────────────────────────
+    def set_quality(self, rows, empty_text=None):
+        """rows: [(вид, макс, медиана, площадь, сканы)]."""
+        t = self.qual
+        t.setRowCount(len(rows))
+        for r, row in enumerate(rows):
+            t.setItem(r, 0, _cell(str(r + 1)))
+            t.setItem(r, 1, _cell(row[0], mono=False))
+            for c, v in enumerate(row[1:4]):
+                t.setItem(r, 2 + c, _cell(v, True))
+            t.setItem(r, 5, _cell(row[4]))
+        self.tabs.setTabText(4, f'Качество · {len(rows)}' if rows else 'Качество')
+        t.setVisible(bool(rows))
+        self.qual_empty.setVisible(not rows)
+        if empty_text:
+            self.qual_empty.setText(empty_text)
+
+    @staticmethod
+    def _row(table):
+        r = table.selectionModel().selectedRows()
         return r[0].row() if r else -1
 
     # ── журнал ───────────────────────────────────────────────────────────
