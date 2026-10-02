@@ -236,6 +236,62 @@ class Session:
     def reset_level(self):
         self.level = np.eye(3)
 
+    @staticmethod
+    def _wall_direction(scans_T, min_area=1.0):
+        """Манхэттенское направление стен (mod 90°, рад) группы сканов в общей системе."""
+        a, w = [], []
+        for sc, T in scans_T:
+            for p in sc.planes:
+                if p.kind == 'wall' and p.area >= min_area:
+                    n = T[:3, :3] @ np.asarray(p.normal)
+                    if abs(n[2]) < 0.3:
+                        a.append(np.arctan2(n[1], n[0]))
+                        w.append(p.area)
+        if not a:
+            return None
+        z = np.sum(np.asarray(w) * np.exp(4j * np.asarray(a)))
+        return float(np.angle(z) / 4)
+
+    def align_plan_to_walls(self):
+        """
+        Повернуть общую систему вокруг вертикали так, чтобы стены размещённых сканов
+        легли вдоль осей X/Y (в виде сверху — по краям экрана). → поворот, градусы.
+        """
+        th = self._wall_direction([(sc, self.Tc(sc)) for sc in self.placed()])
+        if th is None:
+            return None
+        self.level = pr.rot_z(-th) @ self.level
+        return float(np.degrees(-th))
+
+    def rotate_plan(self, deg):
+        """Тонкий поворот всего плана вокруг вертикали (общая система)."""
+        self.level = pr.rot_z(np.radians(deg)) @ self.level
+
+    def snap_yaw_to_walls(self, moving, T, others=None, max_deg=45.0):
+        """
+        Довернуть подвижный скан вокруг вертикали так, чтобы его стены стали
+        параллельны стенам размещённых сканов (ближайший угол mod 90°). → (T', поворот°).
+        """
+        others = [s for s in (others or self.placed()) if s is not moving]
+        th_ref = self._wall_direction([(sc, self.Tc(sc)) for sc in others])
+        th_mov = self._wall_direction([(moving, np.asarray(T))])
+        if th_ref is None or th_mov is None:
+            return np.asarray(T), None
+        d = (th_ref - th_mov + np.pi / 4) % (np.pi / 2) - np.pi / 4      # в [-45°, 45°)
+        if abs(np.degrees(d)) > max_deg:
+            return np.asarray(T), None
+        return self.nudge(T, dyaw_deg=float(np.degrees(d))), float(np.degrees(d))
+
+    def state_signature(self):
+        """Сводка состояния для проверки «есть несохранённые изменения»."""
+        parts = [self.frame, np.round(self.level, 6).tobytes()]
+        for sc in self.scans:
+            parts += [sc.id, sc.clean, len(sc.erase),
+                      None if sc.pose is None else np.round(sc.pose, 6).tobytes()]
+        for e in self.edges:
+            parts += [e['A'], e['B'], e.get('user'), e.get('method')]
+        return hash(tuple(parts))
+
     def placed(self):
         return [s for s in self.scans if s.pose is not None]
 

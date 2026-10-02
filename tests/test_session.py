@@ -156,6 +156,23 @@ class TestSession(unittest.TestCase):
         self.assertLess(dt, 0.03, info)
         self.assertLess(da, 0.3, info)
 
+    def test_plan_align_and_yaw_snap(self):
+        s = Session.from_scans(self.paths[:2])
+        A, B = s.scans
+        d = s.align_plan_to_walls()                     # скан A повёрнут на 0.3 рад
+        self.assertIsNotNone(d)
+        th = s._wall_direction([(A, s.Tc(A))])
+        self.assertLess(abs(np.degrees(th)), 0.5)       # стены вдоль осей
+        # подвижный B в истинной позе, но с ошибкой поворота 7° → доворот её убирает
+        F = pr.make_T(FLIP, np.zeros(3))
+        oA, yA = self.origins['A.ply']
+        oB, yB = self.origins['B.ply']
+        T_true = pr.make_T(s.level, np.zeros(3)) @ F @ gt_pose(oA, yA, oB, yB) @ F
+        T_bad = Session.nudge(T_true, dyaw_deg=7.0)
+        T_fix, dd = s.snap_yaw_to_walls(B, T_bad, others=[A])
+        self.assertAlmostEqual(dd, -7.0, delta=0.5)
+        self.assertLess(pr.pose_delta(T_fix, T_true)[1], 0.5)
+
     def test_project_portable(self):
         """Пути сканов в проекте относительные: папку можно перенести (другая машина/ОС)."""
         import shutil

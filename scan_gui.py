@@ -155,6 +155,9 @@ class App:
         self.s = session or Session()
         self.busy = False
         self._closed = False
+        self._force_close = False
+        self._last_esc = 0.0
+        self._saved_sig = None
         # ручной режим
         self.fixed = None
         self.moving = None
@@ -307,6 +310,13 @@ class App:
         v.add_child(self._btn('Скриншот (F12)', self.save_screenshot))
         v.add_child(self._row(self._btn('Выровнять проект по горизонту', self.on_level_project),
                               self._btn('Сбросить', self.on_level_reset)))
+        v.add_child(self._btn('Выровнять план по стенам (вид сверху)', self.on_align_plan))
+        self.plan_step = gui.NumberEdit(gui.NumberEdit.DOUBLE)
+        self.plan_step.double_value = 1.0
+        v.add_child(self._row(gui.Label('Поворот плана:'),
+                              self._btn('<', lambda: self.on_rotate_plan(1)),
+                              self._btn('>', lambda: self.on_rotate_plan(-1)),
+                              gui.Label('шаг, град'), self.plan_step))
         self.fly_btn = self._btn('Режим полёта (F)', self.toggle_fly)
         self.fly_combo = gui.Combobox()
         v.add_child(self._row(self.fly_btn, self._btn('Встать в точку скана', self.fly_to_scan)))
@@ -418,6 +428,11 @@ class App:
         v.add_child(gui.Label('крен - вокруг X, тангаж - вокруг Y (оси общей системы),\n'
                               'вращение вокруг точки сканера'))
         v.add_child(self._row(self._btn('Выровнять подвижный по горизонту', self.on_level_moving)))
+        v.add_child(self._row(self._btn('Довернуть подвижный по стенам', self.on_snap_yaw),
+                              gui.Label('шаг:'),
+                              self._btn('0.1', lambda: self._set_step_deg(0.1)),
+                              self._btn('1', lambda: self._set_step_deg(1.0)),
+                              self._btn('5', lambda: self._set_step_deg(5.0))))
         self.full_rot = gui.Checkbox('Полный поворот при решении (учитывать наклон)')
         self.full_rot.checked = True
         v.add_child(self.full_rot)
@@ -564,6 +579,7 @@ class App:
         self.run_bg('анализ сканов...', work, lambda _: self.after_load())
 
     def after_load(self):
+        self._saved_sig = self.s.state_signature()
         self.redraw_all()
         self.refresh_scan_list()
         self.refresh_pairs()
@@ -696,20 +712,24 @@ class App:
         if not self.s.project_path:
             return self.on_save_as()
         self.s.save()
+        self._saved_sig = self.s.state_signature()
         self.set_status(f'Сохранено: {self.s.project_path}')
 
     def on_save_as(self):
-        self._file_dialog(gui.FileDialog.SAVE, 'Сохранить проект', [('.json', 'Проект')],
-                          lambda p: (self.s.save(p), self.set_status(f'Сохранено: {p}')))
+        def done(p):
+            self.s.save(p)
+            self._saved_sig = self.s.state_signature()
+            self.set_status(f'Сохранено: {p}')
+        self._file_dialog(gui.FileDialog.SAVE, 'Сохранить проект', [('.json', 'Проект')], done)
 
     def on_level_project(self):
-        info = self.s.level_project()
+        info = self._with_plan_change(self.s.level_project)
         self.redraw_all()
         self.set_status(f"горизонт проекта: поправка {info['tilt_deg']:.2f} град по {info['horizontal']} "
                         f"гориз. и {info['walls']} верт. плоскостям (сохраняется в проекте)")
 
     def on_level_reset(self):
-        self.s.reset_level()
+        self._with_plan_change(self.s.reset_level)
         self.redraw_all()
         self.set_status('горизонт проекта сброшен')
 
@@ -792,6 +812,11 @@ class App:
 
     def _on_key(self, ev):
         down = ev.type == gui.KeyEvent.Type.DOWN
+        if ev.key == gui.KeyName.ESCAPE:
+            self._last_esc = time.time()          # отличить Esc от закрытия окна крестиком
+            if down:
+                self.on_escape()
+            return True
         if ev.key in self.MOD_KEYS:
             (self._mods.add if down else self._mods.discard)(ev.key)
         ctrl = bool(self._mods & {gui.KeyName.LEFT_CONTROL, gui.KeyName.RIGHT_CONTROL,
@@ -812,9 +837,6 @@ class App:
             self.toggle_fly()
             return True
         if self.fly:
-            if down and ev.key == gui.KeyName.ESCAPE:
-                self.toggle_fly()
-                return True
             if ev.key in self.FLY_KEYS:
                 (self.fly_keys.add if down else self.fly_keys.discard)(ev.key)
                 return True
@@ -869,8 +891,71 @@ class App:
         self.sw.force_redraw()
 
     def _on_close(self):
-        self._closed = True            # после закрытия тик не трогает сцены уничтоженного окна
-        return True
+        """
+        Open3D вызывает закрытие и по Esc (до нашего обработчика клавиш), и по крестику.
+        Окно закрывается только после подтверждения; Esc закрытие не вызывает.
+        """
+        if self._force_close:
+            self._closed = True        # после закрытия тик не трогает сцены уничтоженного окна
+            return True
+        self.app.post_to_main_thread(self.w, self._close_request)
+        return False
+
+    def _close_request(self):
+        if time.time() - self._last_esc < 0.6:
+            return                     # это был Esc — его обработал _on_key
+        self.confirm_close()
+
+    def dirty(self):
+        return self.s.scans and self.s.state_signature() != self._saved_sig
+
+    def confirm_close(self):
+        em = self.em
+        self._confirm_shown = True
+        dlg = gui.Dialog('Закрыть')
+        v = gui.Vert(0.6 * em, gui.Margins(em, em, em, em))
+        if self.dirty():
+            v.add_child(gui.Label('В проекте есть несохранённые изменения.\nСохранить перед выходом?'))
+        else:
+            v.add_child(gui.Label('Закрыть окно?'))
+        row = gui.Horiz(0.5 * em)
+
+        def quit_now():
+            self.w.close_dialog()
+            self._force_close = True
+            self.w.close()
+
+        def save_quit():
+            self.w.close_dialog()
+            if self.s.project_path:
+                self.s.save()
+                quit_now()
+            else:
+                self._file_dialog(gui.FileDialog.SAVE, 'Сохранить проект', [('.json', 'Проект')],
+                                  lambda p: (self.s.save(p), quit_now()))
+        if self.dirty():
+            row.add_child(self._btn('Сохранить и выйти', save_quit))
+            row.add_child(self._btn('Выйти без сохранения', quit_now))
+        else:
+            row.add_child(self._btn('Выйти', quit_now))
+        row.add_child(self._btn('Отмена', self.w.close_dialog))
+        v.add_child(row)
+        dlg.add_child(v)
+        self.w.show_dialog(dlg)
+
+    def on_escape(self):
+        """Esc: выйти из полёта / снять выделение / выйти из выделения / отменить незаконченную пару."""
+        if self.fly:
+            self.toggle_fly()
+        elif self.selection:
+            self.clear_selection()
+            self.set_status('выделение снято')
+        elif self.select_mode:
+            self.toggle_select()
+        elif self.pending is not None:
+            self.pending = None
+            self.refresh_manual()
+            self.set_status('незаконченная пара отменена')
 
     def _on_tick(self):
         if self._closed:
@@ -1506,6 +1591,47 @@ class App:
                                       droll * sd, dpitch * sd)
         self._update_moving()
         self.live_score()
+
+    def _set_step_deg(self, v):
+        self.step_deg.double_value = v
+        self.set_status(f'шаг поворота {v} град')
+
+    def on_snap_yaw(self):
+        if self.moving is None:
+            return
+        T2, d = self.s.snap_yaw_to_walls(self.moving, self.T_moving)
+        if d is None:
+            self.set_status('нет стен для доворота (в подвижном или размещённых сканах)')
+            return
+        self.T_moving = T2
+        self._update_moving()
+        self.live_score()
+        self.set_status(f'подвижный довёрнут по стенам на {d:+.2f} град')
+
+    def _with_plan_change(self, fn):
+        """Изменение общей системы: подвижный скан ручного режима поворачивается вместе с ней."""
+        L0 = self.s.level.copy()
+        r = fn()
+        if self.T_moving is not None:
+            D = np.eye(4)
+            D[:3, :3] = self.s.level @ L0.T
+            self.T_moving = D @ self.T_moving
+        return r
+
+    def on_align_plan(self):
+        d = self._with_plan_change(self.s.align_plan_to_walls)
+        if d is None:
+            self.set_status('нет стен для выравнивания плана')
+            return
+        self.redraw_all()
+        self.view_top()
+        self.set_status(f'план повёрнут на {d:+.2f} град: стены вдоль осей X/Y (сохраняется в проекте)')
+
+    def on_rotate_plan(self, sign):
+        st = self.plan_step.double_value * sign
+        self._with_plan_change(lambda: self.s.rotate_plan(st))
+        self.redraw_all()
+        self.set_status(f'план повёрнут на {st:+.2f} град')
 
     def on_level_moving(self):
         if self.moving is None:

@@ -43,6 +43,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **Целевые платформы — macOS, Windows, Linux.** Не используйте платформенно-зависимые вызовы без ветвления по `platform.system()` (см. `scan_gui.screen_size`, `capture_window`, `find_font`). Файлы читайте и пишите с `encoding='utf-8'`. В проектах храните пути относительно файла проекта (`scan_project.rel_path` / `abs_path`). CI: `.github/workflows/tests.yml` запускает тесты на трёх ОС.
 
+**Esc в Open3D закрывает окно** (`Window::OnKeyEvent` вызывает `Close()` раньше обработчика клавиш). Защита — `set_on_close`: окно закрывается только после подтверждения, а Esc распознаётся по времени последнего нажатия (`scan_gui._on_close`).
+
 **Шрифт GUI.** В Open3D 0.19 `add_typeface_for_code_points` не работает (выводит «?»). Кириллица подключается через `add_typeface_for_language(path, 'ru')`: любой «неизвестный» код языка даёт диапазон латиница + кириллица. Символы вне него (стрелки, ✓, ⌘, длинное тире) не отрисуются, поэтому в текстах интерфейса их не используйте. Без Open3D работают `offline_deskew.py` и `world_map.py`. Тестов, линтера и сборки нет. Изменения проверяют прогоном на реальном bag из `../bags/` (имена `static_YYYYMMDD_HHMMSS/`) и визуально, во `flythrough.py` или CloudCompare.
 
 ## Команды
