@@ -29,6 +29,7 @@ import plane_register as pr
 import scan_project as sp
 import openings as op_mod
 import reflections
+import manual_clean
 
 
 PALETTE = np.array([[31, 119, 180], [255, 127, 14], [44, 160, 44], [214, 39, 40],
@@ -51,6 +52,8 @@ class Scan:
         self.pose = None if pose is None else np.asarray(pose, float)   # исходная -> исходная опорного
         self.visible = True
         self.clean = True            # убирать отражения
+        self.erase = []              # ручная чистка: области (4 плоскости) в канон. системе
+        self._down_cache = None
         self.color = PALETTE[0]
         self._res = None
         self._ghost = None
@@ -71,9 +74,21 @@ class Scan:
 
     @property
     def down(self):
-        """Даунсемпл в канонической системе (с учётом чистки отражений)."""
-        d = self.res['down']
-        return d[~self.ghost_mask()] if self.clean else d
+        """Даунсемпл в канонической системе с учётом чистки отражений и ручной чистки."""
+        key = (self.clean, len(self.erase))
+        if self._down_cache is None or self._down_cache[0] != key:
+            d = self.res['down']
+            drop = self.ghost_mask() if self.clean else np.zeros(len(d), bool)
+            if self.erase:
+                drop = drop | manual_clean.inside_regions(d, self.erase)
+            self._down_cache = (key, d[~drop])
+        return self._down_cache[1]
+
+    def keep_mask(self, P_canon, clean=None):
+        """Маска сохраняемых точек произвольного облака в канон. системе (ручная чистка)."""
+        if not self.erase:
+            return np.ones(len(P_canon), bool)
+        return ~manual_clean.inside_regions(P_canon, self.erase)
 
     def ghost_mask(self):
         if self._ghost is None:
@@ -98,7 +113,8 @@ class Scan:
     def to_json(self):
         return {'id': self.id, 'path': self.path, 'up': self.up,
                 'pose': None if self.pose is None else self.pose.tolist(),
-                'clean': self.clean}
+                'clean': self.clean,
+                'erase': [np.asarray(r).tolist() for r in self.erase]}
 
 
 # ── сеанс ──────────────────────────────────────────────────────────────────
@@ -109,6 +125,7 @@ class Session:
         self.edges = []              # пары/рёбра (dict, как в scan_project)
         self.project_path = None
         self.level = np.eye(3)       # поправка горизонта проекта (поворот общей системы)
+        self.erase_undo = []         # [(scan_id, число добавленных областей)]
         self.lock = threading.RLock()
 
     # ── загрузка / сохранение ─────────────────────────────────────────────
@@ -119,6 +136,7 @@ class Session:
         for e in proj['scans']:
             sc = Scan(e['path'], e.get('up', 'auto'), e.get('pose'), e['id'])
             sc.clean = e.get('clean', True)
+            sc.erase = [np.asarray(r, float) for r in e.get('erase', [])]
             s.scans.append(sc)
         s.frame = proj.get('frame') or s.scans[0].id
         s.level = np.asarray(proj.get('level', np.eye(3).tolist()), float)
@@ -578,6 +596,38 @@ class Session:
                 break
         return out
 
+    # ── ручная чистка ────────────────────────────────────────────────────
+    def erase_region(self, scans_T, planes_common):
+        """
+        Удалить из сканов всё, что внутри областей (плоскости в общей системе).
+        planes_common: одна область (4×4) или список областей — одно действие для отмены.
+        scans_T: [(scan, T)] — T = текущая поза показа скана (канон. -> общая).
+        """
+        regions = [planes_common] if np.ndim(planes_common) == 2 else list(planes_common)
+        rec = []
+        for sc, T in scans_T:
+            for reg in regions:
+                sc.erase.append(manual_clean.planes_to_local(reg, T))
+            rec.append((sc.id, len(regions)))
+        if rec:
+            self.erase_undo.append(rec)
+        return rec
+
+    def undo_erase(self):
+        if not self.erase_undo:
+            return None
+        rec = self.erase_undo.pop()
+        for sid, k in rec:
+            sc = self.by_id(sid)
+            if sc is not None:
+                del sc.erase[len(sc.erase) - k:]
+        return rec
+
+    def clear_erase(self, scan):
+        scan.erase = []
+        self.erase_undo = [[x for x in r if x[0] != scan.id] for r in self.erase_undo]
+        self.erase_undo = [r for r in self.erase_undo if r]
+
     # ── экспорт ──────────────────────────────────────────────────────────
     def export(self, path, voxel=0.02, progress=None, frame='ref'):
         """
@@ -594,6 +644,8 @@ class Session:
                 pts, _ = reflections.clean_scan(s.path, s.up)
             else:
                 pts = planes.load_points(s.path)
+            if s.erase:                                        # ручная чистка (канон. система)
+                pts = pts[s.keep_mask(pts @ s.R_up.T)]
             pc = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pts))
             if voxel > 0:
                 pc = pc.voxel_down_sample(voxel)

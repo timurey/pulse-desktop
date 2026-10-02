@@ -37,6 +37,7 @@ import open3d as o3d
 from scan_session import Session, Scan, PALETTE
 import plane_register as pr
 from view_cube import ViewCube, look_from, slerp_dir
+import manual_clean
 
 gui = o3d.visualization.gui
 rendering = o3d.visualization.rendering
@@ -179,6 +180,12 @@ class App:
         self._cube_key = None         # (ориентация, наведение, размер) последней отрисовки
         self._cube_drag = None
         self._cube_anim = None
+        # ручная чистка прямоугольником
+        self.select_mode = False
+        self._rect = None             # (x0, y0, x1, y1, add) в пикселях виджета сцены
+        self.selection = {}           # id скана -> маска точек показа
+        self._sel_frusta = []         # области текущего выделения (общая система)
+        self._mods = set()            # нажатые модификаторы (KeyEvent их не передаёт)
         self._build()
         if self.s.scans:
             self.load_all()
@@ -447,6 +454,20 @@ class App:
         v.add_child(self._btn('Показать/скрыть отражения (красным)', self.on_show_ghosts))
         self.clean_report = gui.Label('')
         v.add_child(self.clean_report)
+        v.add_child(gui.Label('Ручная чистка (выделение прямоугольником):'))
+        self.sel_all = gui.Checkbox('все видимые сканы (иначе - выбранный выше)')
+        v.add_child(self.sel_all)
+        self.sel_btn = self._btn('Выделение прямоугольником (R)', self.toggle_select)
+        v.add_child(self.sel_btn)
+        v.add_child(gui.Label('левая кнопка - прямоугольник, Shift - добавить;\n'
+                              'вид - кубом навигации, масштаб - колесом.\n'
+                              'Удаляется всё в прямоугольнике на всю глубину взгляда'))
+        v.add_child(self._row(self._btn('Удалить выделенное (Delete)', self.on_erase),
+                              self._btn('Снять выделение', self.clear_selection)))
+        v.add_child(self._row(self._btn('Отменить удаление (Ctrl+Z)', self.on_undo_erase),
+                              self._btn('Сбросить ручную чистку скана', self.on_clear_erase)))
+        self.sel_label = gui.Label('')
+        v.add_child(self.sel_label)
         v.add_child(gui.Label('Экспорт склейки (только размещённые сканы)'))
         self.voxel = gui.NumberEdit(gui.NumberEdit.DOUBLE)
         self.voxel.double_value = 0.01
@@ -557,6 +578,8 @@ class App:
             sc.show_geometry(name, s.visible)
         for sid in list(self.ghost_shown):
             self._draw_ghosts(self.s.by_id(sid))
+        if self.selection:
+            self._draw_selection()
         self.sw.force_redraw()
         self.w.post_redraw()
 
@@ -744,8 +767,24 @@ class App:
                 gui.KeyName.SPACE, gui.KeyName.C, gui.KeyName.E, gui.KeyName.Q,
                 gui.KeyName.LEFT_SHIFT, gui.KeyName.RIGHT_SHIFT}
 
+    MOD_KEYS = {gui.KeyName.LEFT_CONTROL, gui.KeyName.RIGHT_CONTROL, gui.KeyName.META,
+                gui.KeyName.LEFT_SHIFT, gui.KeyName.RIGHT_SHIFT, gui.KeyName.ALT}
+
     def _on_key(self, ev):
         down = ev.type == gui.KeyEvent.Type.DOWN
+        if ev.key in self.MOD_KEYS:
+            (self._mods.add if down else self._mods.discard)(ev.key)
+        ctrl = bool(self._mods & {gui.KeyName.LEFT_CONTROL, gui.KeyName.RIGHT_CONTROL,
+                                  gui.KeyName.META})
+        if down and ctrl and ev.key == gui.KeyName.Z:
+            self.on_undo_erase()
+            return True
+        if down and not ctrl and ev.key == gui.KeyName.R and not getattr(ev, 'is_repeat', False):
+            self.toggle_select()
+            return True
+        if down and self.selection and ev.key in (gui.KeyName.DELETE, gui.KeyName.BACKSPACE):
+            self.on_erase()
+            return True
         if down and ev.key == gui.KeyName.F12:
             self.save_screenshot()
             return True
@@ -833,6 +872,166 @@ class App:
         self.fly_pos = self.fly_pos + v * d
         self._apply_fly_camera()
         return True
+
+    # ── ручная чистка ────────────────────────────────────────────────────
+    def toggle_select(self):
+        self.select_mode = not self.select_mode
+        self.sel_btn.text = ('Выйти из выделения (R)' if self.select_mode
+                             else 'Выделение прямоугольником (R)')
+        self.tabs.selected_tab_index = 4
+        self.set_status('выделение: тяните левой кнопкой (Shift - добавить), Delete - удалить'
+                        if self.select_mode else 'выделение выключено')
+        if not self.select_mode:
+            self._remove_rect()
+
+    def _select_targets(self):
+        """[(скан, поза показа)] — к кому применяется выделение."""
+        out = []
+        for s in self.s.scans:
+            T = self.T_moving if (s is self.moving and self.T_moving is not None) else self.s.Tc(s)
+            if T is None or not s.visible or getattr(s, '_display', None) is None:
+                continue
+            if self.sel_all.checked or s.id == self.clean_combo.selected_text:
+                out.append((s, T))
+        return out
+
+    def _rect_corners(self, x0, y0, x1, y1, depth):
+        cam = self.sw.scene.camera
+        W, H = self.sw.frame.width, self.sw.frame.height
+        return [np.asarray(cam.unproject(x, y, depth, W, H), float)
+                for x, y in ((x0, y0), (x1, y0), (x1, y1), (x0, y1))]
+
+    def _draw_rect(self):
+        name = 'sel:rect'
+        sc = self.sw.scene
+        if sc.has_geometry(name):
+            sc.remove_geometry(name)
+        if self._rect is None:
+            return
+        x0, y0, x1, y1, _ = self._rect
+        C = self._rect_corners(x0, y0, x1, y1, 0.02)     # чуть дальше ближней плоскости
+        if not all(np.isfinite(c).all() for c in C):
+            return
+        g = o3d.geometry.LineSet(o3d.utility.Vector3dVector(np.array(C)),
+                                 o3d.utility.Vector2iVector([[0, 1], [1, 2], [2, 3], [3, 0]]))
+        g.paint_uniform_color((0.9, 0.1, 0.1))
+        mat = rendering.MaterialRecord()
+        mat.shader = 'unlitLine'
+        mat.line_width = 2
+        sc.add_geometry(name, g, mat)
+        self.sw.force_redraw()
+
+    def _remove_rect(self):
+        self._rect = None
+        self._draw_rect()
+
+    def _select_mouse(self, ev):
+        T = gui.MouseEvent.Type
+        if ev.type in (T.WHEEL, T.MOVE):
+            return False                                 # колесо — масштаб камеры
+        x = ev.x - self.sw.frame.x
+        y = ev.y - self.sw.frame.y
+        if ev.type == T.BUTTON_DOWN:
+            if not ev.is_button_down(gui.MouseButton.LEFT) or \
+                    any(ev.is_modifier_down(m) for m in (gui.KeyModifier.CTRL, gui.KeyModifier.META)):
+                return False
+            self._rect = [x, y, x, y, ev.is_modifier_down(gui.KeyModifier.SHIFT)]
+            return True
+        if self._rect is None:
+            return False
+        if ev.type == T.DRAG:
+            self._rect[2], self._rect[3] = x, y
+            self._draw_rect()
+            return True
+        if ev.type == T.BUTTON_UP:
+            self._rect[2], self._rect[3] = x, y
+            r = tuple(self._rect)
+            self._remove_rect()
+            if abs(r[2] - r[0]) > 3 and abs(r[3] - r[1]) > 3:
+                self.select_rect(r[:4], add=r[4])
+            return True
+        return False
+
+    def select_rect(self, rect, add=False):
+        """Выделить точки целевых сканов в прямоугольнике (пиксели виджета сцены)."""
+        cam = self.sw.scene.camera
+        V = np.asarray(cam.get_view_matrix())
+        P = np.asarray(cam.get_projection_matrix())
+        W, H = self.sw.frame.width, self.sw.frame.height
+        x0, y0, x1, y1 = rect
+        near = self._rect_corners(x0, y0, x1, y1, 0.0)
+        far = self._rect_corners(x0, y0, x1, y1, 0.5)
+        planes = manual_clean.frustum_planes(near, far)
+        if not add:
+            self.selection, self._sel_frusta = {}, []
+        self._sel_frusta.append(planes)
+        n = 0
+        for s, Ts in self._select_targets():
+            Pc = pr.transform(s._display, Ts)
+            m = manual_clean.in_rect(Pc, V, P, W, H, rect)
+            if s.id in self.selection:
+                m = m | self.selection[s.id]
+            if m.any():
+                self.selection[s.id] = m
+                n += int(m.sum())
+        self._draw_selection()
+        self.sel_label.text = (f"выделено {n:,} точек в {len(self.selection)} скан(ах)"
+                               if self.selection else 'ничего не выделено')
+        return n
+
+    def _draw_selection(self):
+        sc = self.sw.scene
+        for s in self.s.scans:
+            name = f'sel:{s.id}'
+            if sc.has_geometry(name):
+                sc.remove_geometry(name)
+            m = self.selection.get(s.id)
+            if m is None or not m.any():
+                continue
+            T = self.T_moving if (s is self.moving and self.T_moving is not None) else self.s.Tc(s)
+            g = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(s._display[m]))
+            g.paint_uniform_color((0.95, 0.1, 0.1))
+            sc.add_geometry(name, g, self.mat_big)
+            sc.set_geometry_transform(name, T)
+        self.sw.force_redraw()
+
+    def clear_selection(self):
+        self.selection, self._sel_frusta = {}, []
+        self._draw_selection()
+        self.sel_label.text = ''
+
+    def _refresh_scans(self, ids):
+        for sid in ids:
+            s = self.s.by_id(sid)
+            if s is not None:
+                s._display = self.s.display_points(s)
+        self.redraw_all()
+
+    def on_erase(self):
+        if not self.selection:
+            return
+        targets = [(s, T) for s, T in self._select_targets() if s.id in self.selection]
+        rec = self.s.erase_region(targets, self._sel_frusta)
+        ids = [sid for sid, _ in rec]
+        self.clear_selection()
+        self._refresh_scans(ids)
+        self.set_status(f"удалено из: {', '.join(_short(i) for i in ids)} (Ctrl+Z - отменить)")
+
+    def on_undo_erase(self):
+        rec = self.s.undo_erase()
+        if not rec:
+            self.set_status('нечего отменять')
+            return
+        self._refresh_scans([sid for sid, _ in rec])
+        self.set_status('удаление отменено')
+
+    def on_clear_erase(self):
+        s = self.s.by_id(self.clean_combo.selected_text)
+        if s is None:
+            return
+        self.s.clear_erase(s)
+        self._refresh_scans([s.id])
+        self.set_status(f'{s.id}: ручная чистка сброшена')
 
     # ── куб навигации ────────────────────────────────────────────────────
     def _cam_basis(self):
@@ -1066,6 +1265,8 @@ class App:
                 self.app.post_to_main_thread(self.w, lambda: self.pick_world(np.asarray(W)))
             self.sw.scene.scene.render_to_depth_image(on_depth)
             return gui.Widget.EventCallbackResult.HANDLED
+        if self.select_mode and self._select_mouse(ev):
+            return gui.Widget.EventCallbackResult.CONSUMED
         if self.fly and self._fly_mouse(ev):
             return gui.Widget.EventCallbackResult.CONSUMED
         return gui.Widget.EventCallbackResult.IGNORED
