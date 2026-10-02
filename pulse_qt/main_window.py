@@ -26,6 +26,7 @@ import plane_register as pr
 import manual_clean
 import quality
 import dynamic
+import surface
 from scan_session import Session
 from scan_tree import KINDS
 
@@ -35,6 +36,7 @@ from .theme import scan_rgb, pick_rgb, ui_font_path
 from .cloud_view import CloudView
 from .tree_panel import TreePanel, short
 from .inspector import Inspector, ManualPanel, CleanPanel
+from .surface_panel import SurfacePanel
 from .dock import Dock
 from .dialogs import ScannerImportDialog, BagImportDialog, ExportDialog, AskDialog
 
@@ -244,6 +246,7 @@ class MainWindow(QMainWindow):
         self.ghost_shown = set()
         self.clean_scan = None
         self.dyn_masks = {}                      # найденные движущиеся объекты: id скана → маска res['down']
+        self.points_hidden = False               # «Поверхность»: показывать только сетки
         # дерево, слои
         self.tree_sel = None
         self._vis_backup = None
@@ -322,7 +325,10 @@ class MainWindow(QMainWindow):
         self.clean = CleanPanel()
         self.clean.action.connect(self.on_clean_action)
         self.clean.closed.connect(lambda: self.set_mode('inspect'))
-        for w in (self.inspector, self.manual, self.clean):
+        self.surface_panel = SurfacePanel()
+        self.surface_panel.action.connect(self.on_surface_action)
+        self.surface_panel.closed.connect(lambda: self.set_mode('inspect'))
+        for w in (self.inspector, self.manual, self.clean, self.surface_panel):
             self.right.addWidget(w)
         rw = QFrame()
         rw.setObjectName('PanelRight')
@@ -405,6 +411,9 @@ class MainWindow(QMainWindow):
         self.b_clean = W.tool(ic('mdi6.selection-drag', 'ink2', 'accent'), 'Чистка',
                               lambda: self.set_mode('inspect' if self.mode == 'clean' else 'clean'),
                               checkable=True, tip='Чистка отражений и выделение прямоугольником (R)')
+        self.b_surface = W.tool(ic('mdi6.vector-triangle', 'ink2', 'accent'), 'Поверхность β',
+                                lambda: self.set_mode('inspect' if self.mode == 'surface' else 'surface'),
+                                checkable=True, tip='Экспериментально: сетка (полигоны) по сканам')
         self.b_export = W.tool(ic('mdi6.export-variant'), 'Экспорт', self.on_export,
                                tip='Экспорт склейки')
         hl.addWidget(group(self.b_scanner, self.b_bag))
@@ -413,7 +422,7 @@ class MainWindow(QMainWindow):
         hl.addWidget(sep())
         hl.addWidget(group(self.b_top, self.b_3d, self.b_fly))
         hl.addWidget(sep())
-        hl.addWidget(group(self.b_clean, self.b_export))
+        hl.addWidget(group(self.b_clean, self.b_surface, self.b_export))
         hl.addStretch(1)
         self.b_save = W.tool(ic('mdi6.content-save-outline'), tip='Сохранить (Ctrl+S)', cb=self.on_save,
                              icon_only=True)
@@ -652,7 +661,7 @@ class MainWindow(QMainWindow):
         if T is None or getattr(sc, '_display', None) is None:
             self.view.remove(name)
             return
-        self.view.set_cloud(name, sc._display, self.scan_color(sc.id)[0], T, sc.visible)
+        self.view.set_cloud(name, sc._display, self.scan_color(sc.id)[0], T, sc.visible and not self.points_hidden)
         if sc.id in self.selection:
             self.selection.pop(sc.id)
             self._draw_selection()
@@ -670,10 +679,11 @@ class MainWindow(QMainWindow):
         self.update_grid()
         self.refresh_stats()
         self.quality_refresh()
+        self._draw_meshes()
 
     def apply_visibility(self):
         for sc in self.s.scans:
-            self.view.set_visible(f'scan:{sc.id}', sc.visible)
+            self.view.set_visible(f'scan:{sc.id}', sc.visible and not self.points_hidden)
         self.draw_features()
         for sid in list(self.ghost_shown):
             self._draw_ghosts(self.s.by_id(sid))
@@ -1059,6 +1069,8 @@ class MainWindow(QMainWindow):
         if sc is not None and self.mode == 'clean':
             self.clean_scan = sc
             self.refresh_clean()
+        if self.mode == 'surface':
+            self.refresh_surface()
 
     def on_tree_visible(self, key, vis):
         self._vis_backup = None
@@ -1330,12 +1342,16 @@ class MainWindow(QMainWindow):
                 self.set_mode(mode)
             else:
                 self.b_clean.setChecked(self.mode == 'clean')
+                self.b_surface.setChecked(self.mode == 'surface')
             return
         self.mode = mode
         self.right.setCurrentWidget({'inspect': self.inspector, 'manual': self.manual,
-                                     'clean': self.clean}[mode])
+                                     'clean': self.clean, 'surface': self.surface_panel}[mode])
         self.b_manual.setChecked(mode == 'manual')
         self.b_clean.setChecked(mode == 'clean')
+        self.b_surface.setChecked(mode == 'surface')
+        if mode == 'surface':
+            self.refresh_surface()
         if mode == 'clean':
             if self.clean_scan is None or self.clean_scan not in self.s.scans:
                 sel = self.s.by_id(self.tree_sel) if self.tree_sel else None
@@ -1964,8 +1980,113 @@ class MainWindow(QMainWindow):
         self.set_status(f"{a['kind']}: до {a['max'] * 100:.1f} см, сканы "
                         f"{', '.join(short(x) for x in a['scans'])}", log=False)
 
+    # ── поверхность (экспериментально) ───────────────────────────────────
+    def _surface_targets(self):
+        if self.surface_panel.params()['scope'] == 'scene':
+            return [sc for sc in self.s.placed() if sc.visible and sc.analyzed]
+        sc = self.s.by_id(self.tree_sel) if self.tree_sel else None
+        sc = sc if sc is not None and sc.pose is not None else self.s.ref if self.s.scans else None
+        return [sc] if sc is not None and sc.analyzed else []
+
+    def refresh_surface(self):
+        sp = self.surface_panel
+        tg = self._surface_targets()
+        if sp.params()['scope'] == 'scene':
+            sp.target.setText(f'видимые размещённые сканы: {len(tg)}' if tg else 'нет видимых размещённых сканов')
+        else:
+            sp.target.setText(f'скан {short(tg[0].id)} (выберите другой в дереве)' if tg else
+                              'выберите размещённый скан в дереве')
+        sig = self.s.state_signature()
+        rows = []
+        for key, m in self.s.meshes.items():
+            i = m['info']
+            sub = (f"{'Пуассон' if i['method'] == 'poisson' else 'ball pivoting'} · {i['acc'] * 100:.0f} см · "
+                   f"{i['triangles']:,} треуг. · {i['seconds']} c".replace(',', ' '))
+            if i['acc_used'] > i['acc'] * 1.01:
+                sub += f" · загрублено до {i['acc_used'] * 100:.1f} см"
+            if m['sig'] != sig:
+                sub += ' · позы изменились — постройте заново'
+            rows.append((key, m['title'], sub, m['visible']))
+        sp.set_meshes(rows)
+        sp.sw_points.setChecked(not self.points_hidden)
+
+    def _draw_meshes(self, force=False):
+        show = self.tree_panel.layer('mesh')
+        names = set()
+        for key, m in self.s.meshes.items():
+            name = f'mesh:{key}'
+            names.add(name)
+            if self.view.has(name) and not force:
+                self.view.set_visible(name, show and m['visible'])
+                continue
+            if show and m['visible']:
+                self.view.set_mesh(name, m['V'], m['F'], m['color'])
+        for n in [n for n in self.view.items if n.startswith('mesh:') and n not in names]:
+            self.view.remove(n)
+
+    def on_surface_action(self, name, arg):
+        sp = self.surface_panel
+        if name == 'scope':
+            self.refresh_surface()
+        elif name == 'build':
+            tg = self._surface_targets()
+            if not tg:
+                self.set_status('нечего строить: выберите размещённый скан или включите видимые сканы')
+                return
+            prm = sp.params()
+            sess = self.s
+            sig = sess.state_signature()
+
+            def done(m):
+                if sess is not self.s:
+                    return
+                if len(tg) == 1:
+                    key, title = tg[0].id, f'скан {short(tg[0].id)}'
+                    rgb = self.scan_color(tg[0].id)[0]
+                    color = tuple(0.55 + 0.45 * c for c in rgb)
+                else:
+                    k = 1 + sum(1 for x in sess.meshes if x.startswith('scene'))
+                    key, title, color = f'scene{k}', f'сцена {k} ({len(tg)} скан.)', (0.82, 0.84, 0.88)
+                sess.meshes[key] = dict(m, title=title, color=color, visible=True, sig=sig)
+                self.view.remove(f'mesh:{key}')
+                self._draw_meshes()
+                self.refresh_surface()
+                i = m['info']
+                self.set_status(f"{title}: {i['triangles']:,} треугольников за {i['seconds']} c".replace(',', ' '))
+            self.run_bg(f"поверхность ({'Пуассон' if prm['method'] == 'poisson' else 'ball pivoting'}, "
+                        f"{prm['acc'] * 100:.0f} см)…",
+                        lambda p: surface.build(sess, tg, prm['method'], prm['acc'], prm['trim'], p), done)
+        elif name == 'mesh_visible':
+            key, vis = arg
+            if key in self.s.meshes:
+                self.s.meshes[key]['visible'] = vis
+                self._draw_meshes()
+                self.refresh_surface()
+        elif name == 'mesh_delete':
+            self.s.meshes.pop(arg, None)
+            self._draw_meshes()
+            self.refresh_surface()
+        elif name == 'mesh_export':
+            m = self.s.meshes.get(arg)
+            if m is None:
+                return
+            base = Path(self.s.project_path).with_suffix('') if self.s.project_path else Path.home() / 'mesh'
+            path, _ = QFileDialog.getSaveFileName(self, 'Экспорт сетки', f'{base}_{short(arg)}.obj',
+                                                  'OBJ (*.obj);;PLY (*.ply);;STL (*.stl)')
+            if path:
+                if Path(path).suffix.lower() not in ('.obj', '.ply', '.stl'):
+                    path += '.obj'
+                surface.export(m, path)
+                self.set_status(f'сетка сохранена: {path}')
+        elif name == 'points':
+            self.points_hidden = not arg
+            self.apply_visibility()
+
     # ── найденные объекты ────────────────────────────────────────────────
     def on_layer(self, key, on):
+        if key == 'mesh':
+            self._draw_meshes()
+            return
         if key == 'quality':
             if on:
                 self.dock.tabs.setCurrentIndex(4)

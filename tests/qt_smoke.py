@@ -166,6 +166,19 @@ def main():
 
     def step_dynamic_done():
         w.clean.sw_dyn_all.setChecked(False)
+        w.set_mode('surface')
+        w.tree_panel.select(sess.frame)
+        w.on_surface_action('build', None)               # опорный скан, Пуассон 5 см
+        wait(lambda: not w.busy and sess.meshes, step_surface, 300)
+
+    def step_surface():
+        w.on_surface_action('points', False)
+        w.focus_node(sess.frame)
+        w.view.set_view_dir((-0.5, -0.7, 0.6))
+        QTimer.singleShot(400, lambda: (shot('05c_surface'), step_surface_done()))
+
+    def step_surface_done():
+        w.on_surface_action('points', True)
         w.set_mode('inspect')
         QTimer.singleShot(200, step_import)
 

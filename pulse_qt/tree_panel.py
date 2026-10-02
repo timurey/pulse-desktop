@@ -106,6 +106,7 @@ class TreePanel(QFrame):
               ('openings', 'Проёмы', 'mdi6.window-closed-variant', False),
               ('ghosts', 'Отражения', 'mdi6.blur', False),
               ('grid', 'Сетка 1 м', 'mdi6.grid', True),
+              ('mesh', 'Поверхность', 'mdi6.vector-triangle', True),
               ('quality', 'Качество совмещения', 'mdi6.texture-box', False)]
 
     def __init__(self):

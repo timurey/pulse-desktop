@@ -228,6 +228,37 @@ class CloudView(QWidget):
         return self._add(name, lines_polydata(P, segs, colors), T, 'lines', np.asarray(P),
                          color, width=width, scalars=colors is not None, opacity=opacity)
 
+    def set_mesh(self, name, V, F, color, T=None, opacity=1.0):
+        """Треугольная сетка с освещением (облака рисуются без него)."""
+        from vtkmodules.vtkFiltersCore import vtkPolyDataNormals
+        V = np.ascontiguousarray(V, np.float32)
+        F = np.asarray(F, np.int64)
+        if len(F) == 0:
+            self.remove(name)
+            return None
+        pts = vtkPoints()
+        pts.SetData(numpy_to_vtk(V, deep=True))
+        ca = vtkCellArray()
+        ca.SetData(numpy_to_vtkIdTypeArray(np.arange(0, 3 * len(F) + 1, 3, dtype=np.int64), deep=True),
+                   numpy_to_vtkIdTypeArray(F.ravel().copy(), deep=True))
+        pd = vtkPolyData()
+        pd.SetPoints(pts)
+        pd.SetPolys(ca)
+        nf = vtkPolyDataNormals()
+        nf.SetInputData(pd)
+        nf.SplittingOff()
+        nf.ConsistencyOff()
+        nf.Update()
+        a = self._add(name, nf.GetOutput(), T, 'mesh', V[::max(1, len(V) // 20000)], color, opacity=opacity)
+        pr = a.GetProperty()
+        pr.SetLighting(True)
+        pr.SetAmbient(0.25)
+        pr.SetDiffuse(0.75)
+        pr.SetSpecular(0.08)
+        pr.BackfaceCullingOff()
+        self.update_view()
+        return a
+
     def set_sphere(self, name, center, radius, color, T=None):
         s = vtkSphereSource()
         s.SetCenter(*np.asarray(center, float))
