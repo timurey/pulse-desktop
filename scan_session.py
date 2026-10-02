@@ -200,6 +200,17 @@ class Session:
         self.tree.only(keys)
         self.apply_visibility()
 
+    def move_node(self, key, target_gid):
+        """Переместить скан/группу в группу; видимость пересчитывается (скрытая группа скрывает)."""
+        ok = self.tree.move(key, target_gid)
+        self.apply_visibility()
+        return ok
+
+    def delete_group(self, gid):
+        ok = self.tree.delete_group(gid)
+        self.apply_visibility()
+        return ok
+
     def show_all(self):
         self.tree.show_all()
         self.apply_visibility()

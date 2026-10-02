@@ -184,6 +184,11 @@ class TestSession(unittest.TestCase):
             self.assertLess(dt, 0.03, sc.id)
         s.set_visible(g, False)
         self.assertEqual([x.id for x in s.scans if x.visible], ['C.ply'])
+        # перемещение видимого скана в скрытую группу — скрывает его сразу
+        s.move_node('C.ply', g)
+        self.assertEqual([x.id for x in s.scans if x.visible], [])
+        s.move_node('C.ply', 'root')
+        self.assertEqual([x.id for x in s.scans if x.visible], ['C.ply'])
         p = Path(self.tmp) / 'tree.json'
         s.save(p)
         s2 = Session.from_project(p)

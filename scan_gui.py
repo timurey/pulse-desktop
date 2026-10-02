@@ -491,9 +491,10 @@ class App:
 
         def done(label):
             gid = dict((lab, i) for i, lab in choices).get(label)
-            if gid is None or not self.s.tree.move(key, gid):
+            if gid is None or not self.s.move_node(key, gid):
                 self.set_status('нельзя переместить сюда (группу нельзя вложить в саму себя)')
                 return
+            self._apply_scene_visibility()
             self.refresh_scan_list()
             self.set_status(f'перемещено в «{label.strip()}»')
         self._ask('Переместить в группу', [('Группа', 'combo', labels[0], labels)], done)
@@ -503,9 +504,8 @@ class App:
         if g is None or g is self.s.tree.root:
             self.set_status('выберите группу в дереве')
             return
-        self.s.tree.delete_group(g.id)
+        self.s.delete_group(g.id)
         self.tree_sel = None
-        self.s.apply_visibility()
         self._apply_scene_visibility()
         self.refresh_scan_list()
         self.set_status(f'группа «{g.name}» удалена, её содержимое перешло к родителю')
