@@ -197,6 +197,9 @@ class App:
         self.tree_sel = None          # выбранный узел: id группы или id скана
         self._tree_items = {}         # item id TreeView -> ключ узла
         self._vis_backup = None       # видимость до временного показа (пара, ручная стыковка)
+        # показ найденных объектов
+        self.show_planes = False
+        self.show_openings = False
         self._build()
         if self.s.scans:
             self.load_all()
@@ -323,6 +326,13 @@ class App:
                               self._btn('Вид 3D', self.view_3d),
                               self._btn('Все видимы', self.show_all)))
         v.add_child(self._btn('Скриншот (F12)', self.save_screenshot))
+        self.planes_cb = gui.Checkbox('Поверхности (пол, потолок, стены)')
+        self.planes_cb.set_on_checked(lambda c: self._toggle_features('planes', c))
+        self.open_cb = gui.Checkbox('Проёмы (окна, двери)')
+        self.open_cb.set_on_checked(lambda c: self._toggle_features('openings', c))
+        v.add_child(self._row(self.planes_cb, self.open_cb))
+        v.add_child(gui.Label('контуры: пол - зелёный, потолок - синий, стены - оранжевый;\n'
+                              'проёмы: окна - пурпурный, двери - голубой'))
         v.add_child(self._row(self._btn('Выровнять проект по горизонту', self.on_level_project),
                               self._btn('Сбросить', self.on_level_reset)))
         v.add_child(self._btn('Выровнять план по стенам (вид сверху)', self.on_align_plan))
@@ -421,6 +431,8 @@ class App:
             name = f'scan:{sc.id}'
             if self.sw.scene.has_geometry(name):
                 self.sw.scene.show_geometry(name, sc.visible)
+        if self.show_planes or self.show_openings:
+            self.draw_features()
         self.sw.force_redraw()
 
     def _ask(self, title, fields, on_ok):
@@ -861,6 +873,8 @@ class App:
         if sc.id in self.selection:                      # точки показа сменились
             self.selection.pop(sc.id)
             self._draw_selection()
+        if self.show_planes or self.show_openings:
+            self.draw_features()
         self.sw.force_redraw()
 
     def after_load(self):
@@ -901,6 +915,8 @@ class App:
             self._draw_ghosts(self.s.by_id(sid))
         if self.selection:
             self._draw_selection()
+        if self.show_planes or self.show_openings:
+            self.draw_features()
         self.sw.force_redraw()
         self.w.post_redraw()
 
@@ -1286,6 +1302,87 @@ class App:
         self.fly_pos = self.fly_pos + v * d
         self._apply_fly_camera()
         return True
+
+    # ── найденные объекты (плоскости, проёмы) ────────────────────────────
+    KIND_COLOR = {'floor': (0.15, 0.65, 0.15), 'ceiling': (0.25, 0.45, 0.95),
+                  'wall': (0.95, 0.5, 0.05), 'other': (0.55, 0.55, 0.55)}
+    OPEN_COLOR = {'window': (0.85, 0.1, 0.75), 'door': (0.05, 0.7, 0.85)}
+
+    def _toggle_features(self, what, on):
+        if what == 'planes':
+            self.show_planes = on
+        else:
+            self.show_openings = on
+        self.draw_features()
+        if on and any(not s.analyzed for s in self.s.scans if s.visible):
+            self.set_status('объекты появятся у остальных сканов после фонового анализа')
+
+    def _feature_geoms(self, sc):
+        """(контуры плоскостей, рамки проёмов) скана в его канон. системе; кеш на скане."""
+        key = (sc.clean, len(sc.erase))
+        cache = getattr(sc, '_feat_ls', None)
+        if cache is not None and cache[0] == key:
+            return cache[1]
+        pts, lines, cols = [], [], []
+        down = sc.res['down']
+        # плоскости из отражений и вручную удалённых областей не показываем
+        drop = sc.ghost_mask() if sc.clean else np.zeros(len(down), bool)
+        if sc.erase:
+            drop = drop | manual_clean.inside_regions(down, sc.erase)
+        for p in sc.planes:
+            if p.area < 1.0 or drop[p.inliers].mean() > 0.5:
+                continue
+            q = down[p.inliers]
+            u, v = np.asarray(p.u_axis), np.asarray(p.v_axis)
+            c0 = np.asarray(p.centroid)
+            uv = np.column_stack([(q - c0) @ u, (q - c0) @ v])
+            hull = _convex_hull_2d(uv)
+            if len(hull) < 3:
+                continue
+            P = c0 + hull[:, :1] * u + hull[:, 1:] * v + 0.01 * np.asarray(p.normal)
+            k0 = len(pts)
+            pts.extend(P)
+            n = len(P)
+            lines.extend([[k0 + i, k0 + (i + 1) % n] for i in range(n)])
+            cols.extend([self.KIND_COLOR.get(p.kind, self.KIND_COLOR['other'])] * n)
+        planes_ls = _lineset(pts, lines, cols)
+        pts, lines, cols = [], [], []
+        for o in sc.openings:
+            if sc.erase and manual_clean.inside_regions(np.asarray(o.center)[None], sc.erase)[0]:
+                continue
+            C = np.asarray(o.corners) + 0.02 * np.asarray(o.normal)
+            k0 = len(pts)
+            pts.extend(C)
+            lines.extend([[k0, k0 + 1], [k0 + 1, k0 + 2], [k0 + 2, k0 + 3], [k0 + 3, k0],
+                          [k0, k0 + 2], [k0 + 1, k0 + 3]])
+            cols.extend([self.OPEN_COLOR.get(o.kind, (0.8, 0.2, 0.2))] * 6)
+        open_ls = _lineset(pts, lines, cols)
+        sc._feat_ls = (key, (planes_ls, open_ls))
+        return planes_ls, open_ls
+
+    def draw_features(self):
+        scn = self.sw.scene
+        mat = rendering.MaterialRecord()
+        mat.shader = 'unlitLine'
+        mat.line_width = 3
+        for sc in self.s.scans:
+            for kind in ('planes', 'openings'):
+                name = f'feat:{kind}:{sc.id}'
+                if scn.has_geometry(name):
+                    scn.remove_geometry(name)
+            T = self.T_moving if (sc is self.moving and self.T_moving is not None) else self.s.Tc(sc)
+            if T is None or not sc.visible or not sc.analyzed:
+                continue
+            if not (self.show_planes or self.show_openings):
+                continue
+            planes_ls, open_ls = self._feature_geoms(sc)
+            for kind, ls, on in (('planes', planes_ls, self.show_planes),
+                                 ('openings', open_ls, self.show_openings)):
+                if on and ls is not None:          # пустой LineSet Filament не принимает
+                    name = f'feat:{kind}:{sc.id}'
+                    scn.add_geometry(name, ls, mat)
+                    scn.set_geometry_transform(name, T)
+        self.sw.force_redraw()
 
     # ── ручная чистка ────────────────────────────────────────────────────
     def toggle_select(self):
@@ -1780,7 +1877,8 @@ class App:
         if not sc.has_geometry(name):
             sc.add_geometry(name, self._geom(self.moving), self.mat)
         sc.set_geometry_transform(name, self.T_moving)
-        for m in getattr(self, '_moving_markers', ()):
+        for m in list(getattr(self, '_moving_markers', ())) + \
+                [f'feat:planes:{self.moving.id}', f'feat:openings:{self.moving.id}']:
             if sc.has_geometry(m):
                 sc.set_geometry_transform(m, self.T_moving)
         self.sw.force_redraw()
@@ -2097,6 +2195,34 @@ class App:
                         lambda n: self.set_status(f'Экспорт: {path} ({n:,} точек)'))
         self._file_dialog(gui.FileDialog.SAVE, 'Экспорт склейки',
                           [('.e57', 'E57'), ('.pcd', 'PCD'), ('.ply', 'PLY')], go)
+
+
+def _convex_hull_2d(P):
+    """Выпуклая оболочка точек на плоскости (монотонная цепь). → вершины по кругу."""
+    P = np.unique(np.round(np.asarray(P, float), 3), axis=0)
+    if len(P) < 3:
+        return P
+    P = P[np.lexsort((P[:, 1], P[:, 0]))]
+    cross = lambda o, a, b: (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+    lower, upper = [], []
+    for p in P:
+        while len(lower) >= 2 and cross(lower[-2], lower[-1], p) <= 0:
+            lower.pop()
+        lower.append(p)
+    for p in P[::-1]:
+        while len(upper) >= 2 and cross(upper[-2], upper[-1], p) <= 0:
+            upper.pop()
+        upper.append(p)
+    return np.array(lower[:-1] + upper[:-1])
+
+
+def _lineset(pts, lines, cols):
+    if not lines:
+        return None
+    ls = o3d.geometry.LineSet(o3d.utility.Vector3dVector(np.asarray(pts, float)),
+                              o3d.utility.Vector2iVector(np.asarray(lines, np.int32)))
+    ls.colors = o3d.utility.Vector3dVector(np.asarray(cols, float))      # цвет на линию
+    return ls
 
 
 def scan_gui_display_voxel():
