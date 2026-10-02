@@ -158,6 +158,9 @@ class App:
         self.busy = False
         self.analyzing = False        # фоновый анализ сканов (окно не блокируется)
         self._load_gen = 0
+        self.scanner_host = 'pulse.local'
+        self._dl_cancel = False       # Esc — остановить загрузку со сканера
+        self.downloading = False
         self._closed = False
         self._force_close = False
         self._last_esc = 0.0
@@ -307,8 +310,9 @@ class App:
         v = gui.Vert(0.3 * self.em)
         v.add_child(self._row(self._btn('Новый проект', self.on_new_project),
                               self._btn('Открыть проект...', self.on_open)))
-        v.add_child(self._row(self._btn('Импорт bag...', self.on_import_bags),
-                              self._btn('Добавить скан...', self.on_add_scan)))
+        v.add_child(self._row(self._btn('Импорт со сканера...', self.on_import_scanner),
+                              self._btn('Импорт bag...', self.on_import_bags)))
+        v.add_child(self._row(self._btn('Добавить скан...', self.on_add_scan)))
         v.add_child(self._row(self._btn('Сохранить', self.on_save),
                               self._btn('Сохранить как...', self.on_save_as)))
         v.add_child(gui.Label('Дерево проекта (галочка - видимость ветки или скана):'))
@@ -1054,6 +1058,131 @@ class App:
         else:
             reset()
 
+    # ── импорт со сканера ────────────────────────────────────────────────
+    def _bags_dir(self):
+        if self.s.project_path:
+            return Path(self.s.project_path).resolve().parent / 'bags'
+        return Path.home() / 'Pulse' / 'bags'
+
+    def on_import_scanner(self):
+        self._ask('Импорт со сканера', [('Адрес сканера', 'text', self.scanner_host, None)],
+                  self._scanner_connect)
+
+    def _scanner_connect(self, host):
+        from scanner_client import ScannerClient
+        self.scanner_host = (host or 'pulse.local').strip()
+        client = ScannerClient(self.scanner_host)
+        self.run_bg(f'подключение к {self.scanner_host}...', lambda p: client.bags(),
+                    lambda bags: self._scanner_pick(client, bags))
+
+    def _scanner_pick(self, client, bags):
+        """Диалог выбора записей: по дням съёмки, галочки, параметры загрузки и импорта."""
+        import bag_reconstruct as br
+        from scanner_client import local_state
+        if not bags:
+            self.set_status(f'на сканере {self.scanner_host} нет записей')
+            return
+        em = self.em
+        dest_default = str(self._bags_dir())
+        days = sorted({b['mtime'][:10] for b in bags}, reverse=True)
+        checks = {}                                   # name -> Checkbox (для выбранного дня)
+        chosen = set()
+        dlg = gui.Dialog('Импорт со сканера')
+        v = gui.Vert(0.4 * em, gui.Margins(em, em, em, em))
+        v.add_child(gui.Label(f'{self.scanner_host}: записей {len(bags)}'))
+        day = gui.Combobox()
+        for d in days:
+            day.add_item(f"{d}  ({sum(b['mtime'].startswith(d) for b in bags)})")
+        dest = gui.TextEdit()
+        dest.text_value = dest_default
+        listing = gui.WidgetProxy()
+
+        def fill(idx):
+            d = days[max(0, idx)]
+            box = gui.Vert(0.1 * em)
+            checks.clear()
+            for b in bags:
+                if not b['mtime'].startswith(d):
+                    continue
+                st = local_state(b['name'], dest.text_value.strip() or dest_default, b.get('size_b'))
+                tag = ' [идёт запись]' if b['recording'] else (f' [{st}]' if st else '')
+                cb = gui.Checkbox(f"{b['name']}   {b['mtime'][11:16]}   {b['size']}{tag}")
+                cb.checked = b['name'] in chosen
+                cb.enabled = not b['recording']
+                cb.set_on_checked(lambda c, n=b['name']: chosen.add(n) if c else chosen.discard(n))
+                checks[b['name']] = cb
+                box.add_child(cb)
+            listing.set_widget(box)
+            self.w.set_needs_layout()
+
+        def mark_all():
+            for n, cb in checks.items():
+                if cb.enabled:
+                    cb.checked = True
+                    chosen.add(n)
+        day.set_on_selection_changed(lambda t, i: fill(i))
+        v.add_child(self._row(gui.Label('День съёмки:'), day, self._btn('Отметить все', mark_all)))
+        v.add_child(listing)
+        tilt = gui.Combobox()
+        for t in ('по полу и стенам', 'по IMU (плата осью X вверх)', 'не исправлять'):
+            tilt.add_item(t)
+        voxel = gui.NumberEdit(gui.NumberEdit.DOUBLE)
+        voxel.double_value = br.DEFAULTS['voxel']
+        rmax = gui.NumberEdit(gui.NumberEdit.DOUBLE)
+        rmax.double_value = br.DEFAULTS['max_range']
+        group = gui.TextEdit()
+        group.text_value = days[0]
+        auto = gui.Checkbox('После импорта - автостыковка (по дереву)')
+        auto.checked = True
+        v.add_child(self._row(gui.Label('Скачать в'), dest))
+        v.add_child(self._row(gui.Label('Наклон оси:'), tilt))
+        v.add_child(self._row(gui.Label('Воксель, м'), voxel, gui.Label('Макс. дальность, м'), rmax))
+        v.add_child(self._row(gui.Label('Группа в дереве'), group))
+        v.add_child(auto)
+        fill(0)
+
+        def ok():
+            names = [b['name'] for b in bags if b['name'] in chosen and not b['recording']]
+            if not names:
+                self.set_status('не выбрано ни одной записи')
+                return
+            self.w.close_dialog()
+            mode = ['geometry', 'imu_x', 'none'][max(0, tilt.selected_index)]
+            self.download_and_import(client, names, Path(dest.text_value.strip() or dest_default),
+                                     mode, voxel.double_value, rmax.double_value,
+                                     group.text_value.strip(), auto.checked)
+        v.add_child(self._row(self._btn('Скачать и импортировать', ok),
+                              self._btn('Отмена', self.w.close_dialog)))
+        dlg.add_child(v)
+        self.w.show_dialog(dlg)
+
+    def download_and_import(self, client, names, dest, tilt='geometry', voxel=0.01,
+                            max_range=60.0, group='', auto_register=True):
+        """Скачать записи со сканера (с докачкой), затем обычный импорт bag."""
+        self._dl_cancel = False
+        self.downloading = True
+
+        def work(progress):
+            paths = []
+            for k, n in enumerate(names):
+                def prog(f, msg, k=k):
+                    progress((k + f) / len(names), f'[{k + 1}/{len(names)}] {msg}  (Esc - остановить)')
+                paths.append(client.download(n, dest, prog, cancel=lambda: self._dl_cancel))
+            return paths
+
+        def done(paths):
+            self.downloading = False
+            self.set_status(f'скачано записей: {len(paths)} -> {dest}')
+            self.import_bags(paths, self._scans_dir(paths[0]), tilt, voxel, max_range,
+                             group, auto_register)
+
+        def guarded(progress):
+            try:
+                return work(progress)
+            finally:
+                self.downloading = False
+        self.run_bg(f'загрузка {len(names)} записей со сканера...', guarded, done)
+
     def on_import_bags(self):
         self._file_dialog(gui.FileDialog.OPEN_DIR, 'Папка bag или папка с bag-ами',
                           [], self.import_bags_dialog)
@@ -1423,8 +1552,11 @@ class App:
         self.w.show_dialog(dlg)
 
     def on_escape(self):
-        """Esc: выйти из полёта / снять выделение / выйти из выделения / отменить незаконченную пару."""
-        if self.fly:
+        """Esc: остановить загрузку / выйти из полёта / снять выделение / выйти из выделения / ..."""
+        if self.downloading:
+            self._dl_cancel = True
+            self.set_status('загрузка останавливается... (повторный импорт продолжит с места)')
+        elif self.fly:
             self.toggle_fly()
         elif self.selection:
             self.clear_selection()

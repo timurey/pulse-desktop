@@ -19,7 +19,7 @@ jobs:
       - name: Install system libs (Linux)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libgl1 libgomp1
-      - run: python -m pip install -r requirements.txt
+      - run: python -m pip install -r requirements.txt flask
       - run: python -m unittest discover -s tests -v
         env:
           PYTHONIOENCODING: utf-8
