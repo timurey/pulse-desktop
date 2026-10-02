@@ -207,7 +207,7 @@ class App:
         self.sw.scene.view.set_color_grading(rendering.ColorGrading(
             rendering.ColorGrading.Quality.HIGH, rendering.ColorGrading.ToneMapping.LINEAR))
         self.sw.scene.show_axes(False)
-        self.sw.set_on_mouse(self._on_mouse)
+        self.sw.set_on_mouse(self._safe(self._on_mouse, gui.Widget.EventCallbackResult.IGNORED))
         self.mat = rendering.MaterialRecord()
         self.mat.shader = 'defaultUnlit'
         self.mat.point_size = 2.0
@@ -237,12 +237,30 @@ class App:
         self.cube_sw = gui.SceneWidget()
         self.cube_sw.scene = rendering.Open3DScene(w.renderer)
         self.cube_sw.scene.set_background([1, 1, 1, 1])
-        self.cube_sw.set_on_mouse(self._on_cube_mouse)
+        self.cube_sw.set_on_mouse(self._safe(self._on_cube_mouse,
+                                             gui.Widget.EventCallbackResult.CONSUMED))
         w.add_child(self.cube_sw)
         w.add_child(self.panel)
         w.set_on_layout(self._on_layout)
-        w.set_on_key(self._on_key)
-        w.set_on_tick_event(self._on_tick)
+        w.set_on_key(self._safe(self._on_key, False))
+        w.set_on_tick_event(self._safe(self._on_tick, False))
+
+    def _safe(self, fn, fallback):
+        """
+        Обёртка обработчика событий: исключение внутри обработчика Open3D иначе
+        завершает всё приложение (Fatal Python error). Ошибка — в строку состояния.
+        """
+        def wrapped(*args):
+            try:
+                return fn(*args)
+            except Exception as e:                       # noqa: BLE001
+                traceback.print_exc()
+                try:
+                    self.set_status(f'Ошибка в обработчике {fn.__name__}: {e}')
+                except Exception:                        # noqa: BLE001
+                    pass
+                return fallback
+        return wrapped
 
     def _on_layout(self, ctx):
         r = self.w.content_rect
@@ -909,8 +927,10 @@ class App:
         if self._rect is None:
             return
         x0, y0, x1, y1, _ = self._rect
+        if abs(x1 - x0) < 3 or abs(y1 - y0) < 3:
+            return                       # рамка нулевого размера: Filament падает на пустом AABB
         C = self._rect_corners(x0, y0, x1, y1, 0.02)     # чуть дальше ближней плоскости
-        if not all(np.isfinite(c).all() for c in C):
+        if not all(np.isfinite(c).all() for c in C) or np.ptp(np.array(C), axis=0).max() < 1e-6:
             return
         g = o3d.geometry.LineSet(o3d.utility.Vector3dVector(np.array(C)),
                                  o3d.utility.Vector2iVector([[0, 1], [1, 2], [2, 3], [3, 0]]))

@@ -134,6 +134,34 @@ def main():
             a.view_top()
             shot(f'08_cand{k}')
 
+    # ручная чистка: события мыши через настоящий обработчик, включая вырожденную рамку
+    ME = gui.MouseEvent.Type
+
+    class Ev:
+        def __init__(self, t, x, y):
+            self.type, self.x, self.y = t, x, y
+
+        def is_button_down(self, b):
+            return b == gui.MouseButton.LEFT
+
+        def is_modifier_down(self, m):
+            return False
+    handler = a._safe(a._on_mouse, None)
+    f = a.sw.frame
+    a.clean_combo.selected_text = fixed
+    a.view_top()
+    a.toggle_select()
+    x0, y0 = f.x + f.width * 0.5, f.y + f.height * 0.4
+    for e in (Ev(ME.BUTTON_DOWN, x0, y0), Ev(ME.DRAG, x0, y0), Ev(ME.DRAG, x0 + 1, y0),
+              Ev(ME.DRAG, x0 + 150, y0 + 100), Ev(ME.BUTTON_UP, x0 + 150, y0 + 100)):
+        handler(e)
+        tick(0.05)
+    print('выделение прямоугольником:', a.sel_label.text)
+    assert a.selection, 'выделение не сработало'
+    a.on_erase()
+    a.on_undo_erase()
+    a.toggle_select()
+
     # экспорт
     a.s.export(out / 'smoke_export.ply', 0.08)
     print('экспорт:', (out / 'smoke_export.ply').stat().st_size, 'байт')
