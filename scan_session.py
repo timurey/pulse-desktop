@@ -30,6 +30,7 @@ import scan_project as sp
 import openings as op_mod
 import reflections
 import manual_clean
+from scan_tree import Tree
 
 
 PALETTE = np.array([[31, 119, 180], [255, 127, 14], [44, 160, 44], [214, 39, 40],
@@ -126,6 +127,7 @@ class Session:
         self.project_path = None
         self.level = np.eye(3)       # поправка горизонта проекта (поворот общей системы)
         self.erase_undo = []         # [(scan_id, число добавленных областей)]
+        self.tree = Tree()           # иерархия сканов (организация, видимость веток)
         self.lock = threading.RLock()
 
     # ── загрузка / сохранение ─────────────────────────────────────────────
@@ -141,6 +143,8 @@ class Session:
         s.frame = proj.get('frame') or s.scans[0].id
         s.level = np.asarray(proj.get('level', np.eye(3).tolist()), float)
         s.edges = proj.get('pairs', []) + proj.get('manual_edges', [])
+        s.tree = Tree.from_json(proj.get('tree'), [x.id for x in s.scans])
+        s.apply_visibility()
         s.project_path = str(path)
         s._recolor()
         return s
@@ -157,6 +161,7 @@ class Session:
         if self.by_id(sc.id) is not None:
             return self.by_id(sc.id)
         self.scans.append(sc)
+        self.tree.sync([x.id for x in self.scans])
         if self.frame is None:
             self.frame = sc.id
             sc.pose = np.eye(4)
@@ -170,6 +175,7 @@ class Session:
         proj = {'frame': self.frame, 'created': time.strftime('%Y-%m-%d %H:%M:%S'),
                 'level': self.level.tolist(),
                 'scans': [s.to_json() for s in self.scans],
+                'tree': self.tree.to_json(),
                 'pairs': [_jsonable(e) for e in auto],
                 'manual_edges': [_jsonable(e) for e in manual]}
         sp.save_project(proj, path)
@@ -179,6 +185,24 @@ class Session:
     def _recolor(self):
         for i, s in enumerate(self.scans):
             s.color = PALETTE[i % len(PALETTE)]
+
+    # ── иерархия ─────────────────────────────────────────────────────────
+    def apply_visibility(self):
+        """Видимость сканов = флаг скана в дереве и всех его групп-предков."""
+        for sc in self.scans:
+            sc.visible = self.tree.effective_visible(sc.id)
+
+    def set_visible(self, key, visible):
+        self.tree.set_visible(key, visible)
+        self.apply_visibility()
+
+    def only_show(self, keys):
+        self.tree.only(keys)
+        self.apply_visibility()
+
+    def show_all(self):
+        self.tree.show_all()
+        self.apply_visibility()
 
     def by_id(self, sid):
         return next((s for s in self.scans if s.id == sid), None)
@@ -304,12 +328,23 @@ class Session:
         return np.asarray(pc.points)
 
     # ── автостыковка ─────────────────────────────────────────────────────
-    def run_auto(self, progress=None, yaw='manhattan', reuse=True):
-        """Попарная автоматическая стыковка всех сканов, затем позы по графу."""
+    def run_auto(self, progress=None, yaw='manhattan', reuse=True, by_tree=None):
+        """
+        Автоматическая стыковка, затем позы по графу.
+        by_tree=True — только пары по дереву (внутри групп + представители соседних
+        веток), иначе все пары. По умолчанию — по дереву, если в нём есть группы.
+        """
         names = [s.id for s in self.scans]
         old = {(e['A'], e['B']): e for e in self.edges if e.get('method') != 'manual'}
         manual = [e for e in self.edges if e.get('method') == 'manual']
-        combos = list(itertools.combinations(names, 2))
+        if by_tree is None:
+            by_tree = not self.tree.is_flat()
+        if by_tree:
+            weight = {sc.id: sc.res.get('n_points', 0) for sc in self.scans}
+            combos = self.tree.registration_pairs(names, weight)
+        else:
+            combos = list(itertools.combinations(names, 2))
+        chosen = set(combos)
         edges = []
         for i, (a, b) in enumerate(combos):
             if progress:
@@ -324,6 +359,9 @@ class Session:
                     e['user'] = old[(a, b)]['user']
             e['auto_ok'] = sp.edge_ok(e)
             edges.append(e)
+        # ранее посчитанные пары вне выбранных — тоже данные, не выбрасываем
+        edges += [dict(e, auto_ok=sp.edge_ok(e)) for k, e in old.items()
+                  if k not in chosen and 'T_canon' in e and k[0] in names and k[1] in names]
         with self.lock:
             self.edges = edges + manual
         if progress:
@@ -685,14 +723,16 @@ class Session:
         self.erase_undo = [r for r in self.erase_undo if r]
 
     # ── экспорт ──────────────────────────────────────────────────────────
-    def export(self, path, voxel=0.02, progress=None, frame='ref'):
+    def export(self, path, voxel=0.02, progress=None, frame='ref', scan_ids=None):
         """
         frame='ref'    - исходная система опорного скана (как в файле опорного скана);
         frame='common' - общая система: Z вверх, с поправкой горизонта проекта.
         """
         import open3d as o3d
         parts = []
-        placed = self.placed()
+        placed = [s for s in self.placed() if scan_ids is None or s.id in scan_ids]
+        if not placed:
+            raise ValueError('нет размещённых сканов для экспорта')
         for i, s in enumerate(placed):
             if progress:
                 progress(i / len(placed), f"склейка {s.id}")

@@ -38,6 +38,7 @@ from scan_session import Session, Scan, PALETTE
 import plane_register as pr
 from view_cube import ViewCube, look_from, slerp_dir
 import manual_clean
+from scan_tree import Group, Leaf, KINDS
 
 gui = o3d.visualization.gui
 rendering = o3d.visualization.rendering
@@ -190,6 +191,10 @@ class App:
         self.selection = {}           # id скана -> маска точек показа
         self._sel_frusta = []         # области текущего выделения (общая система)
         self._mods = set()            # нажатые модификаторы (KeyEvent их не передаёт)
+        # дерево проекта
+        self.tree_sel = None          # выбранный узел: id группы или id скана
+        self._tree_items = {}         # item id TreeView -> ключ узла
+        self._vis_backup = None       # видимость до временного показа (пара, ручная стыковка)
         self._build()
         if self.s.scans:
             self.load_all()
@@ -298,9 +303,17 @@ class App:
                               self._btn('Добавить скан...', self.on_add_scan)))
         v.add_child(self._row(self._btn('Сохранить', self.on_save),
                               self._btn('Сохранить как...', self.on_save_as)))
-        v.add_child(gui.Label('Сканы (галочка - видимость):'))
-        self.scan_list = gui.WidgetProxy()          # содержимое пересоздаётся целиком
+        v.add_child(gui.Label('Дерево проекта (галочка - видимость ветки или скана):'))
+        self.scan_list = gui.WidgetProxy()          # дерево пересоздаётся целиком
         v.add_child(self.scan_list)
+        v.add_child(self._row(self._btn('Новая группа', self.on_tree_new),
+                              self._btn('Переименовать', self.on_tree_rename),
+                              self._btn('В группу...', self.on_tree_move)))
+        v.add_child(self._row(self._btn('Удалить группу', self.on_tree_delete),
+                              self._btn('Сделать опорным', self.on_tree_make_ref),
+                              self._btn('Только эта ветка', self.on_tree_only)))
+        v.add_child(self._row(self._btn('Показать всё', self.show_all),
+                              self._btn('Экспорт ветки...', self.on_tree_export)))
         self.ref_combo = gui.Combobox()
         self.ref_combo.set_on_selection_changed(self.on_ref_changed)
         v.add_child(self._row(gui.Label('Опорный:'), self.ref_combo))
@@ -331,30 +344,218 @@ class App:
         v.add_child(self._row(gui.Label('Размер точек'), ps))
         return v
 
+    def _status_of(self, sid):
+        sc = self.s.by_id(sid)
+        if sc is None:
+            return ''
+        return 'опорный' if sid == self.s.frame else ('размещён' if sc.pose is not None else 'НЕ размещён')
+
     def refresh_scan_list(self):
-        new = gui.Vert(0.1 * self.em)
-        for s in self.s.scans:
-            cb = gui.Checkbox(f"{s.id}  {'опорный' if s.id == self.s.frame else ('размещён' if s.pose is not None else 'НЕ размещён')}")
-            cb.checked = s.visible
-            cb.set_on_checked(lambda c, s=s: self.on_visible(s, c))
-            lab = gui.Label('##')
-            lab.text_color = gui.Color(*s.color)
-            new.add_child(self._row(lab, cb))
-        self.scan_list.set_widget(new)
+        """Дерево проекта: группы и сканы с галочками видимости."""
+        tv = gui.TreeView()
+        tv.can_select_items_with_children = True
+        self._tree_items = {}
+        reselect = None
+        tree = self.s.tree
+
+        def add(parent_item, node):
+            nonlocal reselect
+            if isinstance(node, Group):
+                n = len(tree.scans_in(node.id))
+                cell = gui.CheckableTextTreeCell(f'{node.name}  ({node.kind}, {n})', node.visible,
+                                                 lambda c, k=node.id: self.on_tree_check(k, c))
+                iid = tv.add_item(parent_item, cell)
+                self._tree_items[iid] = node.id
+                for ch in node.children:
+                    add(iid, ch)
+                key = node.id
+            else:
+                sc = self.s.by_id(node.scan)
+                cell = gui.CheckableTextTreeCell(f'{_short(node.scan)}  {self._status_of(node.scan)}',
+                                                 node.visible,
+                                                 lambda c, k=node.scan: self.on_tree_check(k, c))
+                if sc is not None:
+                    cell.label.text_color = gui.Color(*sc.color)
+                iid = tv.add_item(parent_item, cell)
+                self._tree_items[iid] = node.scan
+                key = node.scan
+            if key == self.tree_sel:
+                reselect = iid
+
+        for ch in tree.root.children:
+            add(tv.get_root_item(), ch)
+        tv.set_on_selection_changed(self._on_tree_select)
+        if reselect is not None:
+            try:
+                tv.selected_item = reselect
+            except Exception:                            # noqa: BLE001
+                pass
+        self.tree_view = tv
+        self.scan_list.set_widget(tv)
         self.ref_combo.clear_items()
-        for s in self.s.scans:
-            self.ref_combo.add_item(s.id)
+        for sc in self.s.scans:
+            self.ref_combo.add_item(sc.id)
         if self.s.frame:
             self.ref_combo.selected_text = self.s.frame
         self.w.set_needs_layout()
+
+    def _on_tree_select(self, iid):
+        self.tree_sel = self._tree_items.get(iid)
+        if self.tree_sel is not None:
+            node = self.s.tree.node(self.tree_sel)
+            what = 'группа' if isinstance(node, Group) else 'скан'
+            path = self.s.tree.path(self.tree_sel)
+            self.set_status(f'выбран {what}: {path or _short(self.tree_sel)}')
+
+    def on_tree_check(self, key, checked):
+        self._vis_backup = None                          # пользователь сам меняет видимость
+        self.s.set_visible(key, checked)
+        self._apply_scene_visibility()
+        if isinstance(self.s.tree.node(key), Group):
+            self.refresh_scan_list()                     # галочки детей не меняются, но статус ветки — да
+
+    def _apply_scene_visibility(self):
+        for sc in self.s.scans:
+            name = f'scan:{sc.id}'
+            if self.sw.scene.has_geometry(name):
+                self.sw.scene.show_geometry(name, sc.visible)
+        self.sw.force_redraw()
+
+    def _ask(self, title, fields, on_ok):
+        """Простой диалог: fields — [(подпись, 'text'|'combo', значение, варианты)]."""
+        em = self.em
+        dlg = gui.Dialog(title)
+        v = gui.Vert(0.5 * em, gui.Margins(em, em, em, em))
+        widgets = []
+        for label, kind, value, options in fields:
+            if kind == 'text':
+                w = gui.TextEdit()
+                w.text_value = value or ''
+            else:
+                w = gui.Combobox()
+                for o in options:
+                    w.add_item(o)
+                if value in options:
+                    w.selected_text = value
+            widgets.append((kind, w))
+            v.add_child(self._row(gui.Label(label), w))
+
+        def ok():
+            vals = [w.text_value if k == 'text' else w.selected_text for k, w in widgets]
+            self.w.close_dialog()
+            on_ok(*vals)
+        v.add_child(self._row(self._btn('OK', ok), self._btn('Отмена', self.w.close_dialog)))
+        dlg.add_child(v)
+        self.w.show_dialog(dlg)
+
+    def _selected_group_id(self):
+        """Выбранная группа или группа выбранного скана (иначе корень)."""
+        t = self.s.tree
+        if self.tree_sel is None:
+            return 'root'
+        if t.group(self.tree_sel) is not None:
+            return self.tree_sel
+        p = t.parent(self.tree_sel)
+        return p.id if p is not None else 'root'
+
+    def on_tree_new(self):
+        parent = self._selected_group_id()
+
+        def done(name, kind):
+            gid = self.s.tree.add_group(parent, name.strip(), kind)
+            self.tree_sel = gid
+            self.refresh_scan_list()
+            self.set_status(f'группа «{self.s.tree.group(gid).name}» создана; сканы - кнопкой «В группу...»')
+        self._ask('Новая группа', [('Имя', 'text', '', None), ('Тип', 'combo', 'комната', KINDS)], done)
+
+    def on_tree_rename(self):
+        g = self.s.tree.group(self.tree_sel) if self.tree_sel else None
+        if g is None or g is self.s.tree.root:
+            self.set_status('выберите группу в дереве')
+            return
+
+        def done(name, kind):
+            self.s.tree.rename(g.id, name.strip(), kind)
+            self.refresh_scan_list()
+        kinds = KINDS if g.kind in KINDS else KINDS + [g.kind]
+        self._ask('Переименовать группу', [('Имя', 'text', g.name, None),
+                                           ('Тип', 'combo', g.kind, kinds)], done)
+
+    def on_tree_move(self):
+        key = self.tree_sel
+        if key is None or key == 'root':
+            self.set_status('выберите скан или группу в дереве')
+            return
+        choices = self.s.tree.group_choices()
+        labels = [lab for _, lab in choices]
+
+        def done(label):
+            gid = dict((lab, i) for i, lab in choices).get(label)
+            if gid is None or not self.s.tree.move(key, gid):
+                self.set_status('нельзя переместить сюда (группу нельзя вложить в саму себя)')
+                return
+            self.refresh_scan_list()
+            self.set_status(f'перемещено в «{label.strip()}»')
+        self._ask('Переместить в группу', [('Группа', 'combo', labels[0], labels)], done)
+
+    def on_tree_delete(self):
+        g = self.s.tree.group(self.tree_sel) if self.tree_sel else None
+        if g is None or g is self.s.tree.root:
+            self.set_status('выберите группу в дереве')
+            return
+        self.s.tree.delete_group(g.id)
+        self.tree_sel = None
+        self.s.apply_visibility()
+        self._apply_scene_visibility()
+        self.refresh_scan_list()
+        self.set_status(f'группа «{g.name}» удалена, её содержимое перешло к родителю')
+
+    def on_tree_make_ref(self):
+        sc = self.s.by_id(self.tree_sel) if self.tree_sel else None
+        if sc is None:
+            self.set_status('выберите скан в дереве')
+            return
+        if sc.pose is None:
+            self.set_status('опорным может быть только размещённый скан')
+            return
+        self._with_plan_change(lambda: self.s.set_frame(sc.id))
+        self.redraw_all()
+        self.refresh_scan_list()
+        self.set_status(f'опорный скан: {sc.id}')
+
+    def on_tree_only(self):
+        if self.tree_sel is None:
+            self.set_status('выберите ветку или скан в дереве')
+            return
+        self._vis_backup = None
+        self.s.only_show([self.tree_sel])
+        self._apply_scene_visibility()
+        self.refresh_scan_list()
+
+    def on_tree_export(self):
+        if self.tree_sel is None:
+            self.set_status('выберите ветку или скан в дереве')
+            return
+        ids = self.s.tree.scans_in(self.tree_sel)
+        voxel = self.voxel.double_value
+        frame = 'common' if self.export_common.checked else 'ref'
+
+        def go(path):
+            self.run_bg('экспорт ветки...', lambda p: self.s.export(path, voxel, p, frame, scan_ids=ids),
+                        lambda n: self.set_status(f'Экспорт ветки: {path} ({n:,} точек)'))
+        self._file_dialog(gui.FileDialog.SAVE, 'Экспорт ветки',
+                          [('.e57', 'E57'), ('.pcd', 'PCD'), ('.ply', 'PLY')], go)
 
     # ── вкладка «Пары» ───────────────────────────────────────────────────
     def _tab_pairs(self):
         v = gui.Vert(0.3 * self.em)
         self.reuse_cb = gui.Checkbox('Использовать уже посчитанные пары')
         self.reuse_cb.checked = True
-        v.add_child(self._btn('Автостыковка всех пар', self.on_auto))
+        v.add_child(self._btn('Автостыковка', self.on_auto))
         v.add_child(self.reuse_cb)
+        self.by_tree_cb = gui.Checkbox('По дереву: пары внутри групп и между соседними (быстрее)')
+        self.by_tree_cb.checked = True
+        v.add_child(self.by_tree_cb)
         v.add_child(gui.Label('+ активно  x отклонено  · неактивно\nоценка / нарушения / отрыв'))
         self.pair_list = gui.ListView()
         self.pair_list.set_max_visible_items(16)
@@ -657,23 +858,36 @@ class App:
         self.sw.look_at(c, c + [-d, -d, d * 0.8], [0, 0, 1])
 
     def show_all(self):
-        for s in self.s.scans:
-            s.visible = True
+        self._vis_backup = None
+        self.s.show_all()
         self.redraw_all()
         self.refresh_scan_list()
 
-    def on_visible(self, s, checked):
-        s.visible = checked
-        name = f'scan:{s.id}'
-        if self.sw.scene.has_geometry(name):
-            self.sw.scene.show_geometry(name, checked)
+    def _vis_snapshot(self):
+        t = self.s.tree
+        return ({g.id: g.visible for g in t.groups()}, {l.scan: l.visible for l in t.leaves()})
 
     def only_show(self, ids):
-        for s in self.s.scans:
-            s.visible = s.id in ids
-            name = f'scan:{s.id}'
-            if self.sw.scene.has_geometry(name):
-                self.sw.scene.show_geometry(name, s.visible)
+        """Временно показать только эти сканы (пара, ручная стыковка); видимость дерева запоминается."""
+        if self._vis_backup is None:
+            self._vis_backup = self._vis_snapshot()
+        self.s.only_show(list(ids))
+        self._apply_scene_visibility()
+        self.refresh_scan_list()
+
+    def restore_visibility(self):
+        if self._vis_backup is None:
+            return
+        groups, leaves = self._vis_backup
+        t = self.s.tree
+        for g in t.groups():
+            g.visible = groups.get(g.id, True)
+        for l in t.leaves():
+            l.visible = leaves.get(l.scan, True)
+        self._vis_backup = None
+        self.s.apply_visibility()
+        self.redraw_all()
+        self.refresh_scan_list()
 
     # ── проект ───────────────────────────────────────────────────────────
     def _file_dialog(self, mode, title, filters, on_done):
@@ -742,9 +956,10 @@ class App:
     # ── пары ─────────────────────────────────────────────────────────────
     def on_auto(self):
         reuse = self.reuse_cb.checked
+        by_tree = self.by_tree_cb.checked and not self.s.tree.is_flat()
 
         def work(progress):
-            self.s.run_auto(progress, reuse=reuse)
+            self.s.run_auto(progress, reuse=reuse, by_tree=by_tree)
             return True
 
         def done(_):
@@ -1288,7 +1503,7 @@ class App:
                  f'3D-вид {self.sw.frame.width}×{self.sw.frame.height}',
                  f'вкладка: {tabs[self.tabs.selected_tab_index]}',
                  f'статус: {self.status.text}', '',
-                 'сканы:'] + [f"  {'[x]' if s.visible else '[ ]'} {s.id}  "
+                 'дерево:'] + self._tree_lines() + ['', 'сканы:'] + [f"  {'[x]' if s.visible else '[ ]'} {s.id}  "
                               f"{'опорный' if s.id == self.s.frame else ('размещён' if s.pose is not None else 'НЕ размещён')}"
                               for s in self.s.scans]
         lines += ['', f'рёбер: {len(self.s.edges)}, активных: {len(self.s.active_edges())}',
@@ -1302,6 +1517,21 @@ class App:
             lines += ['', 'кандидаты:'] + [f"  {c['score']:+.3f} {c['n_close']} {c['violations']:.3f} {c['method']}"
                                            for c in self.candidates]
         return '\n'.join(lines) + '\n'
+
+    def _tree_lines(self):
+        out = []
+
+        def walk(node, depth):
+            if isinstance(node, Group):
+                if node is not self.s.tree.root:
+                    out.append('  ' * depth + f"{'[x]' if node.visible else '[ ]'} {node.name} ({node.kind})")
+                for c in node.children:
+                    walk(c, depth + (node is not self.s.tree.root))
+            else:
+                out.append('  ' * depth + f"{'[x]' if node.visible else '[ ]'} {_short(node.scan)} "
+                           f"{self._status_of(node.scan)}")
+        walk(self.s.tree.root, 1)
+        return out
 
     def _ray_ground(self, ev, z0):
         """Пересечение луча под курсором с горизонтальной плоскостью z = z0 (общая система)."""
@@ -1677,7 +1907,8 @@ class App:
         self.T_moving = None
         self.pairs, self.pending = [], None
         self._clear_markers()
-        self.show_all()
+        self.restore_visibility()
+        self.redraw_all()
         self.refresh_pairs()
         self.refresh_manual_combos()
 
@@ -1834,6 +2065,12 @@ def main(argv=None):
         sess = Session()
     App(sess)
     app.run()
+    # Выход без финализации интерпретатора: фоновые потоки (живая оценка, Open3D)
+    # иначе иногда падают на «gilstate_tss_set» уже после закрытия окна.
+    # Все файлы к этому моменту записаны синхронно.
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)
 
 
 if __name__ == '__main__':

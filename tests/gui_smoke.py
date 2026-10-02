@@ -178,6 +178,8 @@ def main():
     a.w.close()
     tick(0.2)
     print('OK', flush=True)
+    import os
+    os._exit(0)                      # как scan_gui.main: без финализации (фоновые потоки)
 
 
 if __name__ == '__main__':

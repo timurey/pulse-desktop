@@ -173,6 +173,26 @@ class TestSession(unittest.TestCase):
         self.assertAlmostEqual(dd, -7.0, delta=0.5)
         self.assertLess(pr.pose_delta(T_fix, T_true)[1], 0.5)
 
+    def test_tree_session(self):
+        s = Session.from_scans(self.paths)
+        g = s.tree.add_group('root', 'Комната', 'комната')
+        s.tree.move('A.ply', g)
+        s.tree.move('B.ply', g)
+        s.run_auto(by_tree=True)
+        for sc in s.scans[1:]:
+            dt, da = pose_err(sc.pose, sc.id, self.origins)
+            self.assertLess(dt, 0.03, sc.id)
+        s.set_visible(g, False)
+        self.assertEqual([x.id for x in s.scans if x.visible], ['C.ply'])
+        p = Path(self.tmp) / 'tree.json'
+        s.save(p)
+        s2 = Session.from_project(p)
+        self.assertEqual(s2.tree.to_json(), s.tree.to_json())
+        self.assertEqual([x.id for x in s2.scans if x.visible], ['C.ply'])
+        n_all = s2.export(Path(self.tmp) / 'all.ply', voxel=0.1)
+        n_g = s2.export(Path(self.tmp) / 'g.ply', voxel=0.1, scan_ids=s2.tree.scans_in(g))
+        self.assertLess(n_g, n_all)
+
     def test_project_portable(self):
         """Пути сканов в проекте относительные: папку можно перенести (другая машина/ОС)."""
         import shutil
