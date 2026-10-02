@@ -154,6 +154,7 @@ class App:
         self.app = gui.Application.instance
         self.s = session or Session()
         self.busy = False
+        self._closed = False
         # ручной режим
         self.fixed = None
         self.moving = None
@@ -244,6 +245,7 @@ class App:
         w.set_on_layout(self._on_layout)
         w.set_on_key(self._safe(self._on_key, False))
         w.set_on_tick_event(self._safe(self._on_tick, False))
+        w.set_on_close(self._on_close)
 
     def _safe(self, fn, fallback):
         """
@@ -866,7 +868,13 @@ class App:
                                                 rendering.Camera.FovType.Vertical)
         self.sw.force_redraw()
 
+    def _on_close(self):
+        self._closed = True            # после закрытия тик не трогает сцены уничтоженного окна
+        return True
+
     def _on_tick(self):
+        if self._closed:
+            return False
         redraw = self._cube_tick()
         return self._fly_tick() or redraw
 

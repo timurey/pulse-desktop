@@ -151,9 +151,18 @@ def main():
     a.clean_combo.selected_text = fixed
     a.view_top()
     a.toggle_select()
-    x0, y0 = f.x + f.width * 0.5, f.y + f.height * 0.4
+    tick(0.3)
+    # прямоугольник вокруг точек выбранного скана на экране
+    import manual_clean
+    cam = a.sw.scene.camera
+    Fs = a.s.by_id(fixed)
+    scr, _ = manual_clean.project(pr.transform(Fs._display, a.s.Tc(Fs)),
+                                  np.asarray(cam.get_view_matrix()),
+                                  np.asarray(cam.get_projection_matrix()), f.width, f.height)
+    cx, cy = np.median(scr, axis=0)
+    x0, y0 = f.x + cx - 60, f.y + cy - 40
     for e in (Ev(ME.BUTTON_DOWN, x0, y0), Ev(ME.DRAG, x0, y0), Ev(ME.DRAG, x0 + 1, y0),
-              Ev(ME.DRAG, x0 + 150, y0 + 100), Ev(ME.BUTTON_UP, x0 + 150, y0 + 100)):
+              Ev(ME.DRAG, x0 + 120, y0 + 80), Ev(ME.BUTTON_UP, x0 + 120, y0 + 80)):
         handler(e)
         tick(0.05)
     print('выделение прямоугольником:', a.sel_label.text)
@@ -165,9 +174,10 @@ def main():
     # экспорт
     a.s.export(out / 'smoke_export.ply', 0.08)
     print('экспорт:', (out / 'smoke_export.ply').stat().st_size, 'байт')
+    a._closed = True                 # как при закрытии окна пользователем
     a.w.close()
     tick(0.2)
-    print('OK')
+    print('OK', flush=True)
 
 
 if __name__ == '__main__':
