@@ -38,7 +38,8 @@ def main():
 
     def wait(label, timeout=1800):
         t = time.time()
-        while a.busy and time.time() - t < timeout:
+        while (a.busy or a.analyzing) and time.time() - t < timeout:
+            a.w.post_redraw()                # иначе цикл событий засыпает в фоне
             app.run_one_tick()
             time.sleep(0.02)
         tick(0.5)

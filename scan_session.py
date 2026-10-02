@@ -30,6 +30,7 @@ import scan_project as sp
 import openings as op_mod
 import reflections
 import manual_clean
+import project_store
 from scan_tree import Tree
 
 
@@ -60,18 +61,51 @@ class Scan:
         self._ghost = None
         self._reflect_report = None
         self._openings = None
+        self._quick_R = None         # вертикаль до полного анализа (быстрый показ)
+        self.from_cache = False      # анализ взят из кеша проекта
+        self.cache_dirty = False     # анализ посчитан и ещё не записан в кеш
+        self._lock = threading.RLock()
 
-    # анализ - лениво и один раз
+    @property
+    def analyzed(self):
+        return self._res is not None and self._ghost is not None and self._openings is not None
+
+    # анализ - лениво, один раз, потокобезопасно (фоновый анализ и действия пользователя)
     @property
     def res(self):
-        if self._res is None:
-            self._res = planes.analyze_scan(self.path, self.up, cache=False)
-            self.up = self._res['up']
-        return self._res
+        with self._lock:
+            if self._res is None:
+                up = self.up if self.up != 'auto' or self._quick_R is None else self._quick_up
+                self._res = planes.analyze_scan(self.path, up, cache=False)
+                self.up = self._res['up']
+                self.cache_dirty = True
+            return self._res
 
     @property
     def R_up(self):
+        if self._res is not None:
+            return np.asarray(self._res['R_up'])
+        if self._quick_R is not None:
+            return self._quick_R
         return np.asarray(self.res['R_up'])
+
+    def quick_points(self, voxel):
+        """
+        Облако для показа до полного анализа: чтение, вертикаль, прореживание.
+        Отражения и ручная чистка здесь не учитываются (заменится после анализа).
+        """
+        import open3d as o3d
+        pts = planes.load_points(self.path)
+        with self._lock:
+            if self._quick_R is None and self._res is None:
+                label = self.up if self.up != 'auto' else planes.detect_up(pts)[0]
+                self._quick_up = label
+                self._quick_R = planes.up_rotation(label)
+        pc = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pts @ self.R_up.T))
+        P = np.asarray(pc.voxel_down_sample(voxel).points)
+        if self.erase:
+            P = P[self.keep_mask(P)]
+        return P
 
     @property
     def down(self):
@@ -92,9 +126,11 @@ class Scan:
         return ~manual_clean.inside_regions(P_canon, self.erase)
 
     def ghost_mask(self):
-        if self._ghost is None:
-            self._ghost, self._reflect_report = reflections.find_reflections(self.res['down'], self.res)
-        return self._ghost
+        with self._lock:
+            if self._ghost is None:
+                self._ghost, self._reflect_report = reflections.find_reflections(self.res['down'], self.res)
+                self.cache_dirty = True
+            return self._ghost
 
     @property
     def reflect_report(self):
@@ -103,13 +139,64 @@ class Scan:
 
     @property
     def openings(self):
-        if self._openings is None:
-            self._openings = op_mod.find_openings(self.res)
-        return self._openings
+        with self._lock:
+            if self._openings is None:
+                self._openings = op_mod.find_openings(self.res)
+                self.cache_dirty = True
+            return self._openings
 
     @property
     def planes(self):
         return self.res['planes']
+
+    def analyze(self):
+        """Полный анализ (плоскости, отражения, проёмы)."""
+        self.res
+        self.ghost_mask()
+        self.openings
+        return self
+
+    # ── кеш анализа (project_store) ─────────────────────────────────────
+    def cache_key(self):
+        return project_store.scan_key(self.path)
+
+    def to_cache(self):
+        r = self.analyze().res
+        pl = r['planes']
+        idx = [np.asarray(p.inliers, np.int64) for p in pl]
+        off = np.cumsum([0] + [len(i) for i in idx])
+        meta = {'key': self.cache_key(), 'up': r['up'], 'up_info': _jsonable(r.get('up_info', {})),
+                'R_up': np.asarray(r['R_up']).tolist(), 'voxel': r['voxel'],
+                'n_points': r['n_points'], 'layers': _jsonable(r['layers']),
+                'planes': [p.to_json() for p in pl],
+                'openings': [_jsonable(o.to_json()) for o in self._openings],
+                'reflect_report': _jsonable(self._reflect_report)}
+        arrays = {'down': np.asarray(r['down'], np.float32),
+                  'inliers': np.concatenate(idx).astype(np.int32) if idx else np.zeros(0, np.int32),
+                  'inl_off': off.astype(np.int64),
+                  'ghost': np.asarray(self._ghost, bool)}
+        return meta, arrays
+
+    def load_cache(self, meta, arrays):
+        """Взять анализ из кеша; False — несовместим (другая вертикаль)."""
+        if self.up not in ('auto', meta['up']):
+            return False
+        down = np.asarray(arrays['down'], np.float64)
+        idx, off = arrays['inliers'], arrays['inl_off']
+        pls = []
+        for k, pj in enumerate(meta['planes']):
+            pls.append(planes.Plane(**pj, inliers=np.asarray(idx[off[k]:off[k + 1]], np.int64)))
+        with self._lock:
+            self._res = {'scan': Path(self.path).name, 'up': meta['up'], 'up_info': meta.get('up_info', {}),
+                         'R_up': meta['R_up'], 'voxel': meta['voxel'], 'n_points': meta['n_points'],
+                         'layers': meta['layers'], 'planes': pls, 'down': down}
+            self._ghost = np.asarray(arrays['ghost'], bool)
+            self._reflect_report = meta.get('reflect_report', [])
+            self._openings = [op_mod.Opening(**o) for o in meta.get('openings', [])]
+            self.up = meta['up']
+            self._down_cache = None
+            self.from_cache, self.cache_dirty = True, False
+        return True
 
     def to_json(self):
         return {'id': self.id, 'path': self.path, 'up': self.up,
@@ -168,6 +255,35 @@ class Session:
         self._recolor()
         return sc
 
+    def load_cached(self):
+        """Взять анализ сканов из кеша проекта (.pulse), где ключ совпадает. → число сканов."""
+        n = 0
+        for sc in self.scans:
+            if sc.analyzed:
+                continue
+            try:
+                c = project_store.read_cache(self.project_path, sc.id, sc.cache_key())
+            except OSError:
+                c = None
+            if c is not None and sc.load_cache(*c):
+                n += 1
+        return n
+
+    def flush_cache(self):
+        """
+        Дописать свежий анализ в архив проекта, не трогая project.json
+        (несохранённые правки проекта не записываются). → число сканов.
+        """
+        if not self.project_path or not project_store.is_archive(self.project_path) \
+                or not Path(self.project_path).exists():
+            return 0
+        caches = {sc.id: sc.to_cache() for sc in self.scans if sc.analyzed and sc.cache_dirty}
+        if caches and project_store.update_cache(self.project_path, caches):
+            for sc in self.scans:
+                if sc.id in caches:
+                    sc.cache_dirty = False
+        return len(caches)
+
     def save(self, path=None):
         path = path or self.project_path
         auto = [e for e in self.edges if e.get('method') != 'manual']
@@ -178,7 +294,18 @@ class Session:
                 'tree': self.tree.to_json(),
                 'pairs': [_jsonable(e) for e in auto],
                 'manual_edges': [_jsonable(e) for e in manual]}
-        sp.save_project(proj, path)
+        for e in proj['scans']:
+            e['path'] = sp.rel_path(e['path'], path)
+        caches = {}
+        if project_store.is_archive(path) or str(path).lower().endswith('.pulse'):
+            same = self.project_path and Path(self.project_path).resolve() == Path(path).resolve()
+            caches = {sc.id: sc.to_cache() for sc in self.scans
+                      if sc.analyzed and (sc.cache_dirty or not same)}
+        keep = self.project_path if (self.project_path and project_store.is_archive(self.project_path)) else None
+        project_store.write_project(path, proj, caches, keep_from=keep)
+        for sc in self.scans:
+            if sc.id in caches:
+                sc.cache_dirty = False
         self.project_path = str(path)
         return path
 

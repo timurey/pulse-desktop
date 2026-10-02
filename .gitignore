@@ -34,3 +34,4 @@ cloudcompare/
 *.png
 screenshots/
 .venv312/
+*.pulse

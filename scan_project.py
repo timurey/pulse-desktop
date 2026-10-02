@@ -52,18 +52,20 @@ def abs_path(path, project_file):
 
 
 def load_project(project_file):
-    """project.json с путями сканов, приведёнными к абсолютным."""
-    proj = json.loads(Path(project_file).read_text(encoding='utf-8'))
+    """Проект (.pulse — архив, или .json) с путями сканов, приведёнными к абсолютным."""
+    import project_store
+    proj = project_store.read_project(project_file)
     for e in proj['scans']:
         e['path'] = abs_path(e['path'], project_file)
     return proj
 
 
 def save_project(proj, project_file):
+    import project_store
     out = json.loads(json.dumps(proj))
     for e in out['scans']:
         e['path'] = rel_path(e['path'], project_file)
-    Path(project_file).write_text(json.dumps(out, indent=1, ensure_ascii=False), encoding='utf-8')
+    project_store.write_project(project_file, out)     # .pulse: кеш анализа сохраняется
 
 
 # пороги надёжного ребра

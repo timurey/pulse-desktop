@@ -15,7 +15,7 @@
 Сцена рисуется в общей системе (каноническая система опорного скана, Z вверх).
 
 Usage:
-    python scan_gui.py [project.json | scan1.e57 scan2.e57 ...] [--web]
+    python scan_gui.py [project.pulse | project.json | scan1.e57 scan2.e57 ...] [--web]
 
     --web - показывать окно в браузере (http://localhost:8888) вместо нативного
             окна; нужно, если нативное окно Open3D чёрное (macOS 15 + Metal)
@@ -155,6 +155,8 @@ class App:
         self.app = gui.Application.instance
         self.s = session or Session()
         self.busy = False
+        self.analyzing = False        # фоновый анализ сканов (окно не блокируется)
+        self._load_gen = 0
         self._closed = False
         self._force_close = False
         self._last_esc = 0.0
@@ -769,15 +771,97 @@ class App:
 
     # ── сцена ────────────────────────────────────────────────────────────
     def load_all(self):
-        """Анализ всех сканов (в фоне) и показ."""
+        """
+        Открытие в два этапа (в фоне):
+          1) сразу показать сканы по сохранённым позам: из кеша проекта — очищенными,
+             без кеша — сырыми (чтение + вертикаль + прореживание, ~0.5 с на скан);
+          2) проанализировать сканы без кеша, подменить их вид очищенным и дописать
+             кеш в архив проекта (.pulse) — следующее открытие займёт секунды.
+        """
+        self._load_gen += 1
+        gen = self._load_gen
+        sess = self.s
+        post = lambda fn: self.app.post_to_main_thread(self.w, fn)
+
         def work(progress):
-            for i, s in enumerate(self.s.scans):
-                progress(i / len(self.s.scans), f'анализ {s.id}')
-                s.res
-                s.ghost_mask()
-                s._display = self.s.display_points(s)
-            return True
-        self.run_bg('анализ сканов...', work, lambda _: self.after_load())
+            t0 = time.time()
+            n_cache = sess.load_cached()
+            todo = [sc for sc in sess.scans if not sc.analyzed]
+            for i, sc in enumerate(sess.scans):
+                if gen != self._load_gen:
+                    return None
+                progress(i / max(1, len(sess.scans)), f'загрузка {sc.id}')
+                sc._display = sess.display_points(sc) if sc.analyzed else sc.quick_points(
+                    max(scan_gui_display_voxel(), 0.03))
+            return n_cache, todo, time.time() - t0
+
+        def shown(r):
+            if r is None or gen != self._load_gen:
+                return
+            n_cache, todo, dt = r
+            self.after_load()
+            msg = f'открыто за {dt:.1f} c: из кеша {n_cache} из {len(sess.scans)}'
+            if todo:
+                self.set_status(msg + f'; анализ остальных {len(todo)} в фоне...')
+                self._analyze_bg(todo, gen)
+            else:
+                self.set_status(msg)
+        self.run_bg('открытие проекта...', work, shown)
+
+    def _analyze_bg(self, todo, gen):
+        """Этап 2: полный анализ сканов без кеша; окно остаётся доступным."""
+        sess = self.s
+        self.analyzing = True
+        post = lambda fn: self.app.post_to_main_thread(self.w, fn)
+
+        def work():
+            t0 = time.time()
+            try:
+                for i, sc in enumerate(todo):
+                    if gen != self._load_gen or self._closed:
+                        return
+                    post(lambda i=i, sc=sc: self.set_status(
+                        f'анализ сканов в фоне: {i + 1}/{len(todo)} ({_short(sc.id)})...'))
+                    sc.analyze()
+                    sc._display = sess.display_points(sc)
+                    post(lambda sc=sc: self._show_scan(sc))
+                n = sess.flush_cache()
+                dt = time.time() - t0
+                if n:
+                    msg = f'анализ готов за {dt:.0f} c, сохранён в кеш проекта ({n} скан.)'
+                elif sess.project_path and str(sess.project_path).lower().endswith('.json'):
+                    msg = (f'анализ готов за {dt:.0f} c. Чтобы не считать его при каждом открытии, '
+                           f'сохраните проект как .pulse («Сохранить как...»)')
+                else:
+                    msg = f'анализ готов за {dt:.0f} c (кеш запишется при сохранении проекта)'
+                post(lambda: self.set_status(msg))
+            except Exception as e:                       # noqa: BLE001
+                traceback.print_exc()
+                post(lambda: self.set_status(f'ошибка фонового анализа: {e}'))
+            finally:
+                def done():
+                    self.analyzing = False
+                    self.refresh_clean()
+                post(done)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _show_scan(self, sc):
+        """Заменить облако скана в сцене (после анализа — очищенный вид)."""
+        if self._closed:
+            return
+        name = f'scan:{sc.id}'
+        scn = self.sw.scene
+        if scn.has_geometry(name):
+            scn.remove_geometry(name)
+        T = self.T_moving if (sc is self.moving and self.T_moving is not None) else self.s.Tc(sc)
+        if T is not None and getattr(sc, '_display', None) is not None:
+            scn.add_geometry(name, self._geom(sc), self.mat)
+            scn.set_geometry_transform(name, T)
+            scn.show_geometry(name, sc.visible)
+        if sc.id in self.selection:                      # точки показа сменились
+            self.selection.pop(sc.id)
+            self._draw_selection()
+        self.sw.force_redraw()
 
     def after_load(self):
         self._saved_sig = self.s.state_signature()
@@ -905,7 +989,7 @@ class App:
 
     def on_open(self):
         self._file_dialog(gui.FileDialog.OPEN, 'Открыть проект',
-                          [('.json', 'Проект (.json)')], self.open_project)
+                          [('.pulse .json', 'Проект (.pulse, .json)')], self.open_project)
 
     def open_project(self, path):
         self.s = Session.from_project(path)
@@ -931,10 +1015,14 @@ class App:
 
     def on_save_as(self):
         def done(p):
+            if Path(p).suffix.lower() not in ('.pulse', '.json'):
+                p = str(p) + '.pulse'
             self.s.save(p)
             self._saved_sig = self.s.state_signature()
             self.set_status(f'Сохранено: {p}')
-        self._file_dialog(gui.FileDialog.SAVE, 'Сохранить проект', [('.json', 'Проект')], done)
+        self._file_dialog(gui.FileDialog.SAVE, 'Сохранить проект',
+                          [('.pulse', 'Проект с кешем анализа (.pulse)'), ('.json', 'Проект без кеша (.json)')],
+                          done)
 
     def on_level_project(self):
         info = self._with_plan_change(self.s.level_project)
@@ -2011,6 +2099,11 @@ class App:
                           [('.e57', 'E57'), ('.pcd', 'PCD'), ('.ply', 'PLY')], go)
 
 
+def scan_gui_display_voxel():
+    from scan_session import DISPLAY_VOXEL
+    return DISPLAY_VOXEL
+
+
 def _incompatible(fa, fb):
     """Причина, по которой признаки нельзя сопоставить, или None."""
     if fa['type'] != fb['type'] and 'point' not in (fa['type'], fb['type']):
@@ -2057,7 +2150,7 @@ def main(argv=None):
     app = gui.Application.instance
     app.initialize()
     setup_fonts(app)
-    if argv and argv[0].endswith('.json'):
+    if argv and argv[0].lower().endswith(('.json', '.pulse')):
         sess = Session.from_project(argv[0])
     elif argv:
         sess = Session.from_scans(argv)
