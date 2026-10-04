@@ -303,6 +303,7 @@ class TreePanel(QFrame):
             else:
                 act('Сделать опорным', 'make_ref', 'mdi6.anchor')
                 act('Ручная стыковка', 'manual', 'mdi6.vector-combine')
+                act('Уточнить стыковку (автоподгонка)', 'refine', 'mdi6.auto-fix')
                 act('Найти кандидатов позы', 'candidates', 'mdi6.target')
                 act('Встать в точку скана (полёт)', 'fly_to', 'mdi6.airplane')
             m.addSeparator()

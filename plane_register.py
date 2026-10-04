@@ -537,7 +537,8 @@ def search_opening_pair(scorer, cA, nA, cB, nB, deltas=np.arange(0.15, 0.95, 0.0
 
 
 # ── ICP ────────────────────────────────────────────────────────────────────
-def refine_icp(ptsA, ptsB, T0, voxels=ICP_VOXELS, max_dist=ICP_MAX_DIST, max_src=40000):
+def refine_icp(ptsA, ptsB, T0, voxels=ICP_VOXELS, max_dist=ICP_MAX_DIST, max_src=40000, dists=None):
+    """ICP точка-плоскость (Tukey) по этапам voxels × dists (по умолчанию max_dist, max_dist/2)."""
     import open3d as o3d
     reg = o3d.pipelines.registration
     A = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(ptsA))
@@ -545,7 +546,7 @@ def refine_icp(ptsA, ptsB, T0, voxels=ICP_VOXELS, max_dist=ICP_MAX_DIST, max_src
     T = T0.copy()
     res = None
     rng = np.random.default_rng(0)
-    for v, d in zip(voxels, (max_dist, max_dist / 2)):
+    for v, d in zip(voxels, dists or (max_dist, max_dist / 2)):
         a, b = A.voxel_down_sample(v), B.voxel_down_sample(v)
         if len(b.points) > max_src:              # скорость: источник прореживаем
             b = b.select_by_index(rng.choice(len(b.points), max_src, replace=False).tolist())
@@ -555,6 +556,64 @@ def refine_icp(ptsA, ptsB, T0, voxels=ICP_VOXELS, max_dist=ICP_MAX_DIST, max_src
             reg.ICPConvergenceCriteria(max_iteration=60))
         T = res.transformation
     return T, float(res.fitness), float(res.inlier_rmse)
+
+
+def refine_rotation(ptsA, ptsB, T0, center, voxels=(0.12, 0.06, 0.03), dists=(0.5, 0.2, 0.06),
+                    iters=25, max_src=40000):
+    """
+    ICP «только поворот вокруг точки center» (общая система): точка центра остаётся на
+    месте. Линеаризованная точка-плоскость по малому углу ω:
+      r_i = n_i·(s_i − d_i) + ω·((s_i − c) × n_i),  веса Тьюки.
+    → (T, доля совпавших, rmse).
+    """
+    import open3d as o3d
+    c = np.asarray(center, float)
+    A = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(ptsA))
+    B = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(ptsB))
+    T = np.asarray(T0, float).copy()
+    rng = np.random.default_rng(0)
+    fit, rmse = 0.0, 0.0
+    for v, dmax in zip(voxels, dists):
+        a = A.voxel_down_sample(v)
+        a.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=v * 3, max_nn=30))
+        Pa, Na = np.asarray(a.points), np.asarray(a.normals)
+        b = np.asarray(B.voxel_down_sample(v).points)
+        if len(b) > max_src:
+            b = b[rng.choice(len(b), max_src, replace=False)]
+        nns = o3d.core.nns.NearestNeighborSearch(o3d.core.Tensor(np.ascontiguousarray(Pa, np.float32)))
+        nns.knn_index()
+        for _ in range(iters):
+            S = b @ T[:3, :3].T + T[:3, 3]
+            idx, d2 = nns.knn_search(o3d.core.Tensor(np.ascontiguousarray(S, np.float32)), 1)
+            idx, d = idx.numpy()[:, 0], np.sqrt(d2.numpy()[:, 0])
+            m = d < dmax
+            if m.sum() < 50:
+                break
+            s_, D, n = S[m], Pa[idx[m]], Na[idx[m]]
+            r0 = np.sum(n * (s_ - D), axis=1)
+            J = np.cross(s_ - c, n)
+            k = dmax / 2
+            w = np.where(np.abs(r0) < k, (1 - (r0 / k) ** 2) ** 2, 0.0)
+            H = (J * w[:, None]).T @ J + 1e-9 * np.eye(3)
+            omega = -np.linalg.solve(H, (J * w[:, None]).T @ r0)
+            ang = np.linalg.norm(omega)
+            if ang < 1e-7:
+                break
+            K = np.array([[0, -omega[2], omega[1]], [omega[2], 0, -omega[0]], [-omega[1], omega[0], 0]]) / ang
+            R = np.eye(3) + np.sin(ang) * K + (1 - np.cos(ang)) * K @ K
+            T = rotate_about(T, c, R)
+            if ang < 1e-5:
+                break
+        fit = float(m.mean())
+        rmse = float(np.sqrt(np.mean(r0[np.abs(r0) < dmax] ** 2))) if len(r0) else 0.0
+    return T, fit, rmse
+
+
+def rotate_about(T, center, R):
+    """Повернуть позу T (в общей системе) на R вокруг точки center: x' = R(x − c) + c."""
+    c = np.asarray(center, float)
+    M = make_T(R, c - R @ c)
+    return M @ np.asarray(T, float)
 
 
 def pose_delta(T1, T2):

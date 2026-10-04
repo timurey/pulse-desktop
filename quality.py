@@ -62,10 +62,18 @@ def _clean_plane_mask(sc):
     return ~drop
 
 
-def _scans(session, scan_ids=None):
+def _pose(session, sc, poses):
+    """Поза скана: из poses (подмена — например, подвижный в ручной стыковке) или сеанса."""
+    if poses and sc.id in poses:
+        return np.asarray(poses[sc.id], float)
+    return session.Tc(sc)
+
+
+def _scans(session, scan_ids=None, poses=None):
     out = []
     for sc in session.scans:
-        if sc.pose is None or not sc.visible or not sc.analyzed:
+        placed = sc.pose is not None or (poses and sc.id in poses)
+        if not placed or not sc.analyzed or (not sc.visible and scan_ids is None):
             continue
         if scan_ids is not None and sc.id not in scan_ids:
             continue
@@ -74,10 +82,10 @@ def _scans(session, scan_ids=None):
 
 
 # ── по плоскостям ──────────────────────────────────────────────────────────
-def _plane_list(session, scans, min_area):
+def _plane_list(session, scans, min_area, poses=None):
     out = []
     for sc in scans:
-        T = session.Tc(sc)
+        T = _pose(session, sc, poses)
         R, t = T[:3, :3], T[:3, 3]
         down = sc.res['down']
         keep = _clean_plane_mask(sc)
@@ -100,9 +108,9 @@ def _keys2(P, c0, u, v, cell):
 
 
 def plane_cells(session, cell=0.2, min_area=1.0, max_angle_deg=5.0, max_offset=0.25,
-                scan_ids=None, progress=None):
-    scans = _scans(session, scan_ids)
-    pl = _plane_list(session, scans, min_area)
+                scan_ids=None, progress=None, poses=None):
+    scans = _scans(session, scan_ids, poses)
+    pl = _plane_list(session, scans, min_area, poses)
     if len(pl) < 2:
         return _empty('planes', cell, {'clusters': 0})
     # объединение плоскостей разных сканов в одну поверхность (union-find)
@@ -207,13 +215,13 @@ def _cells_from_labels(P, key, lab, d, n_lab, max_spread=np.inf):
 
 
 # ── локально по вокселям ───────────────────────────────────────────────────
-def local_cells(session, voxel=0.2, min_pts=6, flat_ratio=0.12, scan_ids=None, progress=None):
-    scans = _scans(session, scan_ids)
+def local_cells(session, voxel=0.2, min_pts=6, flat_ratio=0.12, scan_ids=None, progress=None, poses=None):
+    scans = _scans(session, scan_ids, poses)
     if len(scans) < 2:
         return _empty('local', voxel)
     Ps, labs = [], []
     for i, sc in enumerate(scans):
-        P = pr.transform(sc.down, session.Tc(sc))
+        P = pr.transform(sc.down, _pose(session, sc, poses))
         Ps.append(P)
         labs.append(np.full(len(P), i))
     P = np.vstack(Ps)

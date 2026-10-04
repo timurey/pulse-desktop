@@ -82,6 +82,9 @@ def convex_hull_2d(P):
     return np.array(lower[:-1] + upper[:-1])
 
 
+ICP_WEIGHT = 10.0          # вес связи после автоподгонки относительно грубых ручных
+
+
 def quick_voxel():
     from scan_session import DISPLAY_VOXEL
     return max(DISPLAY_VOXEL, 0.03)
@@ -228,6 +231,15 @@ class MainWindow(QMainWindow):
         self.fixed = self.moving = None
         self.T_moving = None
         self._manual_T0 = None                   # поза подвижного при входе в ручную стыковку
+        self.pivot = None                        # опорная точка: {'c', 'T0', 'p_loc', 'ang', 'r'}
+        self.pivot_pick = False                  # режим выбора опорной точки (Ctrl+клик)
+        self.pivot_A = None                      # выбранная точка в неподвижном (общая система)
+        self._ring_drag = None                   # перетаскивание кольца транспортира
+        self._icp_refined = False                # последняя поза — из автоподгонки (точная связь)
+        self._fit_base = None                    # толщина пары при входе в ручную стыковку
+        self._fit_timer = QTimer(self)
+        self._fit_timer.setSingleShot(True)
+        self._fit_timer.timeout.connect(self._fit_thickness)
         self.pairs = []
         self.pending = None
         self._drag = None
@@ -1153,12 +1165,27 @@ class MainWindow(QMainWindow):
             self.on_export(key)
         elif name == 'manual':
             self.start_manual(moving_id=key)
+        elif name == 'refine':
+            self.refine_scan(key)
         elif name == 'candidates':
             self.on_cand_search(key)
         elif name == 'fly_to':
             self.fly_to_scan(key)
         elif name == 'focus':
             self.focus_node(key)
+
+    def refine_scan(self, sid):
+        """Уточнить стыковку размещённого скана: ручная стыковка с соседом по графу + автоподгонка."""
+        sc = self.s.by_id(sid)
+        if sc is None or sc.pose is None or sid == self.s.frame:
+            self.set_status('уточнить можно размещённый скан, кроме опорного')
+            return
+        cand = [e for e in self.s.active_edges() if sid in (e['A'], e['B'])]
+        cand.sort(key=lambda e: (e.get('method') != 'manual', -e.get('score', 0)))   # сначала ручные связи
+        partner = next((e['B'] if e['A'] == sid else e['A'] for e in cand), self.s.frame)
+        self.start_manual(partner, sid)
+        if self.moving is sc:
+            self.on_autofit()
 
     def focus_node(self, key):
         ids = self.s.tree.scans_in(key) if self.s.tree.group(key) is not None else [key]
@@ -1280,7 +1307,7 @@ class MainWindow(QMainWindow):
     def on_inspector_action(self, name):
         key = self.tree_sel
         if name in ('rename', 'only', 'new_group', 'export_branch', 'make_ref', 'manual', 'candidates',
-                    'fly_to'):
+                    'fly_to', 'refine'):
             return self.on_tree_action(name, key)
         if name == 'clean':
             self.clean_scan = self.s.by_id(key)
@@ -1364,6 +1391,11 @@ class MainWindow(QMainWindow):
             text = ''
         elif self.select_mode:
             text = 'Выделение: тяните левой кнопкой, Shift — добавить, Delete — удалить, Esc — выйти'
+        elif self.mode == 'manual' and self.moving is not None and self.pivot is not None:
+            text = (f'{short(self.fixed.id)} ← {short(self.moving.id)} · опорная точка закреплена: тяните '
+                    f'кольца транспортира (Shift — точнее), Alt + тянуть — рыскание')
+        elif self.mode == 'manual' and self.moving is not None and self.pivot_pick:
+            text = 'Опорная точка: Ctrl/⌘ + клик в неподвижном, затем та же точка в подвижном'
         elif self.mode == 'manual' and self.moving is not None:
             text = (f'Ручная стыковка {short(self.fixed.id)} ← {short(self.moving.id)} · '
                     f'Ctrl/⌘ + клик — признак, Shift + тянуть — сдвиг, Alt + тянуть — поворот')
@@ -1494,6 +1526,12 @@ class MainWindow(QMainWindow):
         self._manual_T0 = self.T_moving.copy()
         self.pairs, self.pending = [], None
         self.manual_score = None
+        self.pivot, self.pivot_pick, self.pivot_A, self._icp_refined = None, False, None, False
+        self._fit_base = None
+        self.view.remove_prefix('pivot:')
+        self.manual.set_pivot(None)
+        self.manual.fit_label.setText('')
+        self._fit_timer.start(50)
         self.mode = 'inspect'
         self.set_mode('manual')
         self.manual.set_scans(self.manual_items(), fixed.id, moving.id)
@@ -1536,9 +1574,20 @@ class MainWindow(QMainWindow):
             return
         if self.moving is None:
             return
+        if name == 'nudge' and self.pivot is not None:
+            kw = arg
+            if any(kw.get(k) for k in ('dx', 'dy', 'dz')):
+                self.set_status('опорная точка закреплена: сдвиг недоступен («Снять точку» — освободить)')
+                return
+            sd = self.manual.step_deg.value()
+            a = self.pivot['ang']
+            self._set_pivot_angles(roll=a['roll'] + kw.get('droll', 0) * sd, pitch=a['pitch'] + kw.get('dpitch', 0) * sd,
+                                   yaw=a['yaw'] + kw.get('dyaw', 0) * sd)
+            return
         if name == 'nudge':
             st, sd = self.manual.step_m.value(), self.manual.step_deg.value()
             kw = arg
+            self._icp_refined = False
             self.T_moving = Session.nudge(self.T_moving, kw.get('dx', 0) * st, kw.get('dy', 0) * st,
                                           kw.get('dz', 0) * st, kw.get('dyaw', 0) * sd,
                                           kw.get('droll', 0) * sd, kw.get('dpitch', 0) * sd)
@@ -1546,8 +1595,30 @@ class MainWindow(QMainWindow):
             self.live_score()
         elif name == 'solve':
             self.on_manual_solve()
-        elif name == 'icp':
-            self.on_manual_icp()
+        elif name in ('icp', 'autofit'):
+            self.on_autofit()
+        elif name == 'pivot_pick':
+            self.pivot_pick = not self.pivot_pick and self.pivot is None
+            self.pivot_A = None
+            self.view.remove_prefix('pivot:')
+            self.manual.set_pivot('fixed' if self.pivot else None, picking=self.pivot_pick)
+            self._banner()
+            if self.pivot_pick:
+                self.set_status('Ctrl/⌘ + клик: характерная точка в неподвижном скане')
+        elif name == 'pivot_clear':
+            self.pivot, self.pivot_pick, self.pivot_A = None, False, None
+            self.view.remove_prefix('pivot:')
+            self.manual.set_pivot(None)
+            self._banner()
+            self.set_status('опорная точка снята')
+        elif name == 'pivot_angle':
+            k, v = arg
+            if self.pivot is not None:
+                self._set_pivot_angles(**{k: v})
+        elif name == 'pivot_step':
+            k, sgn = arg
+            if self.pivot is not None:
+                self._set_pivot_angles(**{k: self.pivot['ang'][k] + sgn * self.manual.step_deg.value()})
         elif name == 'clear':
             self.pairs, self.pending = [], None
             self._clear_markers()
@@ -1563,7 +1634,7 @@ class MainWindow(QMainWindow):
                 self.set_status('нет подходящих плоскостей (пол/земля, стены) для выравнивания')
                 return
             before = Session.tilt_deg(self.T_moving)
-            self.T_moving = T2
+            self.T_moving = self._pivot_absorb(T2)
             self._update_moving()
             self.live_score()
             self.set_status(f"выровнено по {info['horizontal']} гориз. и {info['walls']} верт. плоскостям: "
@@ -1573,7 +1644,7 @@ class MainWindow(QMainWindow):
             if d is None:
                 self.set_status('нет стен для доворота')
                 return
-            self.T_moving = T2
+            self.T_moving = self._pivot_absorb(T2)
             self._update_moving()
             self.live_score()
             self.set_status(f'подвижный довёрнут по стенам на {d:+.2f}°')
@@ -1641,8 +1712,9 @@ class MainWindow(QMainWindow):
             T, info = r
             if moving is not self.moving:
                 return
-            self.T_moving = T
+            self.T_moving = self._pivot_absorb(T)
             self._update_moving()
+            self._fit_timer.start(10)
             extra = ''
             if info.get('weak'):
                 extra = ' — есть неопределённые направления, уточните ICP или добавьте пару'
@@ -1679,12 +1751,208 @@ class MainWindow(QMainWindow):
         if self.moving is None:
             return
         moving, fixed, T = self.moving, self.fixed, self.T_moving
+        weight, method = (ICP_WEIGHT, 'автоподгонка') if self._icp_refined else (1.0, 'ручная')
 
         def done(_):
             self.on_manual_cancel(ask=False)
-            self.set_status(f'{short(moving.id)}: поза принята (ручное ребро к {short(fixed.id)})')
-        self.run_bg('пересчёт графа…', lambda p: self.s.accept_pose(moving, T, anchor=fixed, method='ручная'),
+            self.set_status(f'{short(moving.id)}: поза принята ({method}, связь с {short(fixed.id)}'
+                            f"{', вес ×' + str(int(weight)) if weight != 1 else ''})")
+        self.run_bg('пересчёт графа…', lambda p: self.s.accept_pose(moving, T, anchor=fixed, method=method,
+                                                                    weight=weight), done)
+
+    # ── автоподгонка и опорная точка ─────────────────────────────────────
+    def _fit_targets(self):
+        if self.manual.fit_target.value() == 'all':
+            return [s for s in self.s.placed() if s is not self.moving] or [self.fixed]
+        return [self.fixed]
+
+    def on_autofit(self):
+        """ICP после грубой ручной стыковки; при опорной точке — только поворот вокруг неё."""
+        if self.moving is None:
+            return
+        moving, T0, targets = self.moving, self.T_moving.copy(), self._fit_targets()
+        center = None if self.pivot is None else self.pivot['c']
+
+        def done(r):
+            T, info = r
+            if moving is not self.moving:
+                return
+            if center is not None:
+                self.T_moving = self._pivot_absorb(T)
+            else:
+                self.T_moving = T
+            self._icp_refined = True
+            self._update_moving()
+            dt, da = info['shift']
+            if center is not None:
+                self.set_status(f"подгонка поворота вокруг точки: {da:.2f}°, rmse {info['rmse'] * 100:.1f} см")
+            else:
+                self.set_status(f"автоподгонка: сдвиг {dt * 100:.1f} см, поворот {da:.2f}°, "
+                                f"rmse {info['rmse'] * 100:.1f} см")
+            self.live_score()
+            self._fit_timer.start(10)
+        self.run_bg('автоподгонка (ICP)…', lambda p: self.s.refine_icp(targets, moving, T0, wide=True, center=center),
                     done)
+
+    def _fit_thickness(self):
+        """Толщина пары (одни и те же поверхности) для текущей позы подвижного — в фоне."""
+        if self.moving is None or getattr(self, '_fit_busy', False):
+            if self.moving is not None:
+                self._fit_timer.start(400)
+            return
+        self._fit_busy = True
+        moving, T, targets = self.moving, self.T_moving.copy(), self._fit_targets()
+        t = self.manual.fit_label.text()
+        if t and not t.endswith('…'):
+            self.manual.fit_label.setText(t + ' · пересчёт…')
+
+        def done(r):
+            self._fit_busy = False
+            if moving is not self.moving:
+                return
+            med, n = r
+            if med is None:
+                self.manual.fit_label.setText('общих поверхностей с неподвижным нет — сначала грубо совместите')
+                return
+            if self._fit_base is None:
+                self._fit_base = med
+            txt = f'расхождение поверхностей: {med * 100:.1f} см ({n} ячеек)'
+            if abs(self._fit_base - med) > 1e-4:
+                txt += f'; было {self._fit_base * 100:.1f} см'
+            self.manual.fit_label.setText(txt)
+
+        def fail(e):
+            self._fit_busy = False
+        bg.run(lambda: self.s.pair_thickness(targets, moving, T), done, fail)
+
+    def _pivot_absorb(self, T2):
+        """Поза после поворота другим инструментом: опорная точка возвращается на место, углы — в поля."""
+        pv = self.pivot
+        if pv is None:
+            self._icp_refined = False
+            return T2
+        T2 = np.asarray(T2, float).copy()
+        T2[:3, 3] = pv['c'] - T2[:3, :3] @ pv['p_loc']
+        R = T2[:3, :3] @ pv['T0'][:3, :3].T
+        pv['ang'] = {'yaw': float(np.degrees(np.arctan2(R[1, 0], R[0, 0]))),
+                     'pitch': float(np.degrees(np.arcsin(np.clip(-R[2, 0], -1, 1)))),
+                     'roll': float(np.degrees(np.arctan2(R[2, 1], R[2, 2])))}
+        self.manual.set_pivot('fixed', pv['ang'])
+        self._draw_pivot()
+        return T2
+
+    def _set_pivot_angles(self, **kw):
+        pv = self.pivot
+        for k, v in kw.items():
+            pv['ang'][k] = float((v + 180.0) % 360.0 - 180.0)
+        a = pv['ang']
+        self.T_moving = Session.rotate_about(pv['T0'], pv['c'], a['roll'], a['pitch'], a['yaw'])
+        self._icp_refined = False
+        self.manual.set_pivot('fixed', a)
+        self._update_moving()
+        self._draw_pivot()
+        self.live_score()
+        self._fit_timer.start(500)
+
+    def _pivot_picked(self, W_, scan):
+        """Ctrl+клик в режиме опорной точки: сначала неподвижный, затем подвижный."""
+        if self.pivot_A is None:
+            if scan is not self.fixed:
+                self.set_status('сначала точка в неподвижном скане')
+                return
+            self.pivot_A = np.asarray(W_, float)
+            self._draw_pivot()
+            self.manual.set_pivot('A')
+            self.set_status('теперь Ctrl/⌘ + клик по той же точке в подвижном скане')
+            return
+        if scan is not self.moving:
+            self.set_status('теперь та же точка в подвижном скане')
+            return
+        d = self.pivot_A - np.asarray(W_, float)
+        T = self.T_moving.copy()
+        T[:3, 3] += d                                    # совместить точки
+        self.T_moving = T
+        c = self.pivot_A
+        self.pivot = {'c': c, 'T0': T.copy(), 'p_loc': np.linalg.inv(T)[:3, :3] @ c + np.linalg.inv(T)[:3, 3],
+                      'ang': {'yaw': 0.0, 'roll': 0.0, 'pitch': 0.0},
+                      'r': float(np.clip(0.12 * self.view.distance(), 0.4, 15.0))}
+        self.pivot_pick, self.pivot_A = False, None
+        self._icp_refined = False
+        self.manual.set_pivot('fixed', self.pivot['ang'])
+        self._update_moving()
+        self._draw_pivot()
+        self._banner()
+        self.live_score()
+        self._fit_timer.start(100)
+        self.set_status(f'точка закреплена (сдвиг {np.linalg.norm(d) * 100:.1f} см): поворачивайте '
+                        f'транспортирами, полями углов или «Подогнать поворот»')
+
+    PIVOT_AXES = {'yaw': (np.array([0, 0, 1.0]), np.array([1, 0, 0.0]), np.array([0, 1, 0.0]), (0.36, 0.61, 1.0)),
+                  'roll': (np.array([1, 0, 0.0]), np.array([0, 1, 0.0]), np.array([0, 0, 1.0]), (1.0, 0.42, 0.42)),
+                  'pitch': (np.array([0, 1, 0.0]), np.array([0, 0, 1.0]), np.array([1, 0, 0.0]), (0.37, 0.83, 0.55))}
+
+    def _ring_points(self, k, n=180):
+        _, u, v, _ = self.PIVOT_AXES[k]
+        t = np.linspace(0, 2 * np.pi, n, endpoint=False)
+        return self.pivot['c'] + self.pivot['r'] * (np.cos(t)[:, None] * u + np.sin(t)[:, None] * v)
+
+    def _draw_pivot(self):
+        """Маркер точки и три транспортира (кольца с делениями 5°/15°/90° и текущим углом)."""
+        self.view.remove_prefix('pivot:')
+        if self.pivot is None:
+            if self.pivot_A is not None:
+                self.view.set_sphere('pivot:A', self.pivot_A, 0.05, (1.0, 0.85, 0.2))
+            return
+        c, r = self.pivot['c'], self.pivot['r']
+        self.view.set_sphere('pivot:c', c, max(0.02, r * 0.03), (1.0, 0.85, 0.2))
+        for k, (n_, u, v, col) in self.PIVOT_AXES.items():
+            P, segs, cols = [], [], []
+            ring = self._ring_points(k)
+            m = len(ring)
+            P.extend(ring)
+            segs += [[i, (i + 1) % m] for i in range(m)]
+            cols += [col] * m
+            for deg in range(0, 360, 5):                 # деления
+                a = np.radians(deg)
+                e = np.cos(a) * u + np.sin(a) * v
+                ln = 0.16 if deg % 90 == 0 else (0.09 if deg % 15 == 0 else 0.045)
+                P += [c + r * e, c + r * (1 - ln) * e]
+                segs.append([len(P) - 2, len(P) - 1])
+                cols.append(col)
+            ang = np.radians(self.pivot['ang'][k])       # текущий угол: стрелка и дуга от нуля
+            e = np.cos(ang) * u + np.sin(ang) * v
+            P += [c, c + r * 1.08 * e]
+            segs.append([len(P) - 2, len(P) - 1])
+            cols.append((1.0, 1.0, 1.0))
+            ts = np.linspace(0, ang, max(2, int(abs(np.degrees(ang)) * 2) + 2))
+            arc = [c + r * 1.04 * (np.cos(t) * u + np.sin(t) * v) for t in ts]
+            k0 = len(P)
+            P += arc
+            segs += [[k0 + i, k0 + i + 1] for i in range(len(arc) - 1)]
+            cols += [(1.0, 0.9, 0.3)] * (len(arc) - 1)
+            self.view.set_lines(f'pivot:{k}', np.array(P), segs, cols, None, 2.0, on_top=True)
+
+    def _ring_hit(self, x, y, tol=9):
+        if self.pivot is None:
+            return None
+        best = None
+        for k in self.PIVOT_AXES:
+            s_, _, front = self.view.project(self._ring_points(k, 360))
+            d = np.hypot(s_[:, 0] - x, s_[:, 1] - y)
+            d[~front] = np.inf
+            if d.min() < tol and (best is None or d.min() < best[0]):
+                best = (d.min(), k)
+        return None if best is None else best[1]
+
+    def _ring_angle(self, k, x, y):
+        """Угол точки под курсором в плоскости кольца, рад (None — кольцо видно с ребра)."""
+        n_, u, v, _ = self.PIVOT_AXES[k]
+        o, dvec = self.view.ray(x, y)
+        den = dvec @ n_
+        if abs(den) < 0.15:
+            return None
+        q = o + ((self.pivot['c'] - o) @ n_) / den * dvec - self.pivot['c']
+        return float(np.arctan2(q @ v, q @ u))
 
     def manual_dirty(self):
         """Поза подвижного изменена после входа в ручную стыковку и не принята."""
@@ -1741,6 +2009,8 @@ class MainWindow(QMainWindow):
         self.moving = self.fixed = None
         self.T_moving = None
         self._manual_T0 = None
+        self.pivot, self.pivot_pick, self.pivot_A = None, False, None
+        self.view.remove_prefix('pivot:')
         self.pairs, self.pending = [], None
         self._clear_markers()
         self.mode = 'manual'
@@ -1814,6 +2084,22 @@ class MainWindow(QMainWindow):
         x, y = pos.x(), pos.y()
         manual = self.mode == 'manual' and self.moving is not None and self.T_moving is not None
         if kind == 'press' and ev.button() == Qt.LeftButton:
+            if manual and self.pivot_pick and mods & (Qt.ControlModifier | Qt.MetaModifier):
+                want = self.fixed if self.pivot_A is None else self.moving
+                hit = self.view.pick_point(x, y, names={f'scan:{want.id}'})
+                if hit is None:
+                    self.set_status('мимо облака')
+                else:
+                    self._pivot_picked(hit[1], want)
+                return True
+            if manual and self.pivot is not None and not mods & (Qt.ControlModifier | Qt.MetaModifier):
+                k = self._ring_hit(x, y)
+                if k is not None:
+                    self._ring_drag = {'k': k, 'a0': self._ring_angle(k, x, y), 'v0': self.pivot['ang'][k], 'x0': x}
+                    return True
+                if mods & Qt.ShiftModifier and not mods & Qt.AltModifier:
+                    self.set_status('опорная точка закреплена: сдвиг недоступен («Снять точку» — освободить)')
+                    return True
             if manual and mods & (Qt.ControlModifier | Qt.MetaModifier):
                 # сначала — скан, который ожидается по шагу (неподвижный, затем подвижный):
                 # сканы перекрываются, и ближайшая к глазу точка часто чужая
@@ -1838,6 +2124,20 @@ class MainWindow(QMainWindow):
         if kind == 'press' and manual and ev.button() == Qt.RightButton and mods & Qt.ShiftModifier:
             self._drag = {'mode': 'rot', 'T0': self.T_moving.copy(), 'x0': x, 'g0': None, 'z0': 0}
             return True
+        if kind == 'move' and self._ring_drag is not None:
+            g = self._ring_drag
+            a = self._ring_angle(g['k'], x, y)
+            if a is None or g['a0'] is None:
+                delta = 0.25 * (x - g['x0'])             # кольцо с ребра — по горизонтали мыши
+            else:
+                delta = float(np.degrees(np.angle(np.exp(1j * (a - g['a0'])))))
+            if mods & Qt.ShiftModifier:
+                delta *= 0.1                             # Shift — точнее
+            self._set_pivot_angles(**{g['k']: g['v0'] + delta})
+            return True
+        if kind == 'release' and self._ring_drag is not None:
+            self._ring_drag = None
+            return True
         if kind == 'move':
             if self._drag is not None:
                 d = self._drag
@@ -1849,8 +2149,13 @@ class MainWindow(QMainWindow):
                     if np.linalg.norm(delta) > 200:
                         return True
                     self.T_moving = Session.nudge(d['T0'], delta[0], delta[1], 0.0)
+                elif self.pivot is not None:               # Alt+тянуть — поворот вокруг опорной точки
+                    a = self.pivot['ang']
+                    self._set_pivot_angles(yaw=d.setdefault('yaw0', a['yaw']) - 0.3 * (x - d['x0']))
+                    return True
                 else:
                     self.T_moving = Session.nudge(d['T0'], dyaw_deg=-0.3 * (x - d['x0']))
+                self._icp_refined = False
                 self._update_moving()
                 return True
             if self._rect is not None:
@@ -1862,6 +2167,7 @@ class MainWindow(QMainWindow):
             if self._drag is not None:
                 self._drag = None
                 self.live_score()
+                self._fit_timer.start(300)
                 return True
             if self._rect is not None:
                 r = self._rect

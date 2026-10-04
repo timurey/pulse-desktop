@@ -210,6 +210,51 @@ def main():
     w.vp.size_slider.setValue(2)
     check('ползунок меняет размер точек', v.point_px == 2)
 
+    # опорная точка: Ctrl+клик в неподвижном и подвижном, кольцо транспортира, поле угла, подгонка
+    w.start_manual(fixed.id, moving.id)
+    pump(0.5)
+    w.view_top()
+    pump()
+    w.on_manual_action('pivot_pick', None)
+    Pf = pr.transform(fixed._display[::100], sess.Tc(fixed))
+    s_, _, fr = v.project(Pf)
+    ok = fr & (s_[:, 0] > 60) & (s_[:, 0] < W - 60) & (s_[:, 1] > 60) & (s_[:, 1] < H - 60)
+    k = np.flatnonzero(ok)[len(np.flatnonzero(ok)) // 2]
+    mouse(v, 'press', s_[k, 0], s_[k, 1], Qt.LeftButton, Qt.ControlModifier)
+    mouse(v, 'release', s_[k, 0], s_[k, 1], Qt.LeftButton, Qt.ControlModifier)
+    check('опорная точка: выбрана в неподвижном', w.pivot_A is not None)
+    Pm = pr.transform(moving._display[::100], w.T_moving)
+    s2, _, fr2 = v.project(Pm)
+    ok2 = fr2 & (s2[:, 0] > 60) & (s2[:, 0] < W - 60) & (s2[:, 1] > 60) & (s2[:, 1] < H - 60)
+    k2 = np.flatnonzero(ok2)[len(np.flatnonzero(ok2)) // 2]
+    mouse(v, 'press', s2[k2, 0], s2[k2, 1], Qt.LeftButton, Qt.ControlModifier)
+    mouse(v, 'release', s2[k2, 0], s2[k2, 1], Qt.LeftButton, Qt.ControlModifier)
+    check('опорная точка: закреплена', w.pivot is not None and v.has('pivot:yaw'))
+    if w.pivot is not None:
+        p_loc = w.pivot['p_loc']
+        on_place = lambda: np.linalg.norm(pr.transform(p_loc[None], w.T_moving)[0] - w.pivot['c']) < 1e-9
+        ring = w._ring_points('yaw', 360)
+        sr, _, frr = v.project(ring)
+        idx = np.flatnonzero(frr)
+        drag(v, sr[idx[0], 0], sr[idx[0], 1], sr[idx[20], 0], sr[idx[20], 1])
+        check('кольцо Z тянется мышью', abs(abs(w.pivot['ang']['yaw']) - 20) < 2 and on_place(),
+              f"{w.pivot['ang']['yaw']:.2f}°")
+        w.manual.angles['roll'].setValue(0.75)
+        check('поле угла поворачивает вокруг точки', abs(w.pivot['ang']['roll'] - 0.75) < 1e-9 and on_place())
+        T_before = w.T_moving.copy()
+        drag(v, cx, cy, cx + 80, cy, Qt.LeftButton, Qt.ShiftModifier)
+        check('сдвиг при закреплённой точке заблокирован', np.allclose(w.T_moving, T_before))
+        w.manual.angles['yaw'].setValue(0.0)
+        w.manual.angles['roll'].setValue(0.0)
+        w.on_autofit()
+        wait(lambda: not w.busy, 60)
+        check('подгонка поворота: точка на месте', on_place(), w.st_text.text())
+        w.on_manual_action('pivot_clear', None)
+        check('опорная точка снимается', w.pivot is None and not v.has('pivot:yaw'))
+    answer('Не принимать')
+    w.on_manual_cancel()
+    pump()
+
     # качество совмещения: расчёт один раз, ползунок только перекрашивает
     tp = w.tree_panel
     tp.switches['quality'].setChecked(True, emit=True)

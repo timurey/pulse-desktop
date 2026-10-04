@@ -3,7 +3,7 @@
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QPixmap, QIcon
 from PySide6.QtWidgets import (QFrame, QVBoxLayout, QHBoxLayout, QGridLayout, QScrollArea, QWidget, QSlider,
-                               QComboBox, QLabel, QCheckBox)
+                               QComboBox, QLabel, QCheckBox, QDoubleSpinBox)
 
 from . import widgets as W
 
@@ -166,6 +166,8 @@ class Inspector(_Panel):
         acts = []
         if placed and not is_ref:
             acts.append(('Сделать опорным', 'make_ref', 'mdi6.anchor'))
+        if placed and not is_ref:
+            acts.append(('Уточнить стыковку', 'refine', 'mdi6.auto-fix'))
         acts += [('Ручная стыковка', 'manual', 'mdi6.vector-combine'),
                  ('Кандидаты позы', 'candidates', 'mdi6.target'),
                  ('Чистка скана', 'clean', 'mdi6.selection-drag'),
@@ -259,6 +261,65 @@ class ManualPanel(_Panel):
         s2.add(dof)
         self.dof_text = W.label('', 'Hint', wrap=True)
         s2.add(self.dof_text)
+        # автоподгонка
+        sf = self.add(W.Section('Подгонка'))
+        self.fit_target = W.Segmented([('к неподвижному', 'fixed'), ('ко всем размещённым', 'all')], 'fixed')
+        sf.add(self.fit_target)
+        self.b_fit = W.button('Автоподгонка (ICP)', lambda: self.action.emit('autofit', None),
+                              icon=t.icon('mdi6.auto-fix'),
+                              tip='Точная подгонка после грубой ручной стыковки: захват до 60 см, затем 25 и 8 см. '
+                                  'При закреплённой опорной точке — только поворот вокруг неё')
+        sf.add(self.b_fit)
+        self.fit_label = W.label('', 'KV_v', wrap=True)
+        sf.add(self.fit_label)
+        # опорная точка: совместить одну точку, закрепить, затем только поворачивать вокруг неё
+        sp = self.add(W.Section('Опорная точка'))
+        self.b_pivot = W.button('Совместить точку', lambda: self.action.emit('pivot_pick', None),
+                                icon=t.icon('mdi6.crosshairs-gps'))
+        self.b_pivot.setCheckable(True)
+        sp.add(self.b_pivot)
+        self.pivot_hint = W.label('Ctrl/⌘ + клик: характерная точка в неподвижном, затем та же точка в '
+                                  'подвижном — скан сдвинется, точка закрепится; дальше скан только '
+                                  'поворачивается вокруг неё (транспортиры в 3D-виде тянутся мышью).',
+                                  'Hint', wrap=True)
+        sp.add(self.pivot_hint)
+        self.pivot_box = QWidget()
+        pl = QGridLayout(self.pivot_box)
+        pl.setContentsMargins(0, 0, 0, 0)
+        pl.setHorizontalSpacing(6)
+        pl.setVerticalSpacing(6)
+        self.angles = {}
+        for i, (k, text, color) in enumerate((('yaw', 'Z · рыскание', '#5b9bff'), ('roll', 'X · крен', '#ff6b6b'),
+                                              ('pitch', 'Y · тангаж', '#5fd38d'))):
+            lab = QLabel(text)
+            lab.setStyleSheet(f'color:{color}; font-size:12px;')
+            sb = QDoubleSpinBox()
+            sb.setRange(-180.0, 180.0)
+            sb.setDecimals(3)
+            sb.setSingleStep(0.1)
+            sb.setSuffix('°')
+            sb.setKeyboardTracking(False)
+            sb.setAlignment(Qt.AlignRight)
+            sb.valueChanged.connect(lambda v, k=k: self.action.emit('pivot_angle', (k, v)))
+            minus = W.button('−', lambda k=k: self.action.emit('pivot_step', (k, -1)), pad=True)
+            plus = W.button('+', lambda k=k: self.action.emit('pivot_step', (k, 1)), pad=True)
+            for b_ in (minus, plus):
+                b_.setFixedWidth(34)
+            pl.addWidget(lab, i, 0)
+            pl.addWidget(sb, i, 1)
+            pl.addWidget(minus, i, 2)
+            pl.addWidget(plus, i, 3)
+            self.angles[k] = sb
+        pl.setColumnStretch(1, 1)
+        g4 = QGridLayout()
+        g4.setSpacing(6)
+        g4.addWidget(W.button('Подогнать поворот', lambda: self.action.emit('autofit', None),
+                              icon=t.icon('mdi6.auto-fix'), tip='ICP: только поворот вокруг опорной точки'), 0, 0)
+        g4.addWidget(W.button('Снять точку', lambda: self.action.emit('pivot_clear', None),
+                              icon=t.icon('mdi6.close')), 0, 1)
+        pl.addLayout(g4, 3, 0, 1, 4)
+        self.pivot_box.setVisible(False)
+        sp.add(self.pivot_box)
         # подвижка
         s3 = self.add(W.Section())
         self.step_m = W.Segmented([('1 см', 0.01), ('5 см', 0.05), ('20 см', 0.2)], 0.05)
@@ -352,6 +413,24 @@ class ManualPanel(_Panel):
                 l.setProperty('dof', want)
                 W.restyle(l)
         self.dof_text.setText(st.get('text', ''))
+
+    def set_pivot(self, state, angles=None, picking=False):
+        """state: None — нет точки; 'A' — выбрана в неподвижном; 'fixed' — закреплена."""
+        self.b_pivot.setChecked(picking or state == 'A')
+        self.pivot_box.setVisible(state == 'fixed')
+        self.pivot_hint.setVisible(state != 'fixed')
+        if state == 'A':
+            self.pivot_hint.setText('Точка в неподвижном выбрана. Ctrl/⌘ + клик по той же точке в подвижном.')
+        elif state is None:
+            self.pivot_hint.setText('Ctrl/⌘ + клик: характерная точка в неподвижном, затем та же точка в '
+                                    'подвижном — скан сдвинется, точка закрепится; дальше скан только '
+                                    'поворачивается вокруг неё (транспортиры в 3D-виде тянутся мышью).')
+        self.b_pivot.setText('Точка закреплена' if state == 'fixed' else 'Совместить точку')
+        if angles is not None:
+            for k, sb in self.angles.items():
+                sb.blockSignals(True)
+                sb.setValue(float(angles[k]))
+                sb.blockSignals(False)
 
     def set_score(self, rows):
         self.score.set(rows)

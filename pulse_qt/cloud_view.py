@@ -221,12 +221,12 @@ class CloudView(QWidget):
         a.SetVisibility(bool(visible))
         return a
 
-    def set_lines(self, name, P, segs, colors=None, T=None, width=2.0, color=None, opacity=1.0):
+    def set_lines(self, name, P, segs, colors=None, T=None, width=2.0, color=None, opacity=1.0, on_top=False):
         if len(segs) == 0:
             self.remove(name)
             return None
         return self._add(name, lines_polydata(P, segs, colors), T, 'lines', np.asarray(P),
-                         color, width=width, scalars=colors is not None, opacity=opacity)
+                         color, width=width, scalars=colors is not None, opacity=opacity, on_top=on_top)
 
     def set_mesh(self, name, V, F, color, T=None, opacity=1.0):
         """Треугольная сетка с освещением (облака рисуются без него)."""

@@ -562,7 +562,7 @@ class Session:
                 info = sp.information(e, _clean_res(A), _clean_res(B))
                 if e.get('method') == 'manual':
                     info = info + MANUAL_INFO * np.eye(6)
-                infos.append(info)
+                infos.append(info * float(e.get('weight', 1.0)))
             poses = sp.optimize(names, edges, poses, infos, self.frame)
         with self.lock:
             for s in self.scans:
@@ -703,11 +703,39 @@ class Session:
         info['method'] = 'manual'
         return T, info
 
-    def refine_icp(self, fixed_list, moving, T):
-        """ICP moving -> объединение fixed_list (все в общей системе)."""
+    def refine_icp(self, fixed_list, moving, T, wide=False, center=None):
+        """
+        ICP moving -> объединение fixed_list (все в общей системе).
+        wide — после грубой ручной стыковки: захват до 60 см, затем 25 и 8 см;
+        center — только поворот вокруг этой точки (опорная точка закреплена).
+        """
         A = np.vstack([pr.transform(s.down, self.Tc(s)) for s in fixed_list])
-        T2, fit, rmse = pr.refine_icp(A, moving.down, np.asarray(T))
+        if center is not None:
+            T2, fit, rmse = pr.refine_rotation(A, moving.down, np.asarray(T), center)
+        elif wide:
+            T2, fit, rmse = pr.refine_icp(A, moving.down, np.asarray(T), voxels=(0.15, 0.08, 0.04),
+                                          dists=(0.6, 0.25, 0.08))
+        else:
+            T2, fit, rmse = pr.refine_icp(A, moving.down, np.asarray(T))
         return T2, {'fitness': fit, 'rmse': rmse, 'shift': pr.pose_delta(T, T2)}
+
+    def pair_thickness(self, fixed_list, moving, T):
+        """
+        Насколько расходятся одни и те же поверхности подвижного (в позе T) и неподвижных:
+        медиана толщины по плоскостям, м (None — нет общих поверхностей). → (медиана, ячеек).
+        """
+        import quality
+        q = quality.plane_cells(self, scan_ids={moving.id} | {s.id for s in fixed_list},
+                                poses={moving.id: np.asarray(T)})
+        pairs = [k for k in range(len(q)) if moving.id in q.scans[k]]
+        if not pairs:
+            return None, 0
+        return float(np.median(q.thick[pairs])), len(pairs)
+
+    @staticmethod
+    def rotate_about(T, center, droll_deg=0.0, dpitch_deg=0.0, dyaw_deg=0.0):
+        """Поворот позы вокруг точки (общая система): yaw — Z, roll — X, pitch — Y."""
+        return pr.rotate_about(T, center, _rot_rpy(droll_deg, dpitch_deg, dyaw_deg))
 
     @staticmethod
     def nudge(T, dx=0.0, dy=0.0, dz=0.0, dyaw_deg=0.0, droll_deg=0.0, dpitch_deg=0.0):
@@ -738,10 +766,11 @@ class Session:
         s, nc, v = sc.score(np.asarray(Tc))
         return {'score': s, 'n_close': nc, 'violations': v}
 
-    def accept_pose(self, moving, Tc, anchor=None, method='manual', info=None):
+    def accept_pose(self, moving, Tc, anchor=None, method='manual', info=None, weight=1.0):
         """
         Принять позу moving: добавляется ручное ребро к anchor (размещённому скану)
-        и позы пересчитываются по графу.
+        и позы пересчитываются по графу. weight > 1 — связь точнее прочих ручных
+        (уточнена ICP): при несогласованности графа ошибка уходит в грубые связи.
         """
         anchor = anchor or self.ref
         TA = self.Tc(anchor)
@@ -752,6 +781,8 @@ class Session:
              'source': method, 'score': 1.0, 'violations': 0.0, 'margin': 1.0}
         if info:
             e['info'] = _jsonable(info)
+        if weight != 1.0:
+            e['weight'] = float(weight)
         self.edges.append(e)
         self.recompute_poses()
         return e
@@ -948,6 +979,14 @@ class Session:
         if progress:
             progress(1.0, f"{path.name}: {len(pts):,} точек")
         return len(pts)
+
+
+def _rot_rpy(droll_deg=0.0, dpitch_deg=0.0, dyaw_deg=0.0):
+    """R = Rz(yaw) · Ry(pitch) · Rx(roll), градусы."""
+    r, p = np.radians(droll_deg), np.radians(dpitch_deg)
+    Rx = np.array([[1, 0, 0], [0, np.cos(r), -np.sin(r)], [0, np.sin(r), np.cos(r)]])
+    Ry = np.array([[np.cos(p), 0, np.sin(p)], [0, 1, 0], [-np.sin(p), 0, np.cos(p)]])
+    return pr.rot_z(np.radians(dyaw_deg)) @ Ry @ Rx
 
 
 def voxel_keys(P, size=DROP_VOXEL):

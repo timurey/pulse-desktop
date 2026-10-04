@@ -162,6 +162,7 @@ class KV(QWidget):
         while self.g.count():
             w = self.g.takeAt(0).widget()
             if w is not None:
+                w.hide()                                 # сразу: deleteLater рисует старое поверх нового
                 w.deleteLater()
         for i, (k, v) in enumerate(rows):
             a, b = label(k, 'KV_k'), label(str(v), 'KV_v')
