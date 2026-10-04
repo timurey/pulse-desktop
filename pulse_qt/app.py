@@ -95,7 +95,8 @@ def main(argv=None):
     opener = _FileOpen(win)                              # macOS: двойной щелчок по .pulse в Finder
     app.installEventFilter(opener)
     code = app.exec()
-    sys.stdout.flush()
-    sys.stderr.flush()
+    for st in (sys.stdout, sys.stderr):                  # у оконного .exe на Windows их нет (None)
+        if st is not None:
+            st.flush()
     # как в scan_gui: без финализации интерпретатора (фоновые потоки анализа)
     os._exit(code)

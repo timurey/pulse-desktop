@@ -61,12 +61,12 @@ def run(args):
             m = surface.build(s, [s.ref], 'poisson', 0.1, 0.1)
             step('сетка (дочерний процесс)', m['info']['triangles'] > 0, triangles=m['info']['triangles'])
             w.view_3d()
-            pump(0.5)
-            w.view.render_now()
-            pump(0.2)
-            w.grab().save(str(out / 'window.png'))
-            img = w.view.grab_scene()
-            step('3D-вид рисует', img is not None and img.width() > 0)
+        pump(0.5)
+        w.view.render_now()
+        pump(0.2)
+        w.grab().save(str(out / 'window.png'))
+        img = w.view.grab_scene()
+        step('окно и 3D-вид рисуют', img is not None and img.width() > 0 and img.height() > 0)
         if bag:
             import bag_reconstruct as br
             P, meta = br.reconstruct(bag)
@@ -78,5 +78,6 @@ def run(args):
         print(report['trace'], flush=True)
     (out / 'selftest.json').write_text(json.dumps(report, ensure_ascii=False, indent=1), encoding='utf-8')
     print('ИТОГ:', 'всё прошло' if report['ok'] else 'ОШИБКИ', flush=True)
-    sys.stdout.flush()
+    if sys.stdout is not None:                           # оконный .exe на Windows: консоли нет
+        sys.stdout.flush()
     return 0 if report['ok'] else 1

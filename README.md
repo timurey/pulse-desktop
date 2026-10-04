@@ -38,6 +38,7 @@ The pipeline has three stages:
 
 Сборка:
 - **локально** (на той ОС, для которой собирается): `.venv312/bin/pip install pyinstaller` → `.venv312/bin/pyinstaller packaging/pulse_scan.spec --noconfirm` → `bash packaging/make_dmg.sh "dist/Pulse Scan.app" PulseScan.dmg`;
+- **Windows на любом Windows-компьютере или ВМ** — `packaging\build_windows.bat [проект.pulse]`: окружение, зависимости, тесты, сборка, самопроверка, zip в `build\release\`;
 - **обе ОС** — GitHub Actions `release.yml` по тегу `v*`.
 
 Самопроверка собранного приложения: `"Pulse Scan" --selftest OUT [проект.pulse] [--bag BAG]`.
