@@ -126,6 +126,8 @@ class TreePanel(QFrame):
         self.color_of = None
         self._items = {}
         self.expand_next = set()                   # группы, которые раскрыть при перестройке (новые)
+        self.points_hidden = False                 # состояние для строки «Точки сканов»
+        self.meshes_layer_on = True
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(0)
@@ -229,9 +231,9 @@ class TreePanel(QFrame):
         return it.data(0, ROLE) if it is not None and it.isSelected() else None
 
     def selected_keys(self):
-        """Выделенные узлы в порядке дерева."""
+        """Выделенные узлы дерева проекта (без строк сеток) в порядке дерева."""
         sel = {it.data(0, ROLE) for it in self.tree.selectedItems()}
-        return [k for k in self._items if k in sel]
+        return [k for k in self._items if k in sel and not k.startswith('mesh:')]
 
     def select_keys(self, keys):
         self.tree.clearSelection()
@@ -303,6 +305,7 @@ class TreePanel(QFrame):
         root.setFlags(root.flags() | Qt.ItemIsDropEnabled)   # перестановка и на верхнем уровне
         for ch in t.root.children:
             add(root, ch)
+        self._add_meshes(root, expanded, first)
         if cur in self._items:
             tree.setCurrentItem(self._items[cur])
         for k in sel:
@@ -313,6 +316,45 @@ class TreePanel(QFrame):
         tree.blockSignals(False)
         self.empty.setVisible(not s.scans)
         self.tree.setVisible(bool(s.scans))
+
+    MESHES = 'mesh:*'                              # ключ ветви сеток
+    POINTS = 'mesh:points'                         # строка «Точки сканов»
+
+    def _add_meshes(self, root, expanded, first):
+        """Ветвь «Поверхности»: точки сканов и построенные сетки (только в памяти)."""
+        meshes = getattr(self.session, 'meshes', {}) or {}
+        if not meshes:
+            return
+        fixed = (Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+        g = QTreeWidgetItem(root)
+        g.setData(0, ROLE, self.MESHES)
+        g.setData(0, ROLE + 1, False)
+        g.setFlags(fixed)
+        g.setSizeHint(0, QSize(10, 30))
+        self._items[self.MESHES] = g
+        any_vis = self.meshes_layer_on and any(m['visible'] for m in meshes.values())
+        row = _Row(self, self.MESHES, 'Поверхности β', any_vis, group=True, count=len(meshes))
+        row.setToolTip('Построенные сетки: хранятся до закрытия проекта (сохраняются экспортом)')
+        self.tree.setItemWidget(g, 0, row)
+        it = QTreeWidgetItem(g)
+        it.setData(0, ROLE, self.POINTS)
+        it.setFlags(fixed)
+        it.setSizeHint(0, QSize(10, 30))
+        self._items[self.POINTS] = it
+        self.tree.setItemWidget(it, 0, _Row(self, self.POINTS, 'Точки сканов', not self.points_hidden))
+        for k, m in meshes.items():
+            it = QTreeWidgetItem(g)
+            it.setData(0, ROLE, 'mesh:' + k)
+            it.setFlags(fixed)
+            it.setSizeHint(0, QSize(10, 30))
+            self._items['mesh:' + k] = it
+            i = m['info']
+            r = _Row(self, 'mesh:' + k, m['title'], m['visible'] and self.meshes_layer_on,
+                     chip=(f"{i['triangles'] / 1e6:.1f} млн" if i['triangles'] >= 1e5 else f"{i['triangles']:,}".replace(',', ' '), 'mut'))
+            r.setToolTip(f"{'Пуассон' if i['method'] == 'poisson' else 'ball pivoting'}, точность {i['acc'] * 100:.0f} см, "
+                         f"{i['triangles']:,} треугольников".replace(',', ' '))
+            self.tree.setItemWidget(it, 0, r)
+        g.setExpanded(True)
 
     def _menu(self, pos):
         it = self.tree.itemAt(pos)
@@ -325,6 +367,21 @@ class TreePanel(QFrame):
             a = m.addAction(t.icon(icon) if icon else QIcon(), text)
             a.setEnabled(enabled)
             a.triggered.connect(lambda: self.action.emit(name, key))
+        if key is not None and key.startswith('mesh:'):
+            if key == self.POINTS or key == self.MESHES:
+                act('Показать точки сканов', 'points_on', 'mdi6.eye-outline', self.points_hidden)
+                act('Скрыть точки сканов', 'points_off', 'mdi6.eye-off-outline', not self.points_hidden)
+            if key == self.MESHES:
+                m.addSeparator()
+                act('Удалить все сетки…', 'mesh_delete_all', 'mdi6.delete-outline')
+            elif key != self.POINTS:
+                act('Показать / скрыть', 'mesh_toggle', 'mdi6.eye-outline')
+                act('Экспорт сетки…', 'mesh_export', 'mdi6.export-variant')
+                act('Показать точки сканов', 'points_on', 'mdi6.dots-grid', self.points_hidden)
+                m.addSeparator()
+                act('Удалить сетку', 'mesh_delete', 'mdi6.delete-outline')
+            m.exec(self.tree.viewport().mapToGlobal(pos))
+            return
         act('Новая группа', 'new_group', 'mdi6.folder-plus-outline')
         many = self.selected_keys()
         if key is not None and key in many and len(many) > 1:

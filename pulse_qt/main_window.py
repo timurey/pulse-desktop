@@ -1663,10 +1663,36 @@ class MainWindow(QMainWindow):
             self.refresh_surface()
 
     def on_tree_visible(self, key, vis):
+        if key.startswith('mesh:'):
+            return self._mesh_tree_visible(key, vis)
         self._vis_backup = None
         self.s.set_visible(key, vis)
+        if vis and self.points_hidden:                   # включили скан — показать точки
+            self.set_points_visible(True)
+            self.set_status('точки сканов снова показаны', log=False)
         self.apply_visibility()
         self.tree_panel.rebuild()
+
+    def _mesh_tree_visible(self, key, vis):
+        """Глаз в ветви «Поверхности»: точки сканов, все сетки, одна сетка."""
+        tp = self.tree_panel
+        if key == tp.POINTS:
+            self.set_points_visible(vis)
+        elif key == tp.MESHES:
+            for m in self.s.meshes.values():
+                m['visible'] = vis
+            if vis and not tp.layer('mesh'):
+                tp.switches['mesh'].setChecked(True)
+            self._draw_meshes()
+        else:
+            m = self.s.meshes.get(key[5:])
+            if m is not None:
+                m['visible'] = vis
+                if vis and not tp.layer('mesh'):
+                    tp.switches['mesh'].setChecked(True)
+                self._draw_meshes()
+        self.refresh_surface()
+        tp.rebuild()
 
     def on_tree_move_drop(self, keys, gid, index=None):
         keys = [keys] if isinstance(keys, str) else list(keys)
@@ -1810,6 +1836,24 @@ class MainWindow(QMainWindow):
             self.set_status(f'группа «{g.name}» удалена, её содержимое перешло к родителю')
         elif name == 'group_sel':
             self.group_selected()
+        elif name in ('points_on', 'points_off'):
+            self.set_points_visible(name == 'points_on')
+        elif name == 'mesh_toggle':
+            m = self.s.meshes.get(key[5:])
+            if m is not None:
+                self._mesh_tree_visible(key, not (m['visible'] and self.tree_panel.layer('mesh')))
+        elif name == 'mesh_export':
+            self.on_surface_action('mesh_export', key[5:])
+        elif name == 'mesh_delete':
+            self.on_surface_action('mesh_delete', key[5:])
+        elif name == 'mesh_delete_all':
+            if QMessageBox.question(self, 'Удалить сетки', f'Удалить все построенные сетки ({len(self.s.meshes)})?',
+                                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No) == QMessageBox.Yes:
+                self.s.meshes.clear()
+                self._draw_meshes()
+                self.set_points_visible(True)
+                self.refresh_surface()
+                self.tree_panel.rebuild()
         elif name in ('auto_group', 'auto_subgroups'):
             self.tree_panel.select_keys([key])
             self.tree_sel = key
@@ -3163,22 +3207,28 @@ class MainWindow(QMainWindow):
                     self.view.fit(np.percentile(V, 1, axis=0), np.percentile(V, 99, axis=0), R[:, 2], R[:, 1])
                 self.refresh_surface()
                 i = m['info']
-                self.set_status(f"{title}: {i['triangles']:,} треугольников за {i['seconds']} c; точки сканов "
-                                f"скрыты — слой «Точки сканов» вернёт их".replace(',', ' '))
+                msg = (f"{title}: {i['triangles']:,} треугольников за {i['seconds']} c. Точки сканов скрыты — "
+                       f"глаз «Точки сканов» в дереве (ветвь «Поверхности») вернёт их").replace(',', ' ')
+                self.set_status(msg)
+                self.vp.flash(msg, 6000)
+                self.tree_panel.rebuild()
+                it = self.tree_panel._items.get('mesh:' + key)
+                if it is not None:
+                    self.tree_panel.tree.scrollToItem(it)
             if self.run_bg(f"поверхность ({'Пуассон' if prm['method'] == 'poisson' else 'ball pivoting'}, "
                            f"{prm['acc'] * 100:.0f} см)…", work, done):
                 self._mesh_building = True
                 self.b_build.setText('Остановить')
         elif name == 'mesh_visible':
             key, vis = arg
-            if key in self.s.meshes:
-                self.s.meshes[key]['visible'] = vis
-                self._draw_meshes()
-                self.refresh_surface()
+            self._mesh_tree_visible('mesh:' + key, vis)
         elif name == 'mesh_delete':
             self.s.meshes.pop(arg, None)
             self._draw_meshes()
+            if not self.s.meshes and self.points_hidden:   # сеток больше нет — вернуть точки
+                self.set_points_visible(True)
             self.refresh_surface()
+            self.tree_panel.rebuild()
         elif name == 'mesh_export':
             m = self.s.meshes.get(arg)
             if m is None:
@@ -3203,7 +3253,9 @@ class MainWindow(QMainWindow):
         self.points_hidden = not on
         self.tree_panel.switches['points'].setChecked(on)
         self.surface_panel.sw_points.setChecked(on)
+        self.tree_panel.points_hidden = not on
         self.apply_visibility()
+        self.tree_panel.rebuild()
 
     def on_layer(self, key, on):
         if key == 'points':
@@ -3212,6 +3264,8 @@ class MainWindow(QMainWindow):
             return
         if key == 'mesh':
             self._draw_meshes()
+            self.tree_panel.meshes_layer_on = on
+            self.tree_panel.rebuild()
             return
         if key == 'quality':
             if on:
