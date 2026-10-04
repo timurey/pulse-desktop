@@ -124,6 +124,7 @@ class CloudView(QWidget):
         self.items = {}
         self.point_px = 2.0                  # размер точки облака в логических пикселях
         self.parallel = False                # ортогональная проекция
+        self.section = None                  # сечение (section.py): плоскости отсечения на GPU
         self._img = None
         self._pending = False
         self._buf = vtkUnsignedCharArray()
@@ -199,9 +200,33 @@ class CloudView(QWidget):
             a.SetUserMatrix(_vtk_matrix(T))
         (self.ren_top if on_top else self.ren).AddActor(a)
         a._on_top = on_top
+        self._apply_section(name, a)
         self.items[name] = _Item(a, P, None if T is None else np.asarray(T, float), kind, size)
         self.update_view()
         return a
+
+    # ── сечение ──────────────────────────────────────────────────────────
+    NO_SECTION = ('grid', 'meas:', 'pivot:', 'sect:', 'mplane')
+
+    def set_section(self, st):
+        """Сечение (dict из section.py или None): плоскости отсечения на все облака и сетки."""
+        self.section = st if st and st.get('mode', 'off') != 'off' else None
+        for n, it in self.items.items():
+            self._apply_section(n, it.actor)
+        self.update_view()
+
+    def _apply_section(self, name, actor):
+        from vtkmodules.vtkCommonDataModel import vtkPlane
+        import section
+        m = actor.GetMapper()
+        m.RemoveAllClippingPlanes()
+        if self.section is None or name.startswith(self.NO_SECTION):
+            return
+        for o, n in section.vtk_planes(self.section):
+            pl = vtkPlane()
+            pl.SetOrigin(*o)
+            pl.SetNormal(*n)
+            m.AddClippingPlane(pl)
 
     def _ren_of(self, it):
         return self.ren_top if getattr(it.actor, '_on_top', False) else self.ren
@@ -572,6 +597,10 @@ class CloudView(QWidget):
             P = it.P if it.T is None else it.P @ it.T[:3, :3].T + it.T[:3, 3]
             s, depth, front = self.project(P)
             m = front & (np.abs(s[:, 0] - x) < tol_px) & (np.abs(s[:, 1] - y) < tol_px)
+            if self.section is not None and not n.startswith(self.NO_SECTION) and m.any():
+                import section
+                idx = np.flatnonzero(m)
+                m[idx[~section.keep_mask(P[idx], self.section)]] = False
             if not m.any():
                 continue
             idx = np.flatnonzero(m)

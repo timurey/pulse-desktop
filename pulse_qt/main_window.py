@@ -28,6 +28,7 @@ import quality
 import dynamic
 import surface
 import measure
+import section
 from scan_session import Session
 from scan_tree import KINDS
 
@@ -500,6 +501,18 @@ class MainWindow(QMainWindow):
         rb_['openings'] = g.small('mdi6.window-closed-variant', 'Проёмы', lambda: self._toggle_layer('openings'),
                                   checkable=True)
         rb_['ghosts'] = g.small('mdi6.blur', 'Отражения', lambda: self._toggle_layer('ghosts'), checkable=True)
+        g = rb.add_group(pg, 'Сечения')
+        self.b_slice = g.big('mdi6.box-cutter', 'Срез', lambda: self.section_toggle('slice'),
+                             'Показать только полосу облака у плоскости (план этажа, разрез)', checkable=True)
+        self.b_clip = g.big('mdi6.flip-to-back', 'Отсечение', lambda: self.section_toggle('clip'),
+                            'Скрыть всё по одну сторону плоскости (например, выше 2.5 м)', checkable=True)
+        g.small('mdi6.arrow-expand-vertical', 'Горизонтально', lambda: self.on_control_action('sec_base', 'z'))
+        g.small('mdi6.alpha-x-box-outline', 'По X', lambda: self.on_control_action('sec_base', 'x'))
+        g.small('mdi6.alpha-y-box-outline', 'По Y', lambda: self.on_control_action('sec_base', 'y'))
+        g.small('mdi6.wall', 'По стене / полу', lambda: self.on_control_action('sec_base', 'plane'),
+                'Щелчок по найденной стене или полу — плоскость сечения параллельна ей')
+        g.small('mdi6.swap-vertical', 'Перевернуть', lambda: self.on_control_action('sec_flip', None),
+                'Отсечение: показать другую сторону')
         g = rb.add_group(pg, 'Нулевой уровень')
         self.b_zero = g.big('mdi6.format-vertical-align-bottom', 'Нулевой\nуровень',
                             lambda: self.on_control_action('zero_show', not self.zero_show),
@@ -602,6 +615,9 @@ class MainWindow(QMainWindow):
         for k, b in self._rb_measure.items():
             b.setChecked(self.measure_mode == k)
         self.b_zero.setChecked(self.zero_show)
+        st = self.s.section or {}
+        self.b_slice.setChecked(st.get('mode') == 'slice')
+        self.b_clip.setChecked(st.get('mode') == 'clip')
 
     def _toggle_layer(self, key):
         sw = self.tree_panel.switches[key]
@@ -640,7 +656,8 @@ class MainWindow(QMainWindow):
                      'height': 'Отметка: щёлкните точку облака',
                      'plane': 'До плоскости: щёлкните по стене или полу, затем по точке',
                      'poly': 'Ломаная: щёлкайте точки; по первой — замкнуть, двойной щелчок / Enter — закончить',
-                     'zero': 'Нулевой уровень: щёлкните точку облака — её высота станет ±0.000'}
+                     'zero': 'Нулевой уровень: щёлкните точку облака — её высота станет ±0.000',
+                     'secplane': 'Сечение: щёлкните по стене или полу — плоскость встанет параллельно ей'}
 
     def set_measure_mode(self, mode):
         if mode is not None and mode == self.measure_mode:
@@ -658,6 +675,9 @@ class MainWindow(QMainWindow):
 
     def refresh_control(self):
         self.z0 = self.s.zero_z() if self.s.scans else 0.0
+        if self.s.scans:
+            self._refresh_section_panel()
+            self._draw_section()
         z = self.s.zero
         src = {'floor': 'пол опорного скана', 'point': 'по точке облака', 'manual': 'задан числом'}
         text = (src.get(z['source'], z['source']) if z else
@@ -675,7 +695,99 @@ class MainWindow(QMainWindow):
         self.vp.update_overlays()
         self.set_status(f'нулевой уровень: z = {self.z0:.3f} м ({source or "пол опорного скана"})')
 
+    # ── сечение ──────────────────────────────────────────────────────────
+    def _section_state(self):
+        if self.s.section is None:
+            self.s.section = section.default('z', self.s.zero_z() if self.s.scans else 0.0)
+        return self.s.section
+
+    def section_toggle(self, mode):
+        st = self._section_state()
+        if self.mode != 'control':
+            self.set_mode('control')
+        self.set_section(mode='off' if st['mode'] == mode else mode)
+
+    def set_section(self, **kw):
+        """Изменить сечение (mode, base, n0, a, b, c, thick, flip) и применить к виду."""
+        st = self._section_state()
+        for k, v in kw.items():
+            st[k] = float((v + 180.0) % 360.0 - 180.0) if k in ('a', 'b') else v
+        self.view.set_section(st)
+        self._draw_section()
+        self._refresh_section_panel()
+        self._sync_ribbon()
+
+    def _sec_extent(self):
+        """Диапазон положения плоскости вдоль нормали по видимым точкам (для ползунка)."""
+        lo, hi = self._visible_bbox()
+        n = section.normal(self._section_state())
+        corners = np.array([[x, y, z] for x in (lo[0], hi[0]) for y in (lo[1], hi[1]) for z in (lo[2], hi[2])])
+        d = corners @ n
+        return float(d.min()), float(d.max())
+
+    def _refresh_section_panel(self):
+        st = self._section_state()
+        z0 = self.s.zero_z() if self.s.scans else 0.0
+        dmin, dmax = self._sec_extent()
+        n = section.normal(st)
+        horiz = st['base'] == 'z' and n[2] > 0.99
+        pos = st['c'] - z0 if horiz else st['c']
+        frac = (st['c'] - dmin) / max(1e-6, dmax - dmin)
+        labels = (['вокруг X', 'вокруг Y'] if abs(np.asarray(st['n0'])[2]) > 0.9
+                  else ['азимут (вокруг Z)', 'наклон'])
+        self.control.set_section(st, pos, 'отметка от нуля' if horiz else 'положение c', frac, labels,
+                                 section.describe(st, z0))
+
+    def _draw_section(self):
+        """Рамка плоскости сечения и транспортиры доворота (на вкладке «Контроль»)."""
+        self.view.remove_prefix('sect:')
+        st = self.s.section
+        self._sec_c = None
+        if not st or st.get('mode', 'off') == 'off' or not self.s.scans:
+            return
+        lo, hi = self._visible_bbox()
+        C = section.outline(st, lo, hi)
+        col = (0.36, 0.61, 1.0)
+        self.view.set_lines('sect:frame', C, [[0, 1], [1, 2], [2, 3], [3, 0]], None, None, 1.5, col, 0.9)
+        if self.mode == 'control':
+            self._sec_c = section.center(st, lo, hi)
+            self._sec_r = float(np.clip(0.18 * np.linalg.norm(hi - lo), 0.5, 10.0))
+            spec = self._protractor()
+            if spec is not None:
+                self._draw_rings('sect:', spec)
+
     def on_control_action(self, name, arg):
+        if name == 'sec':
+            if self.s.section is not None or arg.get('mode', 'off') != 'off':
+                self.set_section(**arg)
+            return
+        if name == 'sec_base':
+            if arg == 'plane':
+                self.set_measure_mode('secplane')
+                return
+            st = self._section_state()
+            z0 = self.s.zero_z() if self.s.scans else 0.0
+            lo, hi = self._visible_bbox()
+            mid = 0.5 * (lo + hi)
+            n0 = np.array(section.BASES[arg])
+            c = z0 + 2.5 if arg == 'z' else float(mid @ n0)
+            self.set_section(base=arg, n0=n0.tolist(), a=0.0, b=0.0, c=c,
+                             mode=st['mode'] if st['mode'] != 'off' else ('clip' if arg == 'z' else 'slice'))
+            return
+        if name == 'sec_pos':
+            st = self._section_state()
+            z0 = self.s.zero_z() if self.s.scans else 0.0
+            n = section.normal(st)
+            self.set_section(c=float(arg + z0 if (st['base'] == 'z' and n[2] > 0.99) else arg))
+            return
+        if name == 'sec_slider':
+            dmin, dmax = self._sec_extent()
+            self.set_section(c=dmin + arg * (dmax - dmin))
+            return
+        if name == 'sec_flip':
+            st = self._section_state()
+            self.set_section(flip=not st.get('flip'))
+            return
         if name == 'zero_show':
             self.zero_show = bool(arg)
             self.update_grid()
@@ -720,6 +832,24 @@ class MainWindow(QMainWindow):
 
     def measure_point(self, p, cloud=None):
         mode = self.measure_mode
+        if mode == 'secplane':
+            sc = self.s.by_id(cloud[5:]) if cloud and cloud.startswith('scan:') else None
+            if sc is None or not sc.analyzed:
+                return None
+            T = self.s.Tc(sc)
+            f = self.s.pick_feature(sc, pr.transform(p[None], np.linalg.inv(T))[0], 'plane')
+            if f is None:
+                self.set_status('здесь нет найденной плоскости — щёлкните по стене или полу')
+                return None
+            n = T[:3, :3] @ np.asarray(f['normal'])
+            self.set_measure_mode(None)
+            st = self._section_state()
+            st.update(base='plane', n0=n.tolist(), a=0.0, b=0.0, c=float(n @ p))
+            if st['mode'] == 'off':
+                st['mode'] = 'slice'
+            self.set_section()
+            self.set_status(f"сечение параллельно: {KIND_RU.get(f.get('kind'), 'плоскость')} {f['area']:.1f} м²")
+            return p
         if mode == 'zero':
             self._set_zero(p[2], 'point')
             self.set_measure_mode(None)
@@ -1064,6 +1194,8 @@ class MainWindow(QMainWindow):
         self.quality_refresh()
         self._draw_meshes()
         self._draw_measures()
+        self.view.set_section(self.s.section)
+        self._draw_section()
 
     def apply_visibility(self):
         for sc in self.s.scans:
@@ -1748,6 +1880,8 @@ class MainWindow(QMainWindow):
                                      'surface': self.surface_panel, 'control': self.control}[mode])
         if mode != 'control' and self.measure_mode:
             self.set_measure_mode(None)
+        if mode != 'control':
+            self._draw_section()
         if mode == 'control':
             self.refresh_control()
         if mode == 'surface':
@@ -2317,35 +2451,50 @@ class MainWindow(QMainWindow):
                   'roll': (np.array([1, 0, 0.0]), np.array([0, 1, 0.0]), np.array([0, 0, 1.0]), (1.0, 0.42, 0.42)),
                   'pitch': (np.array([0, 1, 0.0]), np.array([0, 0, 1.0]), np.array([1, 0, 0.0]), (0.37, 0.83, 0.55))}
 
-    def _ring_points(self, k, n=180):
-        _, u, v, _ = self.PIVOT_AXES[k]
-        t = np.linspace(0, 2 * np.pi, n, endpoint=False)
-        return self.pivot['c'] + self.pivot['r'] * (np.cos(t)[:, None] * u + np.sin(t)[:, None] * v)
+    # ── транспортиры: общие для опорной точки и сечения ──────────────────
+    def _protractor(self):
+        """Активный набор колец: опорная точка (ручная стыковка) или сечение (вкладка «Контроль»)."""
+        if self.mode == 'manual' and self.pivot is not None:
+            return {'owner': 'pivot', 'c': self.pivot['c'], 'r': self.pivot['r'], 'axes': self.PIVOT_AXES,
+                    'ang': self.pivot['ang'], 'set': lambda k, v: self._set_pivot_angles(**{k: v})}
+        st = self.s.section
+        if self.mode == 'control' and st and st.get('mode', 'off') != 'off' and getattr(self, '_sec_c', None) is not None:
+            n0 = np.asarray(st['n0'], float)
+            n0 /= np.linalg.norm(n0)
+            u, v = section.axes(n0)
+            ax = {}
+            for k, a, col in (('a', u, (0.36, 0.61, 1.0)), ('b', v, (1.0, 0.62, 0.25))):
+                e1 = n0 - (n0 @ a) * a
+                e1 /= np.linalg.norm(e1)
+                ax[k] = (a, e1, np.cross(a, e1), col)
+            return {'owner': 'section', 'c': self._sec_c, 'r': self._sec_r, 'axes': ax,
+                    'ang': {'a': st['a'], 'b': st['b']}, 'set': lambda k, val: self.set_section(**{k: val})}
+        return None
 
-    def _draw_pivot(self):
-        """Маркер точки и три транспортира (кольца с делениями 5°/15°/90° и текущим углом)."""
-        self.view.remove_prefix('pivot:')
-        if self.pivot is None:
-            if self.pivot_A is not None:
-                self.view.set_sphere('pivot:A', self.pivot_A, 0.05, (1.0, 0.85, 0.2))
-            return
-        c, r = self.pivot['c'], self.pivot['r']
-        self.view.set_sphere('pivot:c', c, max(0.02, r * 0.03), (1.0, 0.85, 0.2))
-        for k, (n_, u, v, col) in self.PIVOT_AXES.items():
+    @staticmethod
+    def _ring_pts(spec, k, n=180):
+        _, u, v, _ = spec['axes'][k]
+        t = np.linspace(0, 2 * np.pi, n, endpoint=False)
+        return spec['c'] + spec['r'] * (np.cos(t)[:, None] * u + np.sin(t)[:, None] * v)
+
+    def _draw_rings(self, prefix, spec):
+        """Кольца с делениями 5°/15°/90°, стрелкой и дугой текущего угла."""
+        c, r = spec['c'], spec['r']
+        for k, (n_, u, v, col) in spec['axes'].items():
             P, segs, cols = [], [], []
-            ring = self._ring_points(k)
+            ring = self._ring_pts(spec, k)
             m = len(ring)
             P.extend(ring)
             segs += [[i, (i + 1) % m] for i in range(m)]
             cols += [col] * m
-            for deg in range(0, 360, 5):                 # деления
+            for deg in range(0, 360, 5):
                 a = np.radians(deg)
                 e = np.cos(a) * u + np.sin(a) * v
                 ln = 0.16 if deg % 90 == 0 else (0.09 if deg % 15 == 0 else 0.045)
                 P += [c + r * e, c + r * (1 - ln) * e]
                 segs.append([len(P) - 2, len(P) - 1])
                 cols.append(col)
-            ang = np.radians(self.pivot['ang'][k])       # текущий угол: стрелка и дуга от нуля
+            ang = np.radians(spec['ang'][k])
             e = np.cos(ang) * u + np.sin(ang) * v
             P += [c, c + r * 1.08 * e]
             segs.append([len(P) - 2, len(P) - 1])
@@ -2356,29 +2505,46 @@ class MainWindow(QMainWindow):
             P += arc
             segs += [[k0 + i, k0 + i + 1] for i in range(len(arc) - 1)]
             cols += [(1.0, 0.9, 0.3)] * (len(arc) - 1)
-            self.view.set_lines(f'pivot:{k}', np.array(P), segs, cols, None, 2.0, on_top=True)
+            self.view.set_lines(f'{prefix}{k}', np.array(P), segs, cols, None, 2.0, on_top=True)
+
+    def _draw_pivot(self):
+        """Маркер опорной точки и три транспортира."""
+        self.view.remove_prefix('pivot:')
+        if self.pivot is None:
+            if self.pivot_A is not None:
+                self.view.set_sphere('pivot:A', self.pivot_A, 0.05, (1.0, 0.85, 0.2))
+            return
+        c, r = self.pivot['c'], self.pivot['r']
+        self.view.set_sphere('pivot:c', c, max(0.02, r * 0.03), (1.0, 0.85, 0.2))
+        self._draw_rings('pivot:', {'c': c, 'r': r, 'axes': self.PIVOT_AXES, 'ang': self.pivot['ang']})
 
     def _ring_hit(self, x, y, tol=9):
-        if self.pivot is None:
+        spec = self._protractor()
+        if spec is None:
             return None
         best = None
-        for k in self.PIVOT_AXES:
-            s_, _, front = self.view.project(self._ring_points(k, 360))
+        for k in spec['axes']:
+            s_, _, front = self.view.project(self._ring_pts(spec, k, 360))
             d = np.hypot(s_[:, 0] - x, s_[:, 1] - y)
             d[~front] = np.inf
             if d.min() < tol and (best is None or d.min() < best[0]):
                 best = (d.min(), k)
         return None if best is None else best[1]
 
-    def _ring_angle(self, k, x, y):
+    def _ring_angle(self, k, x, y, spec=None):
         """Угол точки под курсором в плоскости кольца, рад (None — кольцо видно с ребра)."""
-        n_, u, v, _ = self.PIVOT_AXES[k]
+        spec = spec or self._protractor()
+        n_, u, v, _ = spec['axes'][k]
         o, dvec = self.view.ray(x, y)
         den = dvec @ n_
         if abs(den) < 0.15:
             return None
-        q = o + ((self.pivot['c'] - o) @ n_) / den * dvec - self.pivot['c']
+        q = o + ((spec['c'] - o) @ n_) / den * dvec - spec['c']
         return float(np.arctan2(q @ v, q @ u))
+
+    def _ring_points(self, k, n=180):
+        """Кольцо опорной точки (для тестов)."""
+        return self._ring_pts({'c': self.pivot['c'], 'r': self.pivot['r'], 'axes': self.PIVOT_AXES}, k, n)
 
     def manual_dirty(self):
         """Поза подвижного изменена после входа в ручную стыковку и не принята."""
@@ -2528,11 +2694,13 @@ class MainWindow(QMainWindow):
                 else:
                     self._pivot_picked(hit[1], want)
                 return True
-            if manual and self.pivot is not None and not mods & (Qt.ControlModifier | Qt.MetaModifier):
+            spec = self._protractor()
+            if spec is not None and not mods & (Qt.ControlModifier | Qt.MetaModifier):
                 k = self._ring_hit(x, y)
                 if k is not None:
-                    self._ring_drag = {'k': k, 'a0': self._ring_angle(k, x, y), 'v0': self.pivot['ang'][k], 'x0': x}
+                    self._ring_drag = {'k': k, 'a0': self._ring_angle(k, x, y, spec), 'v0': spec['ang'][k], 'x0': x}
                     return True
+            if manual and self.pivot is not None and not mods & (Qt.ControlModifier | Qt.MetaModifier):
                 if mods & Qt.ShiftModifier and not mods & Qt.AltModifier:
                     self.set_status('опорная точка закреплена: сдвиг недоступен («Снять точку» — освободить)')
                     return True
@@ -2569,7 +2737,9 @@ class MainWindow(QMainWindow):
                 delta = float(np.degrees(np.angle(np.exp(1j * (a - g['a0'])))))
             if mods & Qt.ShiftModifier:
                 delta *= 0.1                             # Shift — точнее
-            self._set_pivot_angles(**{g['k']: g['v0'] + delta})
+            spec = self._protractor()
+            if spec is not None:
+                spec['set'](g['k'], g['v0'] + delta)
             return True
         if kind == 'release' and self._ring_drag is not None:
             self._ring_drag = None

@@ -229,6 +229,7 @@ class Session:
         self.meshes = {}             # построенные поверхности (surface.py): только в памяти, не сохраняются
         self.zero = None             # нулевой уровень {'z', 'source'} (общая система); None — пол опорного
         self.measures = []           # замеры (measure.py), точки в общей системе
+        self.section = None          # сечение (section.py), общая система
         self.lock = threading.RLock()
 
     # ── загрузка / сохранение ─────────────────────────────────────────────
@@ -249,6 +250,7 @@ class Session:
         s.tree = Tree.from_json(proj.get('tree'), [x.id for x in s.scans])
         s.zero = proj.get('zero')
         s.measures = proj.get('measures', [])
+        s.section = proj.get('section')
         s.apply_visibility()
         s.project_path = str(path)
         s._recolor()
@@ -313,7 +315,7 @@ class Session:
                 'level': self.level.tolist(),
                 'scans': [s.to_json() for s in self.scans],
                 'tree': self.tree.to_json(),
-                'zero': self.zero, 'measures': _jsonable(self.measures),
+                'zero': self.zero, 'measures': _jsonable(self.measures), 'section': _jsonable(self.section),
                 'pairs': [_jsonable(e) for e in auto],
                 'manual_edges': [_jsonable(e) for e in manual]}
         for e in proj['scans']:
@@ -475,6 +477,9 @@ class Session:
         for e in self.edges:
             parts += [e['A'], e['B'], e.get('user'), e.get('method')]
         parts += [None if self.zero is None else round(self.zero['z'], 6), len(self.measures)]
+        st = self.section or {}
+        parts += [st.get('mode'), st.get('base'), round(st.get('c', 0), 4), st.get('a'), st.get('b'),
+                  st.get('thick'), st.get('flip')]
         return hash(tuple(parts))
 
     def zero_z(self):

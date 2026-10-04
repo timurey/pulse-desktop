@@ -275,6 +275,17 @@ def main():
           w.st_text.text())
     w.on_control_action('measure_clear', None)
     w.set_measure_mode(None)
+    w.section_toggle('slice')
+    w.on_control_action('sec_pos', 1.2)
+    st = sess.section
+    vis = [it for n, it in v.items.items() if n.startswith('scan:')]
+    check('сечение: срез на отметке +1.200', st['mode'] == 'slice' and abs(st['c'] - w.z0 - 1.2) < 1e-9
+          and all(it.actor.GetMapper().GetNumberOfClippingPlanes() == 2 for it in vis))
+    w.section_toggle('clip')
+    check('сечение: отсечение — одна плоскость', all(it.actor.GetMapper().GetNumberOfClippingPlanes() == 1
+                                                     for it in vis))
+    w.section_toggle('clip')
+    check('сечение: выключено', all(it.actor.GetMapper().GetNumberOfClippingPlanes() == 0 for it in vis))
     w.start_manual(fixed.id, moving.id)
     check('лента: ручная стыковка переключает на «Стыковку»', rb.current() == 'reg' and w.b_manual.isChecked())
     w.on_manual_cancel()
