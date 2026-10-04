@@ -565,6 +565,7 @@ class Session:
         for e in self.edges:
             parts += [e['A'], e['B'], e.get('user'), e.get('method')]
         parts += [None if self.zero is None else round(self.zero['z'], 6), len(self.measures)]
+        parts.append(json.dumps(self.tree.to_json(), sort_keys=True, ensure_ascii=False))
         st = self.section or {}
         parts += [st.get('mode'), st.get('base'), round(st.get('c', 0), 4), st.get('a'), st.get('b'),
                   st.get('thick'), st.get('flip')]

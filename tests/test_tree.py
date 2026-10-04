@@ -116,3 +116,14 @@ class TestTree(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class TestTreeDirty(unittest.TestCase):
+    def test_tree_changes_mark_project_dirty(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from scan_session import Session
+        s = Session()
+        s.tree = Tree.from_json(None, SCANS)
+        sig = s.state_signature()
+        s.tree.group_from(['r1a', 'r1b'], 'Комната')
+        self.assertNotEqual(sig, s.state_signature())

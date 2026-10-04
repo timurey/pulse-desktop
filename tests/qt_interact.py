@@ -168,6 +168,12 @@ def main():
     newg = next((g for g in t_.groups() if g.name == 'Тестовая'), None)
     check('дерево: группа из выделенных', newg is not None and kids(newg.id) == pair)
     if newg is not None:
+        it_new = w.tree_panel._items.get(newg.id)
+        check('дерево: новая группа раскрыта и выделена', it_new is not None and it_new.isExpanded()
+              and w.tree_panel.selected_keys() == [newg.id])
+        check('дерево: сообщение над видом', 'Тестовая' in w.vp.banner_text.text() and w.vp.banner.isVisible())
+        check('дерево: проект помечен изменённым', w.dirty())
+    if newg is not None:
         sess.delete_group(newg.id)
     sess.move_nodes(pair, g0.id, 0)
     w.tree_panel.rebuild()

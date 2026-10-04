@@ -125,6 +125,7 @@ class TreePanel(QFrame):
         self.status_of = None
         self.color_of = None
         self._items = {}
+        self.expand_next = set()                   # группы, которые раскрыть при перестройке (новые)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(0)
@@ -282,7 +283,7 @@ class TreePanel(QFrame):
                 tree.setItemWidget(it, 0, row)
                 for ch in node.children:
                     add(it, ch)
-                it.setExpanded(first or flt != '' or node.id in expanded)
+                it.setExpanded(first or flt != '' or node.id in expanded or node.id in self.expand_next)
             else:
                 if flt and flt not in node.scan.lower():
                     return
@@ -308,6 +309,7 @@ class TreePanel(QFrame):
             if k in self._items:
                 self._items[k].setSelected(True)
         tree.setDragEnabled(not flt)                # с фильтром порядок в списке неполный
+        self.expand_next = set()
         tree.blockSignals(False)
         self.empty.setVisible(not s.scans)
         self.tree.setVisible(bool(s.scans))

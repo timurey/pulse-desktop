@@ -195,7 +195,20 @@ class Viewport(QWidget):
             if ok:
                 lab.move(int(x - lab.width() / 2), int(y - lab.height() - 6))
 
+    def flash(self, text, ms=3500):
+        """Короткое заметное сообщение над 3D-видом (не перетирается фоновым статусом)."""
+        self._flash = text
+        self.set_banner(text)
+        QTimer.singleShot(ms, lambda t=text: self._unflash(t))
+
+    def _unflash(self, text):
+        if getattr(self, '_flash', None) == text:
+            self._flash = None
+            self.win._banner()
+
     def set_banner(self, text):
+        if getattr(self, '_flash', None) and text != self._flash:
+            return                                       # пока показано сообщение — не заменять
         self.banner_text.setText(text)
         self.banner.setVisible(bool(text))
         self.banner.adjustSize()
@@ -1655,6 +1668,7 @@ class MainWindow(QMainWindow):
             self.set_status('нельзя переместить сюда (группу нельзя вложить в саму себя)')
             return
         self.apply_visibility()
+        self.tree_panel.expand_next = {gid}
         self.tree_panel.rebuild()
         self.tree_panel.select_keys(keys)
         g = self.s.tree.group(gid)
@@ -1674,14 +1688,20 @@ class MainWindow(QMainWindow):
         if not d.exec():
             return
         nm, kind = d.values()
-        gid = self.s.group_nodes(keys, nm.strip() or 'Группа', kind)
+        keys = [k for k in keys if self.s.tree.node(k) is not None]     # дерево могло измениться
+        gid = self.s.group_nodes(keys, nm.strip() or 'Группа', kind) if keys else None
         if gid is None:
-            self.set_status('не удалось создать группу')
+            QMessageBox.warning(self, 'Группа не создана',
+                                'Не удалось создать группу из выделенного: узлы не найдены в дереве или '
+                                'группу нельзя вложить саму в себя. Выделите сканы ещё раз.')
             return
         self.apply_visibility()
+        self.tree_panel.expand_next = {gid}
         self.tree_panel.rebuild()
-        self.tree_panel.select(gid)
-        self.set_status(f'группа «{self.s.tree.group(gid).name}» из {len(keys)} узл.')
+        self.tree_panel.select_keys([gid])
+        msg = f'группа «{self.s.tree.group(gid).name}»: {len(keys)} узл.'
+        self.set_status(msg)
+        self.vp.flash(msg)
 
     def _selected_group(self, key=None):
         t = self.s.tree

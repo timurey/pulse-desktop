@@ -13,6 +13,10 @@ from .theme import Theme, load_fonts, SANS
 
 def make_app(argv=None):
     app = QApplication.instance() or QApplication(argv if argv is not None else sys.argv[:1])
+    # Open3D загружается в главном потоке заранее (предосторожность): модули логики импортируют
+    # его лениво, и первым мог оказаться фоновый поток загрузки сканов, а библиотека с
+    # GUI-модулями на macOS не обязана быть к этому готова.
+    import open3d                                        # noqa: F401
     app.setApplicationName('Pulse Scan')
     app.setOrganizationName('Pulse')
     load_fonts()
