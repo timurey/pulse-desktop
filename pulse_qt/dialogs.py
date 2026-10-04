@@ -299,6 +299,7 @@ class ScannerImportDialog(_Modal):
         while self.days_lay.count():
             w = self.days_lay.takeAt(0).widget()
             if w is not None:
+                w.hide()
                 w.deleteLater()
         days = sorted({b['mtime'][:10] for b in self.bags}, reverse=True)
         if self.day not in days:
@@ -328,6 +329,7 @@ class ScannerImportDialog(_Modal):
         while self.list_lay.count():
             w = self.list_lay.takeAt(0).widget()
             if w is not None:
+                w.hide()
                 w.deleteLater()
         self.rows = {}
         dest = self.opts.dest.text().strip()

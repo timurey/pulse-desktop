@@ -114,6 +114,7 @@ class Inspector(_Panel):
         while self.act_lay.count():
             w = self.act_lay.takeAt(0).widget()
             if w is not None:
+                w.hide()
                 w.deleteLater()
         t = W.THEME
         for i, (text, name, ic) in enumerate(items):
@@ -387,6 +388,7 @@ class ManualPanel(_Panel):
         while self.pairs_box.count():
             w = self.pairs_box.takeAt(0).widget()
             if w is not None:
+                w.hide()
                 w.deleteLater()
         for i, (text, color) in enumerate(rows):
             self.pairs_box.addWidget(_PairRow(i + 1, text, color,

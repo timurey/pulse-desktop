@@ -89,6 +89,22 @@ def convex_hull_2d(P):
 ICP_WEIGHT = 10.0          # вес связи после автоподгонки относительно грубых ручных
 
 
+def user_dir(*sub):
+    """Папка пользователя Pulse (~/Pulse/…): туда — то, что нельзя писать рядом с программой."""
+    return Path.home().joinpath('Pulse', *sub)
+
+
+def manual_path():
+    """Файл руководства: в сборке — <программа>/docs/manual/README.md, из исходников — docs/manual."""
+    import sys
+    bases = [Path(getattr(sys, '_MEIPASS', '')), Path(__file__).resolve().parent.parent]
+    for b in bases:
+        f = b / 'docs' / 'manual' / 'README.md'
+        if f.exists():
+            return f
+    return None
+
+
 def quick_voxel():
     from scan_session import DISPLAY_VOXEL
     return max(DISPLAY_VOXEL, 0.03)
@@ -984,7 +1000,9 @@ class MainWindow(QMainWindow):
                 ('Экспорт склейки…', self.on_export, 'mdi6.export-variant', None),
                 None,
                 ('Скриншот', self.save_screenshot, 'mdi6.camera-outline', 'F12'),
-                ('Клавиши и мышь', self.show_help, 'mdi6.keyboard-outline', None)):
+                ('Руководство пользователя', self.show_manual, 'mdi6.book-open-outline', 'F1'),
+                ('Клавиши и мышь', self.show_help, 'mdi6.keyboard-outline', None),
+                ('О программе', self.show_about, 'mdi6.information-outline', None)):
             if item is None:
                 m.addSeparator()
                 continue
@@ -1050,6 +1068,7 @@ class MainWindow(QMainWindow):
                         (']', lambda: self.set_point_size(self.view.point_px + 1)),
                         ('Delete', self.on_erase), ('Backspace', self.on_erase),
                         ('Ctrl+Z', self.on_undo_erase), ('Ctrl+G', self.group_selected),
+                        ('F1', self.show_manual),
                         ('Ctrl+Delete', lambda: self.remove_selected()),
                         ('Ctrl+Backspace', lambda: self.remove_selected()),
                         ('Return', self.measure_finish),
@@ -1138,7 +1157,8 @@ class MainWindow(QMainWindow):
         self.proj_name.setText(Path(p).name if p else 'новый проект')
         self.proj_name.setToolTip(str(p or ''))
         self.dirty_dot.setVisible(self.dirty())
-        self.setWindowTitle(f"{Path(p).name if p else 'Новый проект'} — Pulse Scan")
+        from .version import __version__
+        self.setWindowTitle(f"{Path(p).name if p else 'Новый проект'} — Pulse Scan {__version__}")
 
     def scan_index(self, sid):
         for i, sc in enumerate(self.s.scans):
@@ -2660,7 +2680,7 @@ class MainWindow(QMainWindow):
         self.live_score()
         self._fit_timer.start(100)
         self.set_status(f'точка закреплена (сдвиг {np.linalg.norm(d) * 100:.1f} см): поворачивайте '
-                        f'транспортирами, полями углов или «Подогнать поворот»')
+                        f'транспортирами, полями углов или «Автоподгонкой»')
 
     PIVOT_AXES = {'yaw': (np.array([0, 0, 1.0]), np.array([1, 0, 0.0]), np.array([0, 1, 0.0]), (0.36, 0.61, 1.0)),
                   'roll': (np.array([1, 0, 0.0]), np.array([0, 1, 0.0]), np.array([0, 0, 1.0]), (1.0, 0.42, 0.42)),
@@ -3655,6 +3675,39 @@ class MainWindow(QMainWindow):
             self.restore_visibility()
             self.set_status('видимость восстановлена', log=False)
 
+    def show_about(self):
+        from .version import __version__, RELEASE_DATE
+        import vtkmodules.vtkCommonCore as vc
+        import open3d
+        from PySide6 import __version__ as pyside
+        QMessageBox.about(self, 'О программе', (
+            f'<h3>Pulse Scan {__version__}</h3><p>Обработка сканов лидара Pulse: импорт bag, стыковка, '
+            f'контроль, чистка, экспорт.</p><p>Сборка от {RELEASE_DATE}.<br>Qt (PySide6) {pyside} · '
+            f'VTK {vc.vtkVersion.GetVTKVersion()} · Open3D {open3d.__version__} · Python {platform.python_version()}'
+            f'</p><p>Проекты, скриншоты: {user_dir()}</p>'))
+
+    def show_manual(self):
+        """Руководство (docs/manual/README.md, в сборке — рядом с программой) в отдельном окне."""
+        from PySide6.QtWidgets import QDialog, QTextBrowser, QVBoxLayout
+        from PySide6.QtCore import QUrl
+        f = manual_path()
+        if f is None:
+            self.set_status('руководство не найдено (docs/manual/README.md)')
+            return
+        d = QDialog(self)
+        d.setWindowTitle('Руководство пользователя — Pulse Scan')
+        d.resize(980, 860)
+        lay = QVBoxLayout(d)
+        lay.setContentsMargins(0, 0, 0, 0)
+        tb = QTextBrowser()
+        tb.setOpenExternalLinks(True)
+        tb.setSearchPaths([str(f.parent)])
+        tb.document().setDefaultStyleSheet('img { max-width: 860px; } code { font-family: "IBM Plex Mono"; }')
+        tb.setSource(QUrl.fromLocalFile(str(f)))
+        tb.setStyleSheet('QTextBrowser { padding: 18px 28px; font-size: 14px; }')
+        lay.addWidget(tb)
+        d.show()
+
     def show_help(self):
         QMessageBox.information(self, 'Клавиши и мышь', (
             'Вид: левая кнопка — вращение, правая/средняя или Shift + левая — сдвиг, колесо — масштаб к курсору, '
@@ -3666,8 +3719,8 @@ class MainWindow(QMainWindow):
             'F12 — скриншот; Ctrl+S — сохранить.'))
 
     def save_screenshot(self, out_dir=None):
-        out = Path(out_dir or Path(__file__).resolve().parent.parent / 'screenshots')
-        out.mkdir(exist_ok=True)
+        out = Path(out_dir or user_dir('Скриншоты'))
+        out.mkdir(parents=True, exist_ok=True)
         stem = out / time.strftime('qt_%Y%m%d_%H%M%S')
         self.grab().save(f'{stem}_window.png')
         img = self.view.grab_scene()

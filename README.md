@@ -32,6 +32,16 @@ The pipeline has three stages:
 
 То же из командной строки: `python scanner_client.py list` / `get NAME --dest bags/`, `python bag_reconstruct.py bags/ --out-dir scans/` → `python scan_project.py build scans/*.ply -o X.pulse`.
 
+### Готовые сборки (macOS, Windows)
+
+Готовое приложение без установки Python — раздел Releases на GitHub (`PulseScan-*-macOS-arm64.dmg`, `PulseScan-*-Windows-x64.zip`). **Руководство пользователя** — [`docs/manual/README.md`](docs/manual/README.md), в программе — F1.
+
+Сборка:
+- **локально** (на той ОС, для которой собирается): `.venv312/bin/pip install pyinstaller` → `.venv312/bin/pyinstaller packaging/pulse_scan.spec --noconfirm` → `bash packaging/make_dmg.sh "dist/Pulse Scan.app" PulseScan.dmg`;
+- **обе ОС** — GitHub Actions `release.yml` по тегу `v*`.
+
+Самопроверка собранного приложения: `"Pulse Scan" --selftest OUT [проект.pulse] [--bag BAG]`.
+
 ### Новое окно (Qt + VTK, в разработке — ветка `feature/qt-ui`)
 
 **Запуск:** `run_qt.command` (macOS), `run_qt.bat` (Windows), `./run_qt.sh` (Linux) или `python scan_qt.py [X.pulse]`. Окружение то же (`.venv312`), при первом запуске доставляются PySide6, VTK и qtawesome (`requirements-qt.txt`). Старое окно (`run_gui.*`, `scan_gui.py`) работает как прежде.

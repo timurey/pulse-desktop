@@ -3,7 +3,7 @@
 import os
 import sys
 
-from PySide6.QtCore import QSettings
+from PySide6.QtCore import QSettings, QObject
 from PySide6.QtWidgets import QApplication
 
 from . import bg
@@ -19,6 +19,13 @@ def make_app(argv=None):
     import open3d                                        # noqa: F401
     app.setApplicationName('Pulse Scan')
     app.setOrganizationName('Pulse')
+    import sys as _sys
+    from pathlib import Path as _P
+    from PySide6.QtGui import QIcon
+    for base in (_P(getattr(_sys, '_MEIPASS', '')), _P(__file__).resolve().parent.parent):
+        if (base / 'packaging' / 'icon.png').exists():
+            app.setWindowIcon(QIcon(str(base / 'packaging' / 'icon.png')))
+            break
     load_fonts()
     f = app.font()
     f.setFamily(SANS)
@@ -42,6 +49,26 @@ def session_from_args(args):
     return Session()
 
 
+class _FileOpen(QObject):
+    """Событие открытия файла от системы (macOS отдаёт файл так, а не аргументом)."""
+
+    def __init__(self, win):
+        super().__init__()
+        self.win = win
+
+    def eventFilter(self, obj, ev):
+        from PySide6.QtCore import QEvent
+        if ev.type() == QEvent.FileOpen:
+            path = ev.file()
+            if path.lower().endswith(('.pulse', '.json')):
+                if self.win.confirm_discard('Открыть другой проект'):
+                    self.win.open_project(path)
+            elif path:
+                self.win._ingest([self.win.s.add_scan(path)])
+            return True
+        return False
+
+
 def main(argv=None):
     for stream in (sys.stdout, sys.stderr):              # русский текст в консоли Windows
         try:
@@ -49,6 +76,13 @@ def main(argv=None):
         except Exception:                                # noqa: BLE001
             pass
     args = sys.argv[1:] if argv is None else argv
+    if '--version' in args:
+        from .version import __version__
+        print(f'Pulse Scan {__version__}')
+        return
+    if '--selftest' in args:
+        from .selftest import run
+        os._exit(run(args))
     app, theme = make_app()
     from .main_window import MainWindow
     win = MainWindow(session_from_args(args), theme)
@@ -58,6 +92,8 @@ def main(argv=None):
     if prefs.value('parallel') in (True, 'true', '1', 1):
         win.toggle_projection(True)
     win.show()
+    opener = _FileOpen(win)                              # macOS: двойной щелчок по .pulse в Finder
+    app.installEventFilter(opener)
     code = app.exec()
     sys.stdout.flush()
     sys.stderr.flush()

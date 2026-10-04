@@ -24,11 +24,8 @@
 """
 
 import os
-import sys
 import time
 import tempfile
-import subprocess
-from pathlib import Path
 
 import numpy as np
 
@@ -165,25 +162,27 @@ def _run_child(method, P, N, params, cancel=None, tick=None, timeout=3600):
     Расчёт сетки в отдельном процессе (см. заголовок модуля). → npz-результат или None
     (процесс завершился без результата — сбой PoissonRecon). cancel() → True — остановить.
     """
-    here = str(Path(__file__).resolve().parent)
+    import multiprocessing as mp
     with tempfile.TemporaryDirectory() as d:
         inp, out = os.path.join(d, 'in.npz'), os.path.join(d, 'out.npz')
         np.savez(inp, P=P, N=N, method=method, **params)
-        code = f'import sys; sys.path.insert(0, {here!r}); import surface; surface._child({inp!r}, {out!r})'
-        proc = subprocess.Popen([sys.executable, '-c', code], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # spawn — новый интерпретатор (и в собранном приложении: freeze_support в scan_qt.py);
+        # PoissonRecon может вызвать exit() — завершится только дочерний процесс
+        proc = mp.get_context('spawn').Process(target=_child, args=(inp, out), daemon=True)
+        proc.start()
         t0 = time.time()
-        while proc.poll() is None:
+        while proc.is_alive():
             if cancel and cancel():
                 proc.kill()
-                proc.wait()
+                proc.join()
                 raise Cancelled('остановлено')
             if time.time() - t0 > timeout:
                 proc.kill()
-                proc.wait()
+                proc.join()
                 raise RuntimeError(f'расчёт сетки дольше {timeout // 60} мин — остановлен')
             if tick:
                 tick(time.time() - t0)
-            time.sleep(0.5)
+            proc.join(0.5)
         if not os.path.exists(out):
             return None
         z = np.load(out)

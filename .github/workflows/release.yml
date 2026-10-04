@@ -1,0 +1,76 @@
+# Сборка Pulse Scan для macOS и Windows (PyInstaller) и черновик релиза на GitHub.
+# Запуск: тег vX.Y.Z[-rcN] (git push origin v0.9.0-rc1) или вручную (Actions → release → Run workflow).
+name: release
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14          # Apple Silicon (arm64)
+            name: macOS-arm64
+          - os: windows-latest
+            name: Windows-x64
+    runs-on: ${{ matrix.os }}
+    env:
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Зависимости
+        run: python -m pip install -r requirements-qt.txt pyinstaller flask
+      - name: Тесты логики
+        run: python -m unittest discover -s tests -v
+      - name: Сборка
+        run: pyinstaller packaging/pulse_scan.spec --noconfirm
+      - name: OpenGL (Mesa) для самопроверки на Windows без видеокарты
+        if: runner.os == 'Windows'
+        uses: ssciwr/setup-mesa-dist-win@v2
+      - name: Самопроверка собранного приложения
+        continue-on-error: ${{ runner.os == 'Windows' }}   # OpenGL на виртуальной машине GitHub — программный
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "macOS" ]; then APP="dist/Pulse Scan.app/Contents/MacOS/Pulse Scan"; else APP="dist/Pulse Scan/Pulse Scan.exe"; fi
+          "$APP" --version
+          "$APP" --selftest selftest_out
+          cat selftest_out/selftest.json
+      - name: Упаковка (macOS — DMG)
+        if: runner.os == 'macOS'
+        run: bash packaging/make_dmg.sh "dist/Pulse Scan.app" "PulseScan-${GITHUB_REF_NAME}-${{ matrix.name }}.dmg"
+      - name: Упаковка (Windows — ZIP)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Copy-Item docs/manual -Destination "dist/Pulse Scan/Руководство" -Recurse
+          Compress-Archive -Path "dist/Pulse Scan" -DestinationPath "PulseScan-$env:GITHUB_REF_NAME-${{ matrix.name }}.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PulseScan-${{ matrix.name }}
+          path: |
+            PulseScan-*.dmg
+            PulseScan-*.zip
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: out
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          prerelease: ${{ contains(github.ref_name, 'rc') }}
+          name: Pulse Scan ${{ github.ref_name }}
+          body_path: docs/RELEASE_NOTES.md
+          files: out/*

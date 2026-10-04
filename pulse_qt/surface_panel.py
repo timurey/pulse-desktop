@@ -98,6 +98,7 @@ class SurfacePanel(_Panel):
         while self.list.count():
             w = self.list.takeAt(0).widget()
             if w is not None:
+                w.hide()
                 w.deleteLater()
         for key, title, sub, vis in rows:
             self.list.addWidget(_MeshRow(key, title, sub, vis, self))
