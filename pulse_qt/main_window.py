@@ -416,6 +416,11 @@ class MainWindow(QMainWindow):
         self.a_bytree.setChecked(True)
         self.b_auto = g.big('mdi6.graph-outline', 'Авто-\nстыковка', self.on_auto, 'Подобрать пары и позы всех сканов',
                             menu=am)
+        g.small('mdi6.folder-network-outline', 'Внутри групп', self.on_auto_within,
+                'Стыковка пар внутри групп (выбранной группы или каждой); связи между группами не трогаются')
+        g.small('mdi6.vector-arrange-above', 'Группы между собой', self.on_auto_groups,
+                'Каждая группа — жёсткое целое (облако по внутренним связям); стыкуются дочерние группы '
+                'выбранной ветки (или верхние группы)')
         g.small('mdi6.target', 'Кандидаты позы', lambda: self.on_cand_search(
             sel() or next((x.id for x in self.s.scans if x.pose is None), None)))
         g = rb.add_group(pg, 'Вручную')
@@ -1549,7 +1554,8 @@ class MainWindow(QMainWindow):
                 rows.append((ab, f"{e.get('score', 0):+.2f}", f"{e.get('violations', 0):.3f}",
                              f"{e.get('margin', 0):.2f}",
                              f"{e['rmse'] * 100:.1f} см" if e.get('rmse') is not None else '—',
-                             e.get('method', ''), st))
+                             {'group': 'группы', 'planes+icp': 'плоскости+ICP'}.get(e.get('method'), e.get('method', '')),
+                             st))
         self.dock.set_pairs(rows)
         loops = self.s.loops() if self.s.edges else []
         lrows = []
@@ -1587,6 +1593,55 @@ class MainWindow(QMainWindow):
             self.refresh_all()
             self.set_status(f'Автостыковка: размещено {len(self.s.placed())} из {len(self.s.scans)}')
         self.run_bg('автостыковка…', work, done)
+
+    def _scope_group(self):
+        """Выбранная в дереве группа (или группа выбранного скана); None — весь проект."""
+        if not self.tree_sel:
+            return None
+        if self.s.tree.group(self.tree_sel) is not None:
+            return None if self.tree_sel == 'root' else self.tree_sel
+        p = self.s.tree.parent(self.tree_sel)
+        return None if p is None or p is self.s.tree.root else p.id
+
+    def on_auto_within(self):
+        gid = self._scope_group()
+        pairs = self.s.within_group_pairs(gid)
+        if not pairs:
+            self.set_status('нет пар внутри групп: сгруппируйте сканы в дереве')
+            return
+        if self.analyzing:
+            self._after_analysis = self.on_auto_within
+            self.set_status('стыковка начнётся после фонового анализа')
+            return
+        reuse = self.a_reuse.isChecked()
+        name = self.s.tree.group(gid).name if gid else 'все группы'
+
+        def done(_):
+            self.redraw_all()
+            self.refresh_all()
+            self.set_status(f'стыковка внутри групп ({name}, пар {len(pairs)}): размещено '
+                            f'{len(self.s.placed())} из {len(self.s.scans)}')
+        self.run_bg(f'стыковка внутри групп ({name}, пар {len(pairs)})…',
+                    lambda p: self.s.run_auto(p, reuse=reuse, combos=pairs), done)
+
+    def on_auto_groups(self):
+        gid = self._scope_group()
+        if self.analyzing:
+            self._after_analysis = self.on_auto_groups
+            self.set_status('стыковка начнётся после фонового анализа')
+            return
+
+        def done(out):
+            self.redraw_all()
+            self.refresh_all()
+            ok = [f"«{a}» ← «{b}» {e['score']:+.2f}" + ('' if e['auto_ok'] else ' (не принято)') for a, b, e in out]
+            self.set_status('группы между собой: ' + '; '.join(ok) + f'; размещено {len(self.s.placed())} из '
+                            f'{len(self.s.scans)}')
+
+        def work(p):
+            return self.s.register_groups(gid, p)
+        if self.run_bg('стыковка групп между собой…', work, done) is False:
+            return
 
     def on_pair_selected(self, i):
         if 0 <= i < len(self.s.edges) and self.mode != 'manual':

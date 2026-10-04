@@ -483,18 +483,22 @@ class Session:
         return np.asarray(pc.points)
 
     # ── автостыковка ─────────────────────────────────────────────────────
-    def run_auto(self, progress=None, yaw='manhattan', reuse=True, by_tree=None):
+    def run_auto(self, progress=None, yaw='manhattan', reuse=True, by_tree=None, combos=None):
         """
         Автоматическая стыковка, затем позы по графу.
         by_tree=True — только пары по дереву (внутри групп + представители соседних
         веток), иначе все пары. По умолчанию — по дереву, если в нём есть группы.
+        combos — явный список пар (например, только внутри групп — within_group_pairs).
         """
         names = [s.id for s in self.scans]
-        old = {(e['A'], e['B']): e for e in self.edges if e.get('method') != 'manual'}
-        manual = [e for e in self.edges if e.get('method') == 'manual']
+        old = {(e['A'], e['B']): e for e in self.edges if e.get('method') not in ('manual', 'group')}
+        manual = [e for e in self.edges if e.get('method') in ('manual', 'group')]
         if by_tree is None:
             by_tree = not self.tree.is_flat()
-        if by_tree:
+        if combos is not None:
+            order = {n: i for i, n in enumerate(names)}
+            combos = [tuple(sorted(c, key=order.get)) for c in combos if c[0] in order and c[1] in order]
+        elif by_tree:
             weight = {sc.id: sc.res.get('n_points', 0) for sc in self.scans}
             combos = self.tree.registration_pairs(names, weight)
         else:
@@ -524,6 +528,124 @@ class Session:
         self.recompute_poses()
         if progress:
             progress(1.0, "готово")
+
+    # ── стыковка групп ───────────────────────────────────────────────────
+    def within_group_pairs(self, gid=None):
+        """
+        Пары для «стыковки внутри групп»: выбранная группа — все пары её сканов (с
+        подгруппами); без выбора — в каждой группе пары её собственных сканов.
+        """
+        if gid is not None and gid != 'root' and self.tree.group(gid) is not None:
+            return list(itertools.combinations(self.tree.scans_in(gid), 2))
+        out = []
+        for g in self.tree.groups():
+            if g is self.tree.root:
+                continue
+            own = [c.scan for c in g.children if not hasattr(c, 'children')]
+            out += list(itertools.combinations(own, 2))
+        return out
+
+    def group_frame(self, gid):
+        """
+        Группа как жёсткое целое по её внутренним активным связям (независимо от связи
+        с опорным сканом). → (главный скан, {id: поза канон. скана → канон. главного}).
+        """
+        ids = [i for i in self.tree.scans_in(gid) if self.by_id(i) is not None and self.by_id(i).analyzed]
+        if not ids:
+            return None, {}
+        inside = [e for e in self.active_edges() if e['A'] in ids and e['B'] in ids and 'T_canon' in e]
+        root = max(ids, key=lambda i: len(self.by_id(i).down))
+        return root, sp.spanning_poses(ids, inside, root)
+
+    def group_res(self, gid):
+        """Облако группы в системе её главного скана + плоскости и слои (как у одного скана)."""
+        root, poses = self.group_frame(gid)
+        if root is None:
+            return None
+        P = np.vstack([pr.transform(self.by_id(i).down, T) for i, T in poses.items()])
+        down, pl = planes.extract_planes(P)
+        return {'scan': root, 'up': '+z', 'R_up': np.eye(3).tolist(), 'voxel': planes.VOXEL,
+                'n_points': int(len(P)), 'layers': planes.horizontal_layers(P), 'planes': pl, 'down': down,
+                'members': sorted(poses), 'group': gid}
+
+    def register_groups(self, gid=None, progress=None, yaw='manhattan', reps=2):
+        """
+        Стыковка групп между собой: каждая группа — жёсткое целое (облако по внутренним
+        связям); пары групп — дочерние группы выбранной (или корня).
+        Гипотезы позы группы B относительно A: по плоскостям объединённых облаков, по парам
+        reps крупнейших сканов групп (как обычная автостыковка) и текущая взаимная поза
+        (если обе группы уже размещены). Каждая уточняется ICP по объединённым облакам и
+        оценивается одинаково (ConsistencyScorer); лучшая — ребро 'group' между главными
+        сканами групп; затем позы по графу. → [(группа A, группа B, ребро)].
+        """
+        parent = self.tree.group(gid) if gid else None
+        parent = parent or self.tree.root
+        kids = [c for c in parent.children if hasattr(c, 'children') and self.tree.scans_in(c.id)]
+        if len(kids) < 2:
+            raise ValueError('нужно хотя бы две группы (дочерние группы выбранной ветки или корня)')
+        res = {}
+        for k, g in enumerate(kids):
+            if progress:
+                progress(0.15 * k / len(kids), f'облако группы «{g.name}»')
+            r = self.group_res(g.id)
+            if r is not None:
+                r['poses'] = self.group_frame(g.id)[1]
+                res[g.id] = r
+        out = []
+        combos = list(itertools.combinations([g for g in kids if g.id in res], 2))
+        for k, (ga, gb) in enumerate(combos):
+            say = (lambda m, k=k: progress(0.15 + 0.8 * k / max(1, len(combos)), m)) if progress else (lambda m: None)
+            say(f'группы «{ga.name}» ← «{gb.name}»: гипотезы')
+            e = self._register_group_pair(res[ga.id], res[gb.id], yaw, reps, say)
+            e.update(A=res[ga.id]['scan'], B=res[gb.id]['scan'], method='group',
+                     source=f'группы «{ga.name}» ← «{gb.name}»', groups=[ga.id, gb.id])
+            e['auto_ok'] = sp.edge_ok(e)
+            self.edges = [x for x in self.edges if not (x.get('method') == 'group' and
+                                                         {x['A'], x['B']} == {e['A'], e['B']})]
+            self.edges.append(e)
+            out.append((ga.name, gb.name, e))
+        if progress:
+            progress(0.97, 'оптимизация графа поз')
+        self.recompute_poses()
+        return out
+
+    def _register_group_pair(self, ra, rb, yaw, reps, say):
+        """Поза группы rb в системе главного скана группы ra (см. register_groups)."""
+        hyps = []
+        try:
+            e0 = pr.register_pair(ra, rb, yaw, verbose=False)
+            hyps.append(('плоскости групп', np.asarray(e0['T_canon'])))
+        except Exception:                                # noqa: BLE001
+            pass
+        A0, B0 = self.by_id(ra['scan']), self.by_id(rb['scan'])
+        if A0.pose is not None and B0.pose is not None:
+            hyps.append(('текущая', np.linalg.inv(self.Tc(A0)) @ self.Tc(B0)))
+        big = lambda r: sorted(r['poses'], key=lambda i: -len(self.by_id(i).down))[:reps]
+        for a in big(ra):
+            for b in big(rb):
+                say(f'пара сканов {a} ← {b}')
+                try:
+                    e = pr.register_pair(_clean_res(self.by_id(a)), _clean_res(self.by_id(b)), yaw, verbose=False)
+                except Exception:                        # noqa: BLE001
+                    continue
+                T = ra['poses'][a] @ np.asarray(e['T_canon']) @ np.linalg.inv(rb['poses'][b])
+                hyps.append((f'{a} ← {b}', T))
+        scorer = pr.ConsistencyScorer(ra['down'], rb['down'])
+        scored = []
+        for name, T in hyps:
+            T2, fit, rmse = pr.refine_icp(ra['down'], rb['down'], T)
+            sc, close, viol = scorer.score(T2)
+            scored.append({'T': T2, 'score': sc, 'close': close, 'viol': viol, 'fitness': fit, 'rmse': rmse,
+                           'from': name})
+        scored.sort(key=lambda h: -h['score'])
+        best = scored[0]
+        second = next((h['score'] for h in scored[1:] if pr.pose_delta(h['T'], best['T'])[0] > 0.1
+                       or pr.pose_delta(h['T'], best['T'])[1] > 1), 0.0)
+        return {'T_canon': best['T'].tolist(), 'score': float(best['score']), 'close': float(best['close']),
+                'violations': float(best['viol']), 'second_score': float(second),
+                'margin': float(best['score'] - second), 'fitness': float(best['fitness']),
+                'rmse': float(best['rmse']), 'hypothesis': best['from'], 'n_hypotheses': len(scored),
+                'yaw_deg': float(np.degrees(np.arctan2(best['T'][1, 0], best['T'][0, 0])))}
 
     @staticmethod
     def edge_active(e):
