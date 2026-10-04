@@ -351,11 +351,21 @@ class Session:
         self.tree.only(keys)
         self.apply_visibility()
 
-    def move_node(self, key, target_gid):
+    def move_node(self, key, target_gid, index=None):
         """Переместить скан/группу в группу; видимость пересчитывается (скрытая группа скрывает)."""
-        ok = self.tree.move(key, target_gid)
+        return self.move_nodes([key], target_gid, index)
+
+    def move_nodes(self, keys, target_gid, index=None):
+        """Переместить несколько узлов (порядок дерева сохраняется) в группу на позицию index."""
+        ok = self.tree.move_many(keys, target_gid, index)
         self.apply_visibility()
         return ok
+
+    def group_nodes(self, keys, name, kind='прочее'):
+        """Создать группу из выбранных узлов. → id группы или None."""
+        gid = self.tree.group_from(keys, name, kind)
+        self.apply_visibility()
+        return gid
 
     def delete_group(self, gid):
         ok = self.tree.delete_group(gid)

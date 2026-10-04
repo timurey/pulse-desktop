@@ -1,6 +1,6 @@
 """Левая панель: дерево проекта (группы и сканы) и слои отображения."""
 
-from PySide6.QtCore import Qt, Signal, QSize
+from PySide6.QtCore import Qt, Signal, QSize, QItemSelectionModel
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QTreeWidget, QTreeWidgetItem, QSlider,
                                QAbstractItemView, QLabel, QFrame, QMenu, QToolButton, QLineEdit)
@@ -58,7 +58,7 @@ class _Row(QWidget):
 
 
 class ProjectTree(QTreeWidget):
-    moved = Signal(str, str)                       # ключ узла, id группы
+    moved = Signal(list, str, object)              # ключи узлов, id группы, позиция (None — в конец)
 
     def __init__(self, panel):
         super().__init__()
@@ -66,7 +66,7 @@ class ProjectTree(QTreeWidget):
         self.setHeaderHidden(True)
         self.setIndentation(14)
         self.setAnimated(True)
-        self.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.setSelectionMode(QAbstractItemView.ExtendedSelection)   # Shift / Ctrl(⌘) — несколько
         self.setDragDropMode(QAbstractItemView.InternalMove)
         self.setDragEnabled(True)
         self.setAcceptDrops(True)
@@ -75,29 +75,37 @@ class ProjectTree(QTreeWidget):
         self.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
 
     def dropEvent(self, ev):
-        src = self.currentItem()
-        tgt = self.itemAt(ev.position().toPoint())
+        """
+        Перетаскивание выделенных узлов: над / под элементом — на это место (порядок в
+        группе), на группу — в неё (в конец), на пустое место — в конец корня.
+        """
+        keys = [it.data(0, ROLE) for it in self.selectedItems()]
         ev.ignore()                                # дерево перестраивается из сеанса
-        if src is None:
+        if not keys:
             return
-        key = src.data(0, ROLE)
-        if tgt is None:
-            gid = 'root'
-        else:
-            tkey = tgt.data(0, ROLE)
-            if tgt.data(0, ROLE + 1):              # группа
-                gid = tkey
-            else:
-                p = tgt.parent()
-                gid = p.data(0, ROLE) if p is not None else 'root'
-        if gid != key:
-            self.moved.emit(key, gid)
+        gid, index = self.drop_target(self.itemAt(ev.position().toPoint()), self.dropIndicatorPosition())
+        if gid in keys:
+            return
+        self.moved.emit(keys, gid, index)
+
+    def drop_target(self, tgt, pos):
+        """Куда класть: (id группы, позиция или None) по элементу и отметке вставки Qt."""
+        P = QAbstractItemView.DropIndicatorPosition
+        if tgt is None or pos == P.OnViewport:
+            return 'root', None
+        if pos == P.OnItem and tgt.data(0, ROLE + 1):
+            return tgt.data(0, ROLE), None             # на группу — в неё
+        if pos == P.BelowItem and tgt.data(0, ROLE + 1) and tgt.isExpanded() and tgt.childCount():
+            return tgt.data(0, ROLE), 0                # под раскрытой группой — первым в ней
+        par = tgt.parent() if tgt.parent() is not None else self.invisibleRootItem()
+        gid = par.data(0, ROLE) if par is not self.invisibleRootItem() else 'root'
+        return gid, par.indexOfChild(tgt) + (0 if pos == P.AboveItem else 1)
 
 
 class TreePanel(QFrame):
     selected = Signal(object)                      # ключ узла или None
     visibilityToggled = Signal(str, bool)
-    moved = Signal(str, str)
+    moved = Signal(list, str, object)
     action = Signal(str, object)                   # имя действия, ключ
     layerToggled = Signal(str, bool)
     qualityChanged = Signal(float, str)            # порог, м; способ: planes | local
@@ -219,6 +227,20 @@ class TreePanel(QFrame):
         it = self.tree.currentItem()
         return it.data(0, ROLE) if it is not None and it.isSelected() else None
 
+    def selected_keys(self):
+        """Выделенные узлы в порядке дерева."""
+        sel = {it.data(0, ROLE) for it in self.tree.selectedItems()}
+        return [k for k in self._items if k in sel]
+
+    def select_keys(self, keys):
+        self.tree.clearSelection()
+        for k in keys:
+            it = self._items.get(k)
+            if it is not None:
+                it.setSelected(True)
+        if keys and keys[-1] in self._items:             # текущий — без сброса остального выделения
+            self.tree.setCurrentItem(self._items[keys[-1]], 0, QItemSelectionModel.NoUpdate)
+
     def select(self, key):
         it = self._items.get(key)
         if it is not None:
@@ -234,6 +256,7 @@ class TreePanel(QFrame):
         expanded = {k for k, it in self._items.items() if it.isExpanded()}
         first = not self._items
         cur = self.current()
+        sel = set(self.selected_keys())
         tree.blockSignals(True)
         tree.clear()
         self._items = {}
@@ -276,10 +299,15 @@ class TreePanel(QFrame):
                 tree.setItemWidget(it, 0, row)
 
         root = tree.invisibleRootItem()
+        root.setFlags(root.flags() | Qt.ItemIsDropEnabled)   # перестановка и на верхнем уровне
         for ch in t.root.children:
             add(root, ch)
         if cur in self._items:
             tree.setCurrentItem(self._items[cur])
+        for k in sel:
+            if k in self._items:
+                self._items[k].setSelected(True)
+        tree.setDragEnabled(not flt)                # с фильтром порядок в списке неполный
         tree.blockSignals(False)
         self.empty.setVisible(not s.scans)
         self.tree.setVisible(bool(s.scans))
@@ -296,6 +324,15 @@ class TreePanel(QFrame):
             a.setEnabled(enabled)
             a.triggered.connect(lambda: self.action.emit(name, key))
         act('Новая группа', 'new_group', 'mdi6.folder-plus-outline')
+        many = self.selected_keys()
+        if key is not None and key in many and len(many) > 1:
+            act(f'Сгруппировать выделенные ({len(many)})  ⌘/Ctrl+G', 'group_sel', 'mdi6.folder-plus')
+            act(f'Переместить выделенные ({len(many)}) в группу…', 'move', 'mdi6.folder-move-outline')
+            act('Показать только выделенные', 'only', 'mdi6.eye-check-outline')
+            m.addSeparator()
+            act('Показать всё', 'show_all', 'mdi6.eye-outline')
+            m.exec(self.tree.viewport().mapToGlobal(pos))
+            return
         if key is not None:
             if is_group:
                 act('Переименовать', 'rename', 'mdi6.pencil-outline')

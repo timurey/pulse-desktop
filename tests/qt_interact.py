@@ -128,6 +128,51 @@ def main():
     check('двойной клик — центр вращения на облаке', np.linalg.norm(v.center()[:2] - P[k, :2]) < 1.0,
           f'{v.center()[:2]} vs {P[k, :2]}')
 
+    # дерево: перетаскивание выделенных над / под элементом, группа из выделенных
+    tree = w.tree_panel.tree
+    t_ = sess.tree
+    def kids(gid):
+        return [c.scan if not hasattr(c, 'children') else c.id for c in t_.group(gid).children]
+    g0 = next(g for g in t_.root.children if hasattr(g, 'children') and len(kids(g.id)) >= 3)
+    order0 = kids(g0.id)
+    from PySide6.QtWidgets import QAbstractItemView as _AV
+    DP = _AV.DropIndicatorPosition
+    def drop_on(keys, target_key, where):
+        # синтетическое перетаскивание Qt отклоняет (нет источника) — та же логика напрямую
+        w.tree_panel.select_keys(keys)
+        it = w.tree_panel._items[target_key]
+        pos = {'above': DP.AboveItem, 'below': DP.BelowItem, 'on': DP.OnItem}[where]
+        gid, index = tree.drop_target(it, pos)
+        tree.moved.emit(w.tree_panel.selected_keys(), gid, index)
+        pump(0.1)
+    drop_on([order0[-1]], order0[0], 'above')
+    check('дерево: перестановка — последний скан над первым', kids(g0.id) == [order0[-1]] + order0[:-1],
+          f'{order0} → {kids(g0.id)}')
+    drop_on([order0[-1]], order0[-2], 'below')
+    check('дерево: перестановка — под элементом', kids(g0.id) == order0, f'{kids(g0.id)}')
+    other = next(g for g in t_.root.children if hasattr(g, 'children') and g is not g0)
+    pair = order0[:2]
+    drop_on(pair, other.id, 'on')
+    check('дерево: несколько сканов в другую группу', kids(other.id)[-2:] == pair and not set(pair) & set(kids(g0.id)))
+    w.tree_panel.select_keys(pair)
+    answer_text = {'text': None}
+    def fill_and_ok():
+        from PySide6.QtWidgets import QApplication as _A
+        d = _A.activeModalWidget()
+        if d is not None:
+            d.ws[0][1].setText('Тестовая')
+            d.accept()
+    from PySide6.QtCore import QTimer as _T
+    _T.singleShot(300, fill_and_ok)
+    w.group_selected()
+    newg = next((g for g in t_.groups() if g.name == 'Тестовая'), None)
+    check('дерево: группа из выделенных', newg is not None and kids(newg.id) == pair)
+    if newg is not None:
+        sess.delete_group(newg.id)
+    sess.move_nodes(pair, g0.id, 0)
+    w.tree_panel.rebuild()
+    check('дерево: порядок восстановлен', kids(g0.id) == order0)
+
     # куб навигации: грань «верх» — X вправо, Y вверх; ±90° вокруг оси взгляда; соседняя грань
     cube = w.vp.cube
     def settle():

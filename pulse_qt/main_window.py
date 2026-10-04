@@ -438,6 +438,8 @@ class MainWindow(QMainWindow):
         g.big('mdi6.cloud-upload-outline', 'Облако', self.on_add_scan, 'Добавить облако (e57, ply, pcd, las)')
         g = rb.add_group(pg, 'Дерево')
         g.small('mdi6.folder-plus-outline', 'Новая группа', lambda: self.on_tree_action('new_group', sel()))
+        g.small('mdi6.folder-plus', 'Сгруппировать', self.group_selected,
+                'Группа из выделенных в дереве (Shift / Ctrl(⌘) + щелчок) — Ctrl/⌘+G')
         g.small('mdi6.folder-move-outline', 'В группу…', lambda: self.on_tree_action('move', sel()) if sel()
                 else self.set_status('выберите скан или группу в дереве'))
         g.small('mdi6.eye-check-outline', 'Только выбранное', lambda: self.on_tree_action('only', sel()) if sel()
@@ -1028,7 +1030,8 @@ class MainWindow(QMainWindow):
                         ('[', lambda: self.set_point_size(self.view.point_px - 1)),
                         (']', lambda: self.set_point_size(self.view.point_px + 1)),
                         ('Delete', self.on_erase), ('Backspace', self.on_erase),
-                        ('Ctrl+Z', self.on_undo_erase), ('Return', self.measure_finish),
+                        ('Ctrl+Z', self.on_undo_erase), ('Ctrl+G', self.group_selected),
+                        ('Return', self.measure_finish),
                         ('Enter', self.measure_finish)):
             sc = QShortcut(QKeySequence(key), self)
             sc.setContext(Qt.WindowShortcut)
@@ -1597,14 +1600,39 @@ class MainWindow(QMainWindow):
         self.apply_visibility()
         self.tree_panel.rebuild()
 
-    def on_tree_move_drop(self, key, gid):
-        if not self.s.move_node(key, gid):
+    def on_tree_move_drop(self, keys, gid, index=None):
+        keys = [keys] if isinstance(keys, str) else list(keys)
+        if not self.s.move_nodes(keys, gid, index):
             self.set_status('нельзя переместить сюда (группу нельзя вложить в саму себя)')
             return
         self.apply_visibility()
         self.tree_panel.rebuild()
+        self.tree_panel.select_keys(keys)
         g = self.s.tree.group(gid)
-        self.set_status(f'перемещено в «{g.name if g and g is not self.s.tree.root else "корень"}»')
+        where = g.name if g and g is not self.s.tree.root else 'корень'
+        what = f'{len(keys)} узл.' if len(keys) > 1 else short(keys[0]) if self.s.by_id(keys[0]) else 'группа'
+        self.set_status(f'{what} → «{where}»' + ('' if index is None else f', позиция {index + 1}'))
+
+    def group_selected(self):
+        """Группа из выделенных в дереве сканов / групп (на месте первого)."""
+        keys = self.tree_panel.selected_keys()
+        if not keys:
+            self.set_status('выделите сканы в дереве (Shift / Ctrl(⌘) + щелчок)')
+            return
+        d = AskDialog(self, f'Группа из выделенных ({len(keys)})',
+                      [('Имя', 'text', '', None), ('Тип', 'combo', 'комната', KINDS)],
+                      'mdi6.folder-plus', 'Создать')
+        if not d.exec():
+            return
+        nm, kind = d.values()
+        gid = self.s.group_nodes(keys, nm.strip() or 'Группа', kind)
+        if gid is None:
+            self.set_status('не удалось создать группу')
+            return
+        self.apply_visibility()
+        self.tree_panel.rebuild()
+        self.tree_panel.select(gid)
+        self.set_status(f'группа «{self.s.tree.group(gid).name}» из {len(keys)} узл.')
 
     def _selected_group(self, key=None):
         t = self.s.tree
@@ -1650,7 +1678,10 @@ class MainWindow(QMainWindow):
             self.apply_visibility()
             self.tree_panel.rebuild()
             self.set_status(f'группа «{g.name}» удалена, её содержимое перешло к родителю')
+        elif name == 'group_sel':
+            self.group_selected()
         elif name == 'move':
+            keys = self.tree_panel.selected_keys() or [key]
             choices = t.group_choices()
             labels = [lab for _, lab in choices]
             d = AskDialog(self, 'Переместить в группу', [('Группа', 'combo', labels[0], labels)],
@@ -1658,12 +1689,13 @@ class MainWindow(QMainWindow):
             if d.exec():
                 gid = dict((lab, i) for i, lab in choices).get(d.values()[0])
                 if gid is not None:
-                    self.on_tree_move_drop(key, gid)
+                    self.on_tree_move_drop(keys, gid)
         elif name == 'make_ref':
             self.make_ref(key)
         elif name == 'only':
             self._vis_backup = None
-            self.s.only_show([key])
+            sel = self.tree_panel.selected_keys()
+            self.s.only_show(sel if key in sel and len(sel) > 1 else [key])
             self.apply_visibility()
             self.tree_panel.rebuild()
         elif name == 'show_all':

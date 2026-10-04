@@ -201,23 +201,83 @@ class Tree:
         p.children[i:i + 1] = g.children
         return True
 
-    def move(self, key, target_gid):
-        """Переместить скан или группу в группу target. Защита от циклов."""
-        target = self.group(target_gid)
-        n = self.node(key)
-        if target is None or n is None or n is self.root:
+    def move(self, key, target_gid, index=None):
+        """
+        Переместить скан или группу в группу target на позицию index (None — в конец).
+        index — позиция среди детей target до перемещения (как у отметки вставки в дереве).
+        Защита от циклов.
+        """
+        return self.move_many([key], target_gid, index)
+
+    def _can_move(self, n, target):
+        if n is None or n is self.root or target is None:
             return False
-        if isinstance(n, Group) and (n is target or n in self.ancestors(target_gid)
-                                     or target_gid == n.id):
+        if isinstance(n, Group) and (n is target or any(g is target for g in self.groups(n))):
             return False                       # нельзя переместить группу внутрь себя
-        if isinstance(n, Group):
-            for g in self.groups(n):
-                if g is target:
-                    return False
-        p = self.parent(key)
-        p.children.remove(n)
-        target.children.append(n)
         return True
+
+    def order(self):
+        """Ключи всех узлов в порядке обхода дерева (как в списке)."""
+        out = []
+
+        def walk(g):
+            for c in g.children:
+                out.append(c.id if isinstance(c, Group) else c.scan)
+                if isinstance(c, Group):
+                    walk(c)
+        walk(self.root)
+        return out
+
+    def move_many(self, keys, target_gid, index=None):
+        """
+        Переместить несколько узлов в группу target, начиная с позиции index, сохраняя их
+        порядок в дереве. Узлы, чей предок тоже перемещается, едут вместе с ним.
+        → True, если что-то перемещено.
+        """
+        target = self.group(target_gid)
+        if target is None:
+            return False
+        keyset = set(keys)
+        rank = {k: i for i, k in enumerate(self.order())}
+        nodes = []
+        for k in sorted(set(keys), key=lambda k: rank.get(k, 1 << 30)):
+            n = self.node(k)
+            if any((a.id in keyset) for a in self.ancestors(k)):
+                continue                       # едет вместе с предком
+            if not self._can_move(n, target):
+                return False
+            nodes.append(n)
+        if not nodes:
+            return False
+        if index is None:
+            index = len(target.children)
+        # позиция index — в списке детей target до удаления перемещаемых
+        shift = sum(1 for c in target.children[:index] if c in nodes)
+        for n in nodes:
+            self.parent(n.id if isinstance(n, Group) else n.scan).children.remove(n)
+        index = max(0, min(len(target.children), index - shift))
+        target.children[index:index] = nodes
+        return True
+
+    def group_from(self, keys, name, kind='прочее'):
+        """
+        Новая группа из выбранных узлов: создаётся в родителе первого из них, на его месте,
+        и узлы переносятся в неё (в порядке дерева). → id группы или None.
+        """
+        rank = {k: i for i, k in enumerate(self.order())}
+        keys = [k for k in sorted(set(keys), key=lambda k: rank.get(k, 1 << 30)) if self.node(k) is not None]
+        if not keys:
+            return None
+        parent = self.parent(keys[0]) or self.root
+        pos = parent.children.index(self.node(keys[0]))
+        gid = self.add_group(parent.id, name, kind)
+        g = self.group(gid)
+        parent.children.remove(g)
+        parent.children.insert(pos, g)
+        if not self.move_many(keys, gid):
+            parent.children.remove(g)
+            return None
+        return gid
 
     # ── стыковка по дереву ───────────────────────────────────────────────
     def registration_pairs(self, scan_ids, weight=None, reps=2):

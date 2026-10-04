@@ -50,6 +50,36 @@ class TestTree(unittest.TestCase):
         self.assertIsNone(t.group(g['cor']))
         self.assertEqual(t.path('r1a'), 'Здание / 1 этаж / Комната 1')
 
+    def test_reorder_and_move_many(self):
+        t, g = building()
+        kids = lambda gid: [c.scan if isinstance(c, Leaf) else c.id for c in t.group(gid).children]
+        # перестановка внутри группы: r1c — в начало, r1a — в конец
+        self.assertTrue(t.move('r1c', g['r1'], 0))
+        self.assertEqual(kids(g['r1']), ['r1c', 'r1a', 'r1b'])
+        self.assertTrue(t.move('r1a', g['r1'], 3))
+        self.assertEqual(kids(g['r1']), ['r1c', 'r1b', 'r1a'])
+        # несколько сразу, порядок дерева сохраняется независимо от порядка выбора
+        self.assertTrue(t.move_many(['r2b', 'cor1', 'r2a'], g['out'], 1))
+        self.assertEqual(kids(g['out']), ['fac1', 'cor1', 'r2a', 'r2b', 'fac2'])
+        self.assertEqual(kids(g['r2']), [])
+        # группа вместе со своим сканом: скан едет внутри группы
+        self.assertTrue(t.move_many([g['cor'], 'cor2'], g['b'], 0))
+        self.assertEqual(kids(g['b'])[0], g['cor'])
+        self.assertEqual(kids(g['cor']), ['cor2'])
+        # нельзя вложить группу в её же потомка — ничего не меняется
+        self.assertFalse(t.move_many(['fac1', g['f1']], g['r1']))
+        self.assertIn('fac1', kids(g['out']))
+
+    def test_group_from_selection(self):
+        t, g = building()
+        gid = t.group_from(['r1b', 'r1c'], 'Угол', 'комната')
+        kids = [c.scan if isinstance(c, Leaf) else c.id for c in t.group(g['r1']).children]
+        self.assertEqual(kids, ['r1a', gid])                    # на месте первого выбранного
+        self.assertEqual([c.scan for c in t.group(gid).children], ['r1b', 'r1c'])
+        gid2 = t.group_from(['fac2', 'cor1'], 'Смешанная')      # из разных групп — в родителе первого
+        self.assertIn(gid2, [c.id for c in t.group(g['cor']).children if isinstance(c, Group)])
+        self.assertEqual([c.scan for c in t.group(gid2).children], ['cor1', 'fac2'])
+
     def test_visibility(self):
         t, g = building()
         t.set_visible(g['f1'], False)
