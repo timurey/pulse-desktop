@@ -227,6 +227,8 @@ class Session:
         self.erase_undo = []         # [(scan_id, число добавленных областей)]
         self.tree = Tree()           # иерархия сканов (организация, видимость веток)
         self.meshes = {}             # построенные поверхности (surface.py): только в памяти, не сохраняются
+        self.zero = None             # нулевой уровень {'z', 'source'} (общая система); None — пол опорного
+        self.measures = []           # замеры (measure.py), точки в общей системе
         self.lock = threading.RLock()
 
     # ── загрузка / сохранение ─────────────────────────────────────────────
@@ -245,6 +247,8 @@ class Session:
         s.level = np.asarray(proj.get('level', np.eye(3).tolist()), float)
         s.edges = proj.get('pairs', []) + proj.get('manual_edges', [])
         s.tree = Tree.from_json(proj.get('tree'), [x.id for x in s.scans])
+        s.zero = proj.get('zero')
+        s.measures = proj.get('measures', [])
         s.apply_visibility()
         s.project_path = str(path)
         s._recolor()
@@ -309,6 +313,7 @@ class Session:
                 'level': self.level.tolist(),
                 'scans': [s.to_json() for s in self.scans],
                 'tree': self.tree.to_json(),
+                'zero': self.zero, 'measures': _jsonable(self.measures),
                 'pairs': [_jsonable(e) for e in auto],
                 'manual_edges': [_jsonable(e) for e in manual]}
         for e in proj['scans']:
@@ -469,7 +474,16 @@ class Session:
                       None if sc.pose is None else np.round(sc.pose, 6).tobytes()]
         for e in self.edges:
             parts += [e['A'], e['B'], e.get('user'), e.get('method')]
+        parts += [None if self.zero is None else round(self.zero['z'], 6), len(self.measures)]
         return hash(tuple(parts))
+
+    def zero_z(self):
+        """Высота нулевого уровня в общей системе: заданная или пол опорного скана (иначе 0)."""
+        if self.zero is not None:
+            return float(self.zero['z'])
+        import measure
+        z = measure.default_zero(self)
+        return 0.0 if z is None else z
 
     def placed(self):
         return [s for s in self.scans if s.pose is not None]

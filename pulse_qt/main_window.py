@@ -27,6 +27,7 @@ import manual_clean
 import quality
 import dynamic
 import surface
+import measure
 from scan_session import Session
 from scan_tree import KINDS
 
@@ -38,6 +39,7 @@ from .tree_panel import TreePanel, short
 from .inspector import Inspector, ManualPanel, CleanPanel
 from .surface_panel import SurfacePanel
 from .ribbon import Ribbon
+from .control_panel import ControlPanel
 from .dock import Dock
 from .dialogs import ScannerImportDialog, BagImportDialog, ExportDialog, AskDialog
 
@@ -97,6 +99,8 @@ class Viewport(QWidget):
     def __init__(self, win):
         super().__init__()
         t = W.THEME
+        self.win = win
+        self.labels = []                         # [(QLabel, точка мира)] — подписи замеров
         self.view = CloudView(self)
         self.crumb = W.Glass(self)
         self.crumb_icon = QLabel()
@@ -165,6 +169,31 @@ class Viewport(QWidget):
         self.banner.hide()
         self.view.cameraChanged.connect(self.update_overlays)
 
+    def set_labels(self, items):
+        """Подписи в точках мира: [(точка, текст)] — плашки поверх 3D-вида."""
+        for lab, _ in self.labels:
+            lab.hide()
+            lab.deleteLater()
+        self.labels = []
+        for pt, text in items:
+            lab = QLabel(text, self)
+            lab.setObjectName('MLabel')
+            lab.adjustSize()
+            lab.show()
+            self.labels.append((lab, np.asarray(pt, float)))
+        self._place_labels()
+
+    def _place_labels(self):
+        if not self.labels:
+            return
+        P = np.array([p for _, p in self.labels])
+        s_, _, front = self.view.project(P)
+        for (lab, _), (x, y), f in zip(self.labels, s_, front):
+            ok = f and -50 < x < self.width() + 50 and -20 < y < self.height() + 20
+            lab.setVisible(bool(ok))
+            if ok:
+                lab.move(int(x - lab.width() / 2), int(y - lab.height() - 6))
+
     def set_banner(self, text):
         self.banner_text.setText(text)
         self.banner.setVisible(bool(text))
@@ -205,7 +234,10 @@ class Viewport(QWidget):
             self.crumb_text.setText(text)
             self.crumb_icon.setPixmap(t.icon(ic).pixmap(16, 16))
         c = v.eye() if v.fly else v.center()
-        self.coord_text.setText(f'x {c[0]:.2f}   y {c[1]:.2f}   z {c[2]:.2f}')
+        z0 = getattr(self.win, 'z0', None)
+        el = '' if z0 is None else f'   отм. {measure.elevation(c[2], z0)}'
+        self.coord_text.setText(f'x {c[0]:.2f}   y {c[1]:.2f}   z {c[2]:.2f}{el}')
+        self._place_labels()
         # масштабная линейка: метров на 56 пикселей у центра вращения
         mpp = v.world_per_px()
         target = 56 * mpp
@@ -263,6 +295,10 @@ class MainWindow(QMainWindow):
         self.ghost_shown = set()
         self.clean_scan = None
         self.dyn_masks = {}                      # найденные движущиеся объекты: id скана → маска res['down']
+        self.measure_mode = None                 # замер: dist | height | plane | poly | zero
+        self._mpts, self._mplane, self._mclick = [], None, None
+        self.zero_show = True
+        self.z0 = None
         self.points_hidden = False               # «Поверхность»: показывать только сетки
         self.plan_step = 1.0                     # шаг поворота плана, град
         # дерево, слои
@@ -347,7 +383,9 @@ class MainWindow(QMainWindow):
         self.surface_panel = SurfacePanel()
         self.surface_panel.action.connect(self.on_surface_action)
         self.surface_panel.closed.connect(lambda: self.set_mode('inspect'))
-        for w in (self.inspector, self.manual, self.clean, self.surface_panel):
+        self.control = ControlPanel()
+        self.control.action.connect(self.on_control_action)
+        for w in (self.inspector, self.manual, self.clean, self.surface_panel, self.control):
             self.right.addWidget(w)
         rw = QFrame()
         rw.setObjectName('PanelRight')
@@ -462,6 +500,29 @@ class MainWindow(QMainWindow):
         rb_['openings'] = g.small('mdi6.window-closed-variant', 'Проёмы', lambda: self._toggle_layer('openings'),
                                   checkable=True)
         rb_['ghosts'] = g.small('mdi6.blur', 'Отражения', lambda: self._toggle_layer('ghosts'), checkable=True)
+        g = rb.add_group(pg, 'Нулевой уровень')
+        self.b_zero = g.big('mdi6.format-vertical-align-bottom', 'Нулевой\nуровень',
+                            lambda: self.on_control_action('zero_show', not self.zero_show),
+                            'Показать нулевой уровень (сетка 1 м на нём); отметки считаются от него', checkable=True)
+        g.small('mdi6.floor-plan', 'По полу', lambda: self.on_control_action('zero_floor', None),
+                'Пол опорного скана (по умолчанию)')
+        g.small('mdi6.cursor-default-click-outline', 'Кликом', lambda: self.set_measure_mode('zero'),
+                'Щелчок по точке облака — её высота станет ±0.000')
+        g.small('mdi6.numeric', 'Числом…', lambda: self.on_control_action('zero_number', None))
+        g = rb.add_group(pg, 'Замеры')
+        rm = {}
+        rm['dist'] = g.big('mdi6.ruler', 'Расстояние', lambda: self.set_measure_mode('dist'),
+                           'Расстояние между двумя точками облака (длина, по горизонтали, перепад, уклон)',
+                           checkable=True)
+        rm['height'] = g.small('mdi6.arrow-expand-vertical', 'Отметка', lambda: self.set_measure_mode('height'),
+                               'Высота точки от нулевого уровня', checkable=True)
+        rm['plane'] = g.small('mdi6.format-align-middle', 'До плоскости', lambda: self.set_measure_mode('plane'),
+                              'Щелчок по стене / полу, затем по точке — расстояние по нормали', checkable=True)
+        rm['poly'] = g.small('mdi6.vector-polyline', 'Ломаная / площадь', lambda: self.set_measure_mode('poly'),
+                             'Точки подряд; щелчок по первой — замкнуть (площадь); двойной щелчок или Enter — '
+                             'закончить', checkable=True)
+        g.small('mdi6.delete-sweep-outline', 'Очистить замеры', lambda: self.on_control_action('measure_clear', None))
+        self._rb_measure = rm
 
         # ── Чистка ──
         pg = rb.add_tab('clean', 'Чистка')
@@ -510,13 +571,13 @@ class MainWindow(QMainWindow):
         return rb
 
     # ── лента: вкладки ↔ правая панель ───────────────────────────────────
-    TAB_OF_MODE = {'manual': 'reg', 'clean': 'clean', 'surface': 'result'}
+    TAB_OF_MODE = {'manual': 'reg', 'clean': 'clean', 'surface': 'result', 'control': 'control'}
 
     def on_tab(self, key):
         self.settings.setValue('ribbon_collapsed', self.ribbon.collapsed)
         if key in ('project', 'reg', 'control'):
             self._free_tab = key
-        want = {'clean': 'clean', 'result': 'surface'}.get(key)
+        want = {'clean': 'clean', 'result': 'surface', 'control': 'control'}.get(key)
         if want is None:
             want = 'manual' if (key == 'reg' and self.moving is not None) else 'inspect'
         if want != self.mode:
@@ -529,7 +590,7 @@ class MainWindow(QMainWindow):
         if rb is None:
             return
         tab = self.TAB_OF_MODE.get(self.mode)
-        if tab is None and rb.current() in ('clean', 'result'):
+        if tab is None and rb.current() in ('clean', 'result', 'control'):
             tab = getattr(self, '_free_tab', 'project')
         if tab is not None and rb.current() != tab:
             rb.set_tab(tab)
@@ -538,6 +599,9 @@ class MainWindow(QMainWindow):
         self.b_pivot.setChecked(self.pivot is not None or self.pivot_pick)
         for k, b in self._rb_toggles.items():
             b.setChecked(self.tree_panel.layer(k))
+        for k, b in self._rb_measure.items():
+            b.setChecked(self.measure_mode == k)
+        self.b_zero.setChecked(self.zero_show)
 
     def _toggle_layer(self, key):
         sw = self.tree_panel.switches[key]
@@ -570,6 +634,178 @@ class MainWindow(QMainWindow):
             self.set_status('выберите пару в таблице «Пары»')
             return
         self.on_pair_action(state, i)
+
+    # ── нулевой уровень и замеры ─────────────────────────────────────────
+    MEASURE_HINTS = {'dist': 'Расстояние: щёлкните две точки облака',
+                     'height': 'Отметка: щёлкните точку облака',
+                     'plane': 'До плоскости: щёлкните по стене или полу, затем по точке',
+                     'poly': 'Ломаная: щёлкайте точки; по первой — замкнуть, двойной щелчок / Enter — закончить',
+                     'zero': 'Нулевой уровень: щёлкните точку облака — её высота станет ±0.000'}
+
+    def set_measure_mode(self, mode):
+        if mode is not None and mode == self.measure_mode:
+            mode = None
+        if mode is not None and self.mode != 'control':
+            self.set_mode('control')
+        self.measure_mode = mode
+        self._mpts, self._mplane = [], None
+        self.view.remove_prefix('mplane')
+        self._draw_measures()
+        self.control.mode_hint.setText(self.MEASURE_HINTS.get(mode, ''))
+        self._banner()
+        if mode:
+            self.set_status(self.MEASURE_HINTS[mode] + ' (Esc — отмена)', log=False)
+
+    def refresh_control(self):
+        self.z0 = self.s.zero_z() if self.s.scans else 0.0
+        z = self.s.zero
+        src = {'floor': 'пол опорного скана', 'point': 'по точке облака', 'manual': 'задан числом'}
+        text = (src.get(z['source'], z['source']) if z else
+                ('пол опорного скана (по умолчанию)' if measure.default_zero(self.s) is not None
+                 else 'пол не найден — уровень 0 общей системы'))
+        self.control.set_zero(self.z0, text, self.zero_show)
+        self.control.set_measures(self.s.measures, self.z0)
+
+    def _set_zero(self, z, source):
+        self.s.zero = None if source is None else {'z': float(z), 'source': source}
+        self.z0 = self.s.zero_z()
+        self.update_grid()
+        self._draw_measures()
+        self.refresh_control()
+        self.vp.update_overlays()
+        self.set_status(f'нулевой уровень: z = {self.z0:.3f} м ({source or "пол опорного скана"})')
+
+    def on_control_action(self, name, arg):
+        if name == 'zero_show':
+            self.zero_show = bool(arg)
+            self.update_grid()
+            self._draw_measures()
+            self.refresh_control()
+            self._sync_ribbon()
+        elif name == 'zero_floor':
+            if measure.default_zero(self.s) is None:
+                self.set_status('пол опорного скана не найден')
+                return
+            self._set_zero(0, None)
+        elif name == 'zero_set':
+            self._set_zero(arg, 'manual')
+        elif name == 'zero_number':
+            d = AskDialog(self, 'Нулевой уровень', [('Высота нулевого уровня z, м (общая система)', 'text',
+                                                     f'{self.s.zero_z():.3f}', None)], 'mdi6.numeric', 'Задать')
+            if d.exec():
+                try:
+                    self._set_zero(float(d.values()[0].replace(',', '.')), 'manual')
+                except ValueError:
+                    self.set_status('нужно число, например 0.150')
+        elif name == 'measure_delete':
+            if 0 <= arg < len(self.s.measures):
+                self.s.measures.pop(arg)
+                self._draw_measures()
+                self.refresh_control()
+        elif name == 'measure_clear':
+            self.s.measures = []
+            self._mpts, self._mplane = [], None
+            self._draw_measures()
+            self.refresh_control()
+
+    def measure_click(self, x, y):
+        """Щелчок по облаку в режиме замера (вызывается и из тестов)."""
+        hit = self.view.pick_point(x, y, names={n for n in self.view.items if n.startswith('scan:')})
+        if hit is None:
+            self.set_status('мимо облака', log=False)
+            return None
+        name, p = hit
+        p = np.asarray(p, float)
+        return self.measure_point(p, name)
+
+    def measure_point(self, p, cloud=None):
+        mode = self.measure_mode
+        if mode == 'zero':
+            self._set_zero(p[2], 'point')
+            self.set_measure_mode(None)
+            return p
+        if mode == 'plane' and self._mplane is None:
+            sc = self.s.by_id(cloud[5:]) if cloud and cloud.startswith('scan:') else None
+            if sc is None or not sc.analyzed:
+                return None
+            T = self.s.Tc(sc)
+            f = self.s.pick_feature(sc, pr.transform(p[None], np.linalg.inv(T))[0], 'plane')
+            if f is None:
+                self.set_status('здесь нет найденной плоскости — щёлкните по стене или полу')
+                return None
+            n = T[:3, :3] @ np.asarray(f['normal'])
+            c = float(f['offset'] + n @ T[:3, 3])
+            self._mplane = {'n': n.tolist(), 'c': c, 'name': f"{KIND_RU.get(f.get('kind'), 'плоскость')} "
+                            f"{f['area']:.1f} м² ({short(sc.id)})", 'scan': sc.id, 'index': f['index']}
+            pl = next(q for q in sc.planes if q.id == f['index'])
+            self.view.set_cloud('mplane', sc.res['down'][pl.inliers], (0.36, 0.61, 1.0), T, size=4)
+            self.set_status(f"плоскость: {self._mplane['name']} — теперь точка")
+            return p
+        self._mpts.append(p.tolist())
+        need = {'dist': 2, 'height': 1, 'plane': 1}.get(mode)
+        if mode == 'poly' and len(self._mpts) >= 4:
+            s_, _, _ = self.view.project(np.array([self._mpts[0], self._mpts[-1]]))
+            if np.hypot(*(s_[0] - s_[1])) < 10:          # щелчок по первой — замкнуть
+                self._mpts.pop()
+                return self.measure_finish(closed=True)
+        if need is not None and len(self._mpts) >= need:
+            m = {'type': mode, 'pts': self._mpts}
+            if mode == 'plane':
+                m['plane'] = self._mplane
+                self.view.remove('mplane')
+            self.s.measures.append(m)
+            self._mpts, self._mplane = [], None
+            self.refresh_control()
+            self.set_status(f"{measure.TITLES[mode]}: {measure.label(m, self.z0)}")
+        self._draw_measures()
+        return p
+
+    def measure_finish(self, closed=False):
+        if self.measure_mode != 'poly' or len(self._mpts) < 2:
+            return None
+        m = {'type': 'poly', 'pts': self._mpts, 'closed': bool(closed and len(self._mpts) >= 3)}
+        self.s.measures.append(m)
+        self._mpts = []
+        self._draw_measures()
+        self.refresh_control()
+        self.set_status(f"Ломаная: {measure.label(m, self.z0)}")
+        return m
+
+    def _draw_measures(self):
+        """Замеры поверх облаков: линии, точки, подписи; текущий незаконченный — голубым."""
+        self.view.remove_prefix('meas:')
+        z0 = self.s.zero_z() if self.s.scans else 0.0
+        self.z0 = z0
+        items = [(m, False) for m in self.s.measures]
+        if self._mpts:
+            items.append(({'type': self.measure_mode, 'pts': self._mpts}, True))
+        labels = []
+        for k, (m, live) in enumerate(items):
+            P = np.asarray(m['pts'], float)
+            col = (0.45, 0.85, 1.0) if live else (1.0, 0.85, 0.29)
+            segs, V = [], list(P)
+            t = m['type']
+            if t in ('dist', 'poly') and len(P) >= 2:
+                segs = [[i, i + 1] for i in range(len(P) - 1)]
+                if m.get('closed'):
+                    segs.append([len(P) - 1, 0])
+            elif t == 'height':
+                V.append([P[0][0], P[0][1], z0])
+                segs = [[0, 1]]
+            elif t == 'plane' and 'plane' in m:
+                V.append(measure.point_plane(P[0], m['plane']['n'], m['plane']['c'])['foot'])
+                segs = [[0, 1]]
+            if segs:
+                self.view.set_lines(f'meas:l{k}', np.array(V), segs, None, None, 2.5, col, on_top=True)
+            self.view.set_cloud(f'meas:p{k}', P, col, size=7, on_top=True)
+            if not live:
+                txt = f'{k + 1}  {measure.label(m, z0)}'
+                at = P.mean(axis=0) if t != 'height' else P[0]
+                labels.append((at, txt))
+        if self.zero_show and self.s.scans and self.tree_panel.layer('grid'):
+            lo, hi = self._visible_bbox()
+            labels.append(([lo[0] - 1.5, lo[1] - 1.5, z0], '±0.000'))
+        self.vp.set_labels(labels)
 
     def _set_plan_step(self, v):
         self.plan_step = v
@@ -661,7 +897,8 @@ class MainWindow(QMainWindow):
                         ('[', lambda: self.set_point_size(self.view.point_px - 1)),
                         (']', lambda: self.set_point_size(self.view.point_px + 1)),
                         ('Delete', self.on_erase), ('Backspace', self.on_erase),
-                        ('Ctrl+Z', self.on_undo_erase)):
+                        ('Ctrl+Z', self.on_undo_erase), ('Return', self.measure_finish),
+                        ('Enter', self.measure_finish)):
             sc = QShortcut(QKeySequence(key), self)
             sc.setContext(Qt.WindowShortcut)
             sc.activated.connect(fn)
@@ -826,6 +1063,7 @@ class MainWindow(QMainWindow):
         self.refresh_stats()
         self.quality_refresh()
         self._draw_meshes()
+        self._draw_measures()
 
     def apply_visibility(self):
         for sc in self.s.scans:
@@ -854,7 +1092,9 @@ class MainWindow(QMainWindow):
             return
         lo, hi = self._visible_bbox()
         pad = 2.0
-        self.view.set_grid(lo[2] - 0.02, lo[:2] - pad, hi[:2] + pad, self.theme.rgb('grid'), 1.0,
+        self.z0 = self.s.zero_z() if self.s.scans else None
+        z = self.z0 if (self.z0 is not None and self.zero_show) else lo[2] - 0.02
+        self.view.set_grid(z, lo[:2] - pad, hi[:2] + pad, self.theme.rgb('grid'), 1.0,
                            0.9 if self.theme.dark else 1.0)
 
     def view_top(self):
@@ -1504,8 +1744,12 @@ class MainWindow(QMainWindow):
             self._sync_ribbon()
             return
         self.mode = mode
-        self.right.setCurrentWidget({'inspect': self.inspector, 'manual': self.manual,
-                                     'clean': self.clean, 'surface': self.surface_panel}[mode])
+        self.right.setCurrentWidget({'inspect': self.inspector, 'manual': self.manual, 'clean': self.clean,
+                                     'surface': self.surface_panel, 'control': self.control}[mode])
+        if mode != 'control' and self.measure_mode:
+            self.set_measure_mode(None)
+        if mode == 'control':
+            self.refresh_control()
         if mode == 'surface':
             self.refresh_surface()
         if mode == 'clean':
@@ -1521,6 +1765,8 @@ class MainWindow(QMainWindow):
             text = ''
         elif self.select_mode:
             text = 'Выделение: тяните левой кнопкой, Shift — добавить, Delete — удалить, Esc — выйти'
+        elif self.measure_mode:
+            text = self.MEASURE_HINTS[self.measure_mode] + ' · Esc — отмена'
         elif self.mode == 'manual' and self.moving is not None and self.pivot is not None:
             text = (f'{short(self.fixed.id)} ← {short(self.moving.id)} · опорная точка закреплена: тяните '
                     f'кольца транспортира (Shift — точнее), Alt + тянуть — рыскание')
@@ -2263,6 +2509,16 @@ class MainWindow(QMainWindow):
         pos = ev.position()
         x, y = pos.x(), pos.y()
         manual = self.mode == 'manual' and self.moving is not None and self.T_moving is not None
+        if self.measure_mode and kind in ('press', 'release') and ev.button() == Qt.LeftButton:
+            if kind == 'press':
+                self._mclick = (x, y)
+                return False                             # перетаскивание — по-прежнему вращение вида
+            if kind == 'release' and self._mclick is not None:
+                x0, y0 = self._mclick
+                self._mclick = None
+                if abs(x - x0) + abs(y - y0) < 5:
+                    self.measure_click(x, y)
+                return False
         if kind == 'press' and ev.button() == Qt.LeftButton:
             if manual and self.pivot_pick and mods & (Qt.ControlModifier | Qt.MetaModifier):
                 want = self.fixed if self.pivot_A is None else self.moving
@@ -2360,6 +2616,9 @@ class MainWindow(QMainWindow):
         return False
 
     def _dblclick(self, x, y):
+        if self.measure_mode == 'poly':
+            self.measure_finish()
+            return
         hit = self.view.pick_point(x, y)
         if hit is not None and not self.view.fly:
             self.view.set_center(hit[1])
@@ -2969,6 +3228,14 @@ class MainWindow(QMainWindow):
 
     # ── прочее ───────────────────────────────────────────────────────────
     def on_escape(self):
+        if self.measure_mode:
+            if self._mpts or self._mplane is not None:
+                self._mpts, self._mplane = [], None
+                self._draw_measures()
+                self.set_status('замер отменён')
+            else:
+                self.set_measure_mode(None)
+            return
         if getattr(self, '_mesh_building', False):
             self._mesh_cancel = True
             self.set_status('построение сетки останавливается…')
