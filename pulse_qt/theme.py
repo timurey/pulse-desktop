@@ -257,6 +257,8 @@ QToolButton#RSmall {{ min-height: 20px; max-height: 22px; padding: 0 8px 0 4px; 
 QToolButton#RSmall:hover {{ background: {c['bg3']}; color: {c['ink']}; }}
 QToolButton#RSmall:checked {{ background: {c['accentbg']}; color: {c['accent']}; }}
 #MLabel {{ background: {c['glass']}; border: 1px solid {c['line2']}; border-radius: 5px; padding: 2px 6px; font-family: "{MONO}"; font-size: 11px; color: {c['ink']}; }}
+QToolButton#CubeBtn {{ background: transparent; border: 0; border-radius: 4px; padding: 0; min-height: 20px; }}
+QToolButton#CubeBtn:hover {{ background: {c['bg3']}; }}
 #Glass {{ background: {c['glass']}; border: 1px solid {c['line']}; border-radius: 8px; }}
 #Glass QLabel {{ color: {c['ink2']}; font-size: 12px; background: transparent; }}
 #GlassMono {{ font-family: "{MONO}"; font-size: 11px; color: {c['ink3']}; background: transparent; }}

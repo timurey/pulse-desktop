@@ -128,6 +128,36 @@ def main():
     check('двойной клик — центр вращения на облаке', np.linalg.norm(v.center()[:2] - P[k, :2]) < 1.0,
           f'{v.center()[:2]} vs {P[k, :2]}')
 
+    # куб навигации: грань «верх» — X вправо, Y вверх; ±90° вокруг оси взгляда; соседняя грань
+    cube = w.vp.cube
+    def settle():
+        while cube._anim is not None:
+            pump(0.05)
+    w.view_3d()
+    pump()
+    cube.snap(('face', 0))
+    settle()
+    R = v.basis()
+    check('куб: «верх» — X вправо, Y вверх', np.allclose(R, np.eye(3), atol=1e-6), np.round(R, 3).tolist())
+    cube.command('cw')
+    settle()
+    R = v.basis()
+    check('куб: +90° вокруг оси взгляда', np.allclose(R[:, 0], [0, 1, 0], atol=1e-6) and np.allclose(R[:, 2], [0, 0, 1], atol=1e-6))
+    cube.command('ccw')
+    settle()
+    check('куб: −90° возвращает', np.allclose(v.basis(), np.eye(3), atol=1e-6))
+    cube.command('down')
+    settle()
+    R = v.basis()
+    check('куб: соседняя грань снизу — «перед», Z вверх', np.allclose(R[:, 2], [0, -1, 0], atol=1e-6)
+          and np.allclose(R[:, 1], [0, 0, 1], atol=1e-6))
+    cube.snap(('face', 1))
+    settle()
+    R = v.basis()
+    check('куб: «низ» — X вправо', np.allclose(R[:, 0], [1, 0, 0], atol=1e-6) and np.allclose(R[:, 2], [0, 0, -1], atol=1e-6))
+    w.view_top()
+    pump()
+
     # ручная стыковка: Ctrl+клик по полу опорного скана
     moving = next(x for x in sess.scans if x.id != sess.frame and x.pose is not None)
     w.start_manual(fixed.id, moving.id)

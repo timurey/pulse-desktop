@@ -357,6 +357,7 @@ class MainWindow(QMainWindow):
         self.view.dblclick_hook = self._dblclick
         self.view.statusMessage.connect(self.set_status)
         self.vp.cube.described.connect(lambda s: self.set_status(s, log=False))
+        self.vp.cube.homeRequested.connect(self.view_3d)
         self.vsplit.addWidget(self.vp)
         self.dock = Dock()
         self.dock.pairSelected.connect(self.on_pair_selected)

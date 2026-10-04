@@ -8,7 +8,7 @@ from PySide6.QtGui import QPainter, QColor, QImage, QPixmap
 from PySide6.QtWidgets import (QWidget, QLabel, QHBoxLayout, QVBoxLayout, QGridLayout, QPushButton,
                                QToolButton, QFrame, QButtonGroup, QSizePolicy)
 
-from view_cube import ViewCube, slerp_dir
+from view_cube import ViewCube, look_from, FACES
 
 # общая тема (pulse_qt.app задаёт при старте) — виджеты рисуют себя её цветами
 THEME = None
@@ -272,19 +272,75 @@ class Glass(QFrame):
 
 
 # ── куб навигации поверх 3D-вида ───────────────────────────────────────────
+def _snap_basis(R):
+    """Базис, почти совпадающий с осями, — точно по осям (после поворотов на 90° копится ошибка)."""
+    R = np.asarray(R, float)
+    S = np.zeros((3, 3))
+    for j in range(3):
+        i = int(np.argmax(np.abs(R[:, j])))
+        if abs(R[i, j]) < 0.999:
+            return R
+        S[i, j] = np.sign(R[i, j])
+    return S
+
+
+def _slerp_basis(R0, R1, t):
+    """Плавный поворот базиса камеры R0 → R1 (по кратчайшей оси)."""
+    Rd = R1 @ R0.T
+    c = np.clip((np.trace(Rd) - 1) / 2, -1, 1)
+    ang = np.arccos(c)
+    if ang < 1e-6:
+        return R1
+    if abs(np.pi - ang) < 1e-4:                         # поворот на 180°: ось — собственный вектор
+        w, v = np.linalg.eigh((Rd + np.eye(3)) / 2)
+        ax = v[:, -1]
+    else:
+        ax = np.array([Rd[2, 1] - Rd[1, 2], Rd[0, 2] - Rd[2, 0], Rd[1, 0] - Rd[0, 1]]) / (2 * np.sin(ang))
+    K = np.array([[0, -ax[2], ax[1]], [ax[2], 0, -ax[0]], [-ax[1], ax[0], 0]])
+    a = ang * t
+    return (np.eye(3) + np.sin(a) * K + (1 - np.cos(a)) * K @ K) @ R0
+
 class ViewCubeWidget(QFrame):
     """
     Куб из view_cube.py (рисование Pillow) на стеклянной плашке: клик по грани,
     ребру или углу — плавный поворот вида; перетаскивание — вращение.
     """
     described = Signal(str)
+    homeRequested = Signal()
+
+    # «верх» экрана для видов по граням: сверху/снизу — X вправо (Y вверх / вниз), сбоку — Z вверх
+    FACE_UP = {(0, 0, 1): (0, 1, 0), (0, 0, -1): (0, -1, 0)}
 
     def __init__(self, view, font_path, parent=None):
         super().__init__(parent)
         self.setObjectName('Glass')
         self.view = view
         self.cube = ViewCube(font_path)
-        self.setFixedSize(112, 112)
+        self.setFixedSize(132, 132)
+        t = THEME
+        self._btns = {}
+        for key, ic, tip in (('home', 'mdi6.home-outline', 'Вид 3D (домой)'),
+                             ('ccw', 'mdi6.rotate-left', 'Повернуть вид на −90° вокруг оси взгляда'),
+                             ('cw', 'mdi6.rotate-right', 'Повернуть вид на +90° вокруг оси взгляда'),
+                             ('up', 'mdi6.menu-up', 'Соседняя грань сверху'),
+                             ('down', 'mdi6.menu-down', 'Соседняя грань снизу'),
+                             ('left', 'mdi6.menu-left', 'Соседняя грань слева'),
+                             ('right', 'mdi6.menu-right', 'Соседняя грань справа')):
+            b = QToolButton(self)
+            b.setObjectName('CubeBtn')
+            b.setIcon(t.icon(ic, 'ink3', 'accent'))
+            b.setIconSize(QSize(16, 16))
+            b.setFixedSize(20, 20)
+            b.setToolTip(tip)
+            b.setCursor(Qt.PointingHandCursor)
+            b.setFocusPolicy(Qt.NoFocus)
+            b.clicked.connect(lambda _=False, k=key: self.command(k))
+            self._btns[key] = b
+        W_, H_ = self.width(), self.height()
+        pos = {'home': (3, 3), 'ccw': (W_ - 45, 3), 'cw': (W_ - 23, 3), 'up': (W_ // 2 - 10, 2),
+               'down': (W_ // 2 - 10, H_ - 22), 'left': (2, H_ // 2 - 10), 'right': (W_ - 22, H_ // 2 - 10)}
+        for k, (x, y) in pos.items():
+            self._btns[k].move(x, y)
         self.setMouseTracking(True)
         self.setCursor(Qt.PointingHandCursor)
         self._key = None
@@ -356,21 +412,52 @@ class ViewCubeWidget(QFrame):
         self._drag = None
 
     def snap(self, h):
-        R = self.view.basis()
+        """Клик по грани / ребру / углу: вид строго по осям, «верх» экрана выровнен."""
         e1 = ViewCube.snap_direction(h)
-        up_hint = R[:, 1] if abs(e1[2]) > 0.99 else (0, 0, 1)
-        self._anim = (R[:, 2].copy(), e1, time.time(), 0.32, up_hint)
-        self._timer.start()
+        if h[0] == 'face':
+            up = self.FACE_UP.get(tuple(int(round(x)) for x in FACES[h[1]][0]), (0, 0, 1))
+        else:
+            up = (0, 0, 1) if abs(e1[2]) < 0.99 else self.view.basis()[:, 1]
+        self.animate_to(look_from(e1, up))
         self.described.emit(ViewCube.describe(h))
+
+    def command(self, key):
+        """Кнопки вокруг куба: домой, поворот ±90° вокруг оси взгляда, соседняя грань."""
+        if key == 'home':
+            self.homeRequested.emit()
+            return
+        R = self.view.basis()
+        x, y, z = R[:, 0], R[:, 1], R[:, 2]
+        if key in ('cw', 'ccw'):                         # поворот камеры вокруг оси взгляда
+            th = np.radians(90 if key == 'cw' else -90)
+            x2 = np.cos(th) * x + np.sin(th) * y
+            R1 = np.column_stack([x2, np.cross(z, x2), z])
+            self.described.emit('вид повёрнут на ' + ('+90°' if key == 'cw' else '−90°'))
+        else:                                            # грань сверху / снизу / слева / справа — вперёд
+            nz = {'up': y, 'down': -y, 'left': -x, 'right': x}[key]
+            if key in ('up', 'down'):
+                R1 = np.column_stack([x, np.cross(nz, x), nz])
+            else:
+                R1 = np.column_stack([np.cross(y, nz), y, nz])
+        self.animate_to(_snap_basis(R1))
+
+    def animate_to(self, R1, dur=0.32):
+        self._anim = (self.view.basis().copy(), np.asarray(R1, float), time.time(), dur)
+        self._timer.start()
 
     def _tick(self):
         if self._anim is None:
             self._timer.stop()
             return
-        e0, e1, t0, dur, up_hint = self._anim
+        R0, R1, t0, dur = self._anim
         p = min(1.0, (time.time() - t0) / dur)
         ease = 1 - (1 - p) ** 3
-        self.view.set_view_dir(slerp_dir(e0, e1, ease), up_hint)
+        R = _slerp_basis(R0, R1, ease) if p < 1.0 else R1
+        if self.view.fly:                                # в полёте — только взгляд
+            eye = self.view.eye()
+            self.view.look_at(eye - R[:, 2], eye, R[:, 1])
+        else:
+            self.view.set_basis(R)
         if p >= 1.0:
             self._anim = None
             self._timer.stop()
