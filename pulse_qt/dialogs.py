@@ -433,6 +433,61 @@ class ExportDialog(_Modal):
                 'scan_ids': self.scopes[self.scope.currentIndex()][1]}
 
 
+class PackDialog(_Modal):
+    """Упаковать проект для передачи: папка или один zip, место, оценка размера."""
+
+    def __init__(self, parent, name, base_dir, n_scans, scans_mb, missing):
+        super().__init__(parent, 'Упаковать для передачи', 'mdi6.package-variant-closed')
+        self.resize(560, 380)
+        self.name, self.base = name, Path(base_dir)
+        w, lay = _opts_panel()
+        lay.addWidget(W.label(
+            f'Будет собрано: проект .pulse (по имени zip / папки), сканы ({n_scans} шт., ~{scans_mb:.0f} МБ) в папке scans/, кеш '
+            f'анализа и ПРОЧТИ.txt. Получатель открывает .pulse — без пересчёта анализа. Сетки поверхности не '
+            f'входят (их можно экспортировать отдельно).', 'Hint', wrap=True))
+        if missing:
+            lay.addWidget(W.label(f'Не найдены файлы сканов ({len(missing)}): {", ".join(missing[:4])}'
+                                  f'{" …" if len(missing) > 4 else ""} — в пакет не войдут.', 'Hint', wrap=True))
+        self.kind = W.Segmented([('одним zip-файлом', 'zip'), ('папкой', 'folder')], 'zip')
+        self.kind.changed.connect(self._kind)
+        lay.addWidget(W.field('Как упаковать', self.kind))
+        self.path = QLineEdit()
+        b = W.tool(W.THEME.icon('mdi6.folder-outline'), tip='Выбрать…', cb=self._browse, icon_only=True)
+        lay.addWidget(W.field('Куда', W.hbox(self.path, b, spacing=4)))
+        self.note = W.label('', 'Hint', wrap=True)
+        lay.addWidget(self.note)
+        lay.addStretch(1)
+        self.body.addWidget(w, 1)
+        self.b_ok.setText('Упаковать')
+        self.b_ok.setIcon(W.THEME.icon('mdi6.package-variant-closed', 'onaccent'))
+        self._kind('zip')
+
+    def _kind(self, k):
+        if k == 'zip':
+            self.path.setText(str(self.base / f'{self.name}.zip'))
+            self.note.setText('Один файл — удобно отправить. Получатель распаковывает его и открывает .pulse.')
+        else:
+            self.path.setText(str(self.base / f'{self.name}_передача'))
+            self.note.setText('Новая (пустая) папка: проект и scans/ внутри — удобно сразу продолжать работу.')
+
+    def _browse(self):
+        if self.kind.value() == 'zip':
+            p = QFileDialog.getSaveFileName(self, 'Zip-файл', self.path.text(), 'Zip (*.zip)')[0]
+        else:
+            p = QFileDialog.getExistingDirectory(self, 'Папка, в которой создать пакет', str(self.base))
+            if p:
+                p = str(Path(p) / f'{self.name}_передача')
+        if p:
+            self.path.setText(p)
+
+    def values(self):
+        p = Path(self.path.text().strip())
+        zip_ = self.kind.value() == 'zip'
+        if zip_ and p.suffix.lower() != '.zip':
+            p = p.with_suffix('.zip')
+        return {'path': p, 'zip': zip_}
+
+
 class AskDialog(_Modal):
     """Простой вопрос: поля [(подпись, 'text'|'combo', значение, варианты)]."""
 

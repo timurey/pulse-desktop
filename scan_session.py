@@ -307,8 +307,8 @@ class Session:
                     sc.cache_dirty = False
         return len(caches)
 
-    def save(self, path=None):
-        path = path or self.project_path
+    def _project_dict(self, path, scan_paths=None):
+        """Содержимое project.json; пути сканов — относительно файла проекта path."""
         auto = [e for e in self.edges if e.get('method') != 'manual']
         manual = [e for e in self.edges if e.get('method') == 'manual']
         proj = {'frame': self.frame, 'created': time.strftime('%Y-%m-%d %H:%M:%S'),
@@ -319,7 +319,85 @@ class Session:
                 'pairs': [_jsonable(e) for e in auto],
                 'manual_edges': [_jsonable(e) for e in manual]}
         for e in proj['scans']:
-            e['path'] = sp.rel_path(e['path'], path)
+            src = (scan_paths or {}).get(e['id'], e['path'])
+            e['path'] = sp.rel_path(src, path)
+        return proj
+
+    def pack(self, dest, as_zip=False, progress=None):
+        """
+        Проект для передачи другому человеку: папка (или один zip) с проектом .pulse,
+        всеми сканами в scans/ (с их .json и .dyn.npy), полным кешем анализа и ПРОЧТИ.txt.
+        Пути в проекте — относительные, поэтому пакет открывается на любой машине и ОС.
+        Открытый сеанс не меняется. → dict(path, scans, missing, size).
+        """
+        import shutil
+        import tempfile
+        import zipfile
+        dest = Path(dest)
+        name = dest.stem if as_zip else dest.name
+        tmp = Path(tempfile.mkdtemp(prefix='pulse_pack_')) if as_zip else None
+        root = (tmp / name) if as_zip else dest
+        if not as_zip and root.exists() and any(root.iterdir()):
+            raise FileExistsError(f'папка не пуста: {root}')
+        sdir = root / 'scans'
+        sdir.mkdir(parents=True, exist_ok=True)
+        say = progress or (lambda f, m: None)
+        mapping, missing, used = {}, [], set()
+        try:
+            for k, sc in enumerate(self.scans):
+                src = Path(sc.path)
+                say(0.8 * k / max(1, len(self.scans)), f'копирование {src.name}')
+                if not src.exists():
+                    missing.append(sc.id)
+                    continue
+                stem, n = src.stem, 2
+                while stem.lower() in used:            # одинаковые имена из разных папок
+                    stem, n = f'{src.stem}_{n}', n + 1
+                used.add(stem.lower())
+                dst = sdir / (stem + src.suffix)
+                shutil.copy2(src, dst)
+                for side, new in ((src.with_suffix('.json'), dst.with_suffix('.json')),
+                                  (src.with_name(src.stem + '.dyn.npy'), dst.with_name(stem + '.dyn.npy'))):
+                    if side.exists():
+                        shutil.copy2(side, new)
+                mapping[sc.id] = str(dst)
+            say(0.85, 'проект и кеш анализа')
+            pfile = root / f'{name}.pulse'
+            proj = self._project_dict(pfile, mapping)
+            proj['scans'] = [e for e in proj['scans'] if e['id'] in mapping]
+            caches = {sc.id: sc.to_cache() for sc in self.scans if sc.analyzed and sc.id in mapping}
+            keep = self.project_path if (self.project_path and project_store.is_archive(self.project_path)
+                                         and Path(self.project_path).exists()) else None
+            project_store.write_project(pfile, proj, caches, keep_from=keep)
+            (root / 'ПРОЧТИ.txt').write_text(
+                f'Проект Pulse Scan «{name}»\n\n'
+                f'Откройте {name}.pulse в Pulse Scan (scan_qt.py / run_qt.*): «Проект» → «Открыть».\n'
+                f'Сканы лежат в папке scans/ рядом с проектом — не переносите их отдельно от файла проекта.\n'
+                f'Внутри проекта сохранены позы и связи сканов, дерево, ручная чистка, нулевой уровень,\n'
+                f'сечение, замеры и кеш анализа (проект открывается без пересчёта).\n\n'
+                f'Сканов: {len(mapping)}. Упаковано {time.strftime("%Y-%m-%d %H:%M")}.\n', encoding='utf-8')
+            files = [f for f in root.rglob('*') if f.is_file()]
+            size = sum(f.stat().st_size for f in files)
+            out = pfile
+            if as_zip:
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                part = dest.with_name(dest.name + '.part')
+                with zipfile.ZipFile(part, 'w', zipfile.ZIP_DEFLATED, compresslevel=1) as z:
+                    for k, f in enumerate(files):
+                        say(0.88 + 0.12 * k / max(1, len(files)), f'архив: {f.name}')
+                        z.write(f, f'{name}/{f.relative_to(root).as_posix()}')
+                part.replace(dest)
+                out, size = dest, dest.stat().st_size
+            say(1.0, 'готово')
+            return {'path': str(out), 'project': pfile.name, 'scans': len(mapping), 'missing': missing,
+                    'size': size}
+        finally:
+            if tmp is not None:
+                shutil.rmtree(tmp, ignore_errors=True)
+
+    def save(self, path=None):
+        path = path or self.project_path
+        proj = self._project_dict(path)
         caches = {}
         if project_store.is_archive(path) or str(path).lower().endswith('.pulse'):
             same = self.project_path and Path(self.project_path).resolve() == Path(path).resolve()

@@ -35,10 +35,40 @@ def _safe(sid):
     return ''.join(c if c.isalnum() or c in '._-' else '_' for c in sid)
 
 
+def quick_hash(scan_path, block=1 << 20):
+    """Контрольная сумма первого и последнего мегабайта файла (быстро и для больших сканов)."""
+    import hashlib
+    h = hashlib.md5()
+    size = os.path.getsize(scan_path)
+    with open(scan_path, 'rb') as f:
+        h.update(f.read(block))
+        if size > 2 * block:
+            f.seek(size - block)
+            h.update(f.read(block))
+    return h.hexdigest()
+
+
 def scan_key(scan_path, up='auto'):
-    """Ключ кеша: файл скана (размер, дата) + версия алгоритмов + настройка вертикали."""
+    """
+    Ключ кеша: файл скана (размер, дата, контрольная сумма) + версия алгоритмов + вертикаль.
+    Дата нужна для старых кешей без суммы; при совпадении суммы дата не важна
+    (после распаковки переданного проекта из zip время файлов другое).
+    """
     st = os.stat(scan_path)
-    return {'size': st.st_size, 'mtime_ns': st.st_mtime_ns, 'version': CACHE_VERSION, 'up': up}
+    return {'size': st.st_size, 'mtime_ns': st.st_mtime_ns, 'version': CACHE_VERSION, 'up': up,
+            'qhash': quick_hash(scan_path)}
+
+
+def key_matches(saved, key):
+    """Подходит ли кеш с ключом saved к файлу с ключом key."""
+    if not saved:
+        return False
+    same = all(saved.get(k) == key.get(k) for k in ('size', 'version', 'up'))
+    if not same:
+        return False
+    if saved.get('qhash') and key.get('qhash'):
+        return saved['qhash'] == key['qhash']
+    return saved.get('mtime_ns') == key.get('mtime_ns')
 
 
 # ── чтение ───────────────────────────────────────────────────────────────
@@ -61,7 +91,7 @@ def read_cache(path, scan_id, key):
             if base + 'meta.json' not in names or base + 'arrays.npz' not in names:
                 return None
             meta = json.loads(z.read(base + 'meta.json').decode('utf-8'))
-            if meta.get('key') != key:
+            if not key_matches(meta.get('key'), key):
                 return None
             arrays = dict(np.load(io.BytesIO(z.read(base + 'arrays.npz'))))
             return meta, arrays
@@ -77,6 +107,7 @@ def _write_zip(path, project_bytes, caches, keep_from=None, drop_ids=()):
     """
     path = Path(path)
     replaced = {f'cache/{_safe(s)}/' for s in list(caches) + list(drop_ids)}
+    path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(suffix='.pulse.tmp', dir=str(path.parent))
     os.close(fd)
     try:
@@ -108,6 +139,7 @@ def _write_zip(path, project_bytes, caches, keep_from=None, drop_ids=()):
 def write_project(path, proj, caches=None, keep_from=None, drop_ids=()):
     """Сохранить проект: .pulse — архив (с кешем), .json — как раньше (без кеша)."""
     data = json.dumps(proj, indent=1, ensure_ascii=False).encode('utf-8')
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
     if Path(path).suffix.lower() == '.json':
         Path(path).write_bytes(data)
         return

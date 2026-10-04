@@ -42,7 +42,7 @@ from .surface_panel import SurfacePanel
 from .ribbon import Ribbon
 from .control_panel import ControlPanel
 from .dock import Dock
-from .dialogs import ScannerImportDialog, BagImportDialog, ExportDialog, AskDialog
+from .dialogs import ScannerImportDialog, BagImportDialog, ExportDialog, AskDialog, PackDialog
 
 KIND_HUE = {'floor': (0.30, 0.75, 0.40), 'ceiling': (0.35, 0.55, 1.0), 'wall': (1.0, 0.62, 0.20),
             'other': (0.6, 0.6, 0.6)}
@@ -432,6 +432,8 @@ class MainWindow(QMainWindow):
         g.big('mdi6.folder-outline', 'Открыть', self.on_open, 'Открыть проект (Ctrl+O)')
         g.big('mdi6.content-save-outline', 'Сохранить', self.on_save, 'Сохранить (Ctrl+S)')
         g.small('mdi6.content-save-edit-outline', 'Сохранить как…', self.on_save_as)
+        g.small('mdi6.package-variant-closed', 'Упаковать для передачи…', self.on_pack,
+                'Проект, все сканы и кеш анализа — одной папкой или zip-файлом для другого человека')
         g = rb.add_group(pg, 'Импорт')
         g.big('mdi6.access-point', 'Со\nсканера', self.on_import_scanner, 'Скачать записи со сканера и импортировать')
         g.big('mdi6.folder-open-outline', 'Bag', self.on_import_bags, 'Импорт bag из папки')
@@ -958,6 +960,7 @@ class MainWindow(QMainWindow):
                 ('Открыть проект…', self.on_open, 'mdi6.folder-outline', 'Ctrl+O'),
                 ('Сохранить', self.on_save, 'mdi6.content-save-outline', 'Ctrl+S'),
                 ('Сохранить как…', self.on_save_as, 'mdi6.content-save-edit-outline', 'Ctrl+Shift+S'),
+                ('Упаковать для передачи…', self.on_pack, 'mdi6.package-variant-closed', None),
                 None,
                 ('Импорт со сканера…', self.on_import_scanner, 'mdi6.access-point', None),
                 ('Импорт bag…', self.on_import_bags, 'mdi6.folder-open-outline', None),
@@ -1432,6 +1435,45 @@ class MainWindow(QMainWindow):
         self._update_title()
         self.set_status(f'Сохранено: {p}')
         return True
+
+    def on_pack(self):
+        """Упаковать проект для передачи другому человеку (Session.pack)."""
+        if not self.s.scans:
+            self.set_status('в проекте нет сканов')
+            return
+        name = Path(self.s.project_path).stem if self.s.project_path else 'проект'
+        base = Path(self.s.project_path).resolve().parent if self.s.project_path else Path.home() / 'Desktop'
+        missing = [short(sc.id) for sc in self.s.scans if not Path(sc.path).exists()]
+        mb = sum(Path(sc.path).stat().st_size for sc in self.s.scans if Path(sc.path).exists()) / 1e6
+        d = PackDialog(self, name, base, len(self.s.scans) - len(missing), mb, missing)
+        if not d.exec():
+            return
+        v = d.values()
+        if not v['zip'] and v['path'].exists() and any(v['path'].iterdir()):
+            QMessageBox.warning(self, 'Упаковать', f'Папка не пуста:\n{v["path"]}\nВыберите новую папку.')
+            return
+        sess = self.s
+
+        def done(r):
+            msg = (f"упаковано: {r['path']} — сканов {r['scans']}, {r['size'] / 1e6:.0f} МБ"
+                   + (f"; не найдены: {', '.join(short(x) for x in r['missing'])}" if r['missing'] else ''))
+            self.set_status(msg)
+            box = QMessageBox(self)
+            box.setWindowTitle('Проект упакован')
+            box.setText(f"{'Zip-файл' if v['zip'] else 'Папка'} готов{'' if v['zip'] else 'а'}: "
+                        f"{Path(r['path']).name if v['zip'] else Path(r['path']).parent.name}")
+            box.setInformativeText(f"Сканов: {r['scans']}, {r['size'] / 1e6:.0f} МБ. Передайте "
+                                   f"{'файл' if v['zip'] else 'папку целиком'}; получатель открывает "
+                                   f"{r['project']} в Pulse Scan.")
+            b_show = box.addButton('Показать в папке', QMessageBox.ActionRole)
+            box.addButton('OK', QMessageBox.AcceptRole)
+            box.exec()
+            if box.clickedButton() is b_show:
+                from PySide6.QtCore import QUrl
+                from PySide6.QtGui import QDesktopServices
+                target = Path(r['path']).parent
+                QDesktopServices.openUrl(QUrl.fromLocalFile(str(target)))
+        self.run_bg('упаковка проекта…', lambda p: sess.pack(v['path'], v['zip'], p), done)
 
     def on_add_scan(self):
         paths, _ = QFileDialog.getOpenFileNames(self, 'Добавить облако или bag', self._start_dir(),

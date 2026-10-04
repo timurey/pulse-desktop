@@ -59,10 +59,19 @@ class TestStore(unittest.TestCase):
         p = self.tmp / 'inv.pulse'
         s.save(p)
         time.sleep(0.01)
-        os.utime(self.paths[1], None)                  # скан «изменился»
+        os.utime(self.paths[0], None)                  # только дата — кеш остаётся (сумма та же)
+        with open(self.paths[1], 'r+b') as f:          # содержимое изменилось при том же размере
+            f.seek(-64, 2)
+            b = f.read(1)
+            f.seek(-64, 2)
+            f.write(bytes([b[0] ^ 0xFF]))
         s2 = Session.from_project(p)
         self.assertEqual(s2.load_cached(), 1)
+        self.assertTrue(s2.scans[0].from_cache)
         self.assertFalse(s2.scans[1].from_cache)
+        with open(self.paths[1], 'r+b') as f:          # вернуть как было
+            f.seek(-64, 2)
+            f.write(b)
 
     def test_update_cache_keeps_project(self):
         s = Session.from_scans(self.paths[:1])
