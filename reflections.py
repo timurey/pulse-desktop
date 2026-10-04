@@ -178,9 +178,8 @@ def main():
         print(Path(s).name)
         pts, report = clean_scan(s, args.up, verbose=True)
         if args.output and len(args.scans) == 1:
-            import open3d as o3d
-            o3d.io.write_point_cloud(args.output, o3d.geometry.PointCloud(
-                o3d.utility.Vector3dVector(pts)))
+            import fileio
+            fileio.write_cloud(args.output, pts)
 
 
 if __name__ == '__main__':

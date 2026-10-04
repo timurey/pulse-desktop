@@ -41,7 +41,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **Open3D закреплён на 0.19.0** (`requirements.txt`): в 0.20 нативное окно и режим `--web` показывают чёрный экран с артефактами на macOS 15.5 + Metal (M1 Max). При этом `render_to_image` работает — вероятно, из-за нового вывода SceneWidget через текстуру (см. Open3D #7446). Колёса 0.19.0 есть только для Python ≤3.12.
 
-**Целевые платформы — macOS, Windows, Linux.** Не используйте платформенно-зависимые вызовы без ветвления по `platform.system()` (см. `scan_gui.screen_size`, `capture_window`, `find_font`). Файлы читайте и пишите с `encoding='utf-8'`. В проектах храните пути относительно файла проекта (`scan_project.rel_path` / `abs_path`). CI: `.github/workflows/tests.yml` запускает тесты на трёх ОС.
+**Целевые платформы — macOS, Windows, Linux.** На Windows Open3D и pye57 не открывают пути не в ASCII: читайте и пишите облака и сетки только через `fileio.native_path` / `fileio.write_cloud` (`planes.load_points` уже так делает); `np.load` для `.npz` — через `with`, иначе файл нельзя удалить. Не используйте платформенно-зависимые вызовы без ветвления по `platform.system()` (см. `scan_gui.screen_size`, `capture_window`, `find_font`). Файлы читайте и пишите с `encoding='utf-8'`. В проектах храните пути относительно файла проекта (`scan_project.rel_path` / `abs_path`). CI: `.github/workflows/tests.yml` запускает тесты на трёх ОС.
 
 **Esc в Open3D закрывает окно** (`Window::OnKeyEvent` вызывает `Close()` раньше обработчика клавиш). Защита — `set_on_close`: окно закрывается только после подтверждения, а Esc распознаётся по времени последнего нажатия (`scan_gui._on_close`).
 

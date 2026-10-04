@@ -254,14 +254,8 @@ def merge(project, out, voxel=0.02, clean=True):
         pc = pc.voxel_down_sample(voxel)
     pts = np.asarray(pc.points)
     out = Path(out)
-    if out.suffix.lower() == '.e57':
-        import pye57
-        e57 = pye57.E57(str(out), mode='w')
-        e57.write_scan_raw({'cartesianX': pts[:, 0], 'cartesianY': pts[:, 1],
-                            'cartesianZ': pts[:, 2]})
-        e57.close()
-    else:
-        o3d.io.write_point_cloud(str(out), pc)
+    import fileio
+    fileio.write_cloud(out, pts)
     print(f"{out}: {len(pts):,} точек из {len(parts)} сканов")
 
 

@@ -256,19 +256,9 @@ def reconstruct(bag, voxel=DEFAULTS['voxel'], min_range=DEFAULTS['min_range'],
 
 def save_scan(P, path, meta=None):
     """Облако → .ply (или .pcd/.e57); метаданные — рядом, <имя>.json."""
-    import open3d as o3d
+    import fileio
     path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if path.suffix.lower() == '.e57':
-        import pye57
-        e57 = pye57.E57(str(path), mode='w')
-        P64 = np.asarray(P, np.float64)
-        e57.write_scan_raw({'cartesianX': P64[:, 0], 'cartesianY': P64[:, 1],
-                            'cartesianZ': P64[:, 2]})
-        e57.close()
-    else:
-        o3d.io.write_point_cloud(str(path), o3d.geometry.PointCloud(
-            o3d.utility.Vector3dVector(np.asarray(P, np.float64))))
+    fileio.write_cloud(path, P)
     if meta is not None:
         dyn = meta.pop('_dyn', None)                     # массив — не в метаданные (и не в проект)
         if dyn is not None:                              # оценка движущихся объектов, порядок точек файла

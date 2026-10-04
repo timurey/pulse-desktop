@@ -1232,14 +1232,8 @@ class Session:
             pc = pc.voxel_down_sample(voxel)
         pts = np.asarray(pc.points)
         path = Path(path)
-        if path.suffix.lower() == '.e57':
-            import pye57
-            e57 = pye57.E57(str(path), mode='w')
-            e57.write_scan_raw({'cartesianX': pts[:, 0], 'cartesianY': pts[:, 1],
-                                'cartesianZ': pts[:, 2]})
-            e57.close()
-        else:
-            o3d.io.write_point_cloud(str(path), pc)
+        import fileio
+        fileio.write_cloud(path, pts)
         if progress:
             progress(1.0, f"{path.name}: {len(pts):,} точек")
         return len(pts)

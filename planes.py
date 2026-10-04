@@ -42,19 +42,22 @@ def load_points(path) -> np.ndarray:
     """Nx3 float64 из .e57 / .pcd / .ply / .las / .laz / .npz (deskewed)."""
     path = Path(path)
     suf = path.suffix.lower()
+    from fileio import native_path                       # Windows: пути с кириллицей
     if suf == '.e57':
         import pye57
-        e57 = pye57.E57(str(path), mode='r')
-        parts = []
-        for i in range(e57.scan_count):
-            raw = e57.read_scan_raw(i)
-            parts.append(np.column_stack([raw['cartesianX'], raw['cartesianY'],
-                                          raw['cartesianZ']]))
-        e57.close()
+        with native_path(path) as q:
+            e57 = pye57.E57(q, mode='r')
+            parts = []
+            for i in range(e57.scan_count):
+                raw = e57.read_scan_raw(i)
+                parts.append(np.column_stack([raw['cartesianX'], raw['cartesianY'],
+                                              raw['cartesianZ']]))
+            e57.close()
         pts = np.vstack(parts)
     elif suf in ('.pcd', '.ply'):
         import open3d as o3d
-        pts = np.asarray(o3d.io.read_point_cloud(str(path)).points)
+        with native_path(path) as q:
+            pts = np.asarray(o3d.io.read_point_cloud(q).points)
     elif suf in ('.las', '.laz'):
         import laspy
         las = laspy.read(str(path))

@@ -185,8 +185,8 @@ def _run_child(method, P, N, params, cancel=None, tick=None, timeout=3600):
             proc.join(0.5)
         if not os.path.exists(out):
             return None
-        z = np.load(out)
-        return {k: z[k] for k in z.files}
+        with np.load(out) as z:                         # закрыть файл: на Windows иначе не удалить папку
+            return {k: z[k] for k in z.files}
 
 
 def export(mesh, path):
@@ -196,6 +196,8 @@ def export(mesh, path):
                                   o3d.utility.Vector3iVector(np.asarray(mesh['F'], np.int32)))
     m.compute_vertex_normals()
     m.compute_triangle_normals()
-    if not o3d.io.write_triangle_mesh(str(path), m):
-        raise OSError(f'не удалось записать {path}')
+    from fileio import native_path
+    with native_path(path, 'w') as q:
+        if not o3d.io.write_triangle_mesh(q, m):
+            raise OSError(f'не удалось записать {path}')
     return path
