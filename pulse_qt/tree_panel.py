@@ -332,6 +332,8 @@ class TreePanel(QFrame):
             act(f'Переместить выделенные ({len(many)}) в группу…', 'move', 'mdi6.folder-move-outline')
             act('Показать только выделенные', 'only', 'mdi6.eye-check-outline')
             m.addSeparator()
+            act(f'Удалить из проекта ({len(many)})…  ⌘/Ctrl+Delete', 'remove', 'mdi6.delete-outline')
+            m.addSeparator()
             act('Показать всё', 'show_all', 'mdi6.eye-outline')
             m.exec(self.tree.viewport().mapToGlobal(pos))
             return
@@ -339,12 +341,14 @@ class TreePanel(QFrame):
             if is_group:
                 act('Переименовать', 'rename', 'mdi6.pencil-outline')
                 act('Удалить группу (содержимое — родителю)', 'delete_group', 'mdi6.folder-remove-outline')
+                act('Удалить группу вместе со сканами…', 'remove', 'mdi6.delete-outline')
             else:
                 act('Сделать опорным', 'make_ref', 'mdi6.anchor')
                 act('Ручная стыковка', 'manual', 'mdi6.vector-combine')
                 act('Уточнить стыковку (автоподгонка)', 'refine', 'mdi6.auto-fix')
                 act('Найти кандидатов позы', 'candidates', 'mdi6.target')
                 act('Встать в точку скана (полёт)', 'fly_to', 'mdi6.airplane')
+                act('Удалить из проекта…  ⌘/Ctrl+Delete', 'remove', 'mdi6.delete-outline')
             m.addSeparator()
             act('Переместить в группу…', 'move', 'mdi6.folder-move-outline')
             act('Показать только это', 'only', 'mdi6.eye-check-outline')

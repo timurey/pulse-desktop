@@ -179,6 +179,18 @@ def main():
     w.tree_panel.rebuild()
     check('дерево: порядок восстановлен', kids(g0.id) == order0)
 
+    # удаление скана из проекта (подтверждение — «Да»)
+    from PySide6.QtWidgets import QMessageBox as _MB
+    q0 = _MB.question
+    _MB.question = staticmethod(lambda *a, **k: _MB.Yes)
+    victim = next(x for x in sess.scans if x.id != sess.frame and x.pose is not None)
+    n0, vid = len(sess.scans), victim.id
+    w.tree_panel.select_keys([vid])
+    w.remove_selected()
+    _MB.question = q0
+    check('удаление скана: из проекта, дерева и сцены', len(sess.scans) == n0 - 1 and sess.by_id(vid) is None
+          and vid not in w.tree_panel._items and not v.has(f'scan:{vid}'), w.st_text.text())
+
     # куб навигации: грань «верх» — X вправо, Y вверх; ±90° вокруг оси взгляда; соседняя грань
     cube = w.vp.cube
     def settle():

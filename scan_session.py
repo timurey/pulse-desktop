@@ -227,6 +227,7 @@ class Session:
         self.erase_undo = []         # [(scan_id, число добавленных областей)]
         self.tree = Tree()           # иерархия сканов (организация, видимость веток)
         self.meshes = {}             # построенные поверхности (surface.py): только в памяти, не сохраняются
+        self._removed_ids = set()    # удалённые из проекта сканы — их кеш не переносится при сохранении
         self.zero = None             # нулевой уровень {'z', 'source'} (общая система); None — пол опорного
         self.measures = []           # замеры (measure.py), точки в общей системе
         self.section = None          # сечение (section.py), общая система
@@ -368,7 +369,8 @@ class Session:
             caches = {sc.id: sc.to_cache() for sc in self.scans if sc.analyzed and sc.id in mapping}
             keep = self.project_path if (self.project_path and project_store.is_archive(self.project_path)
                                          and Path(self.project_path).exists()) else None
-            project_store.write_project(pfile, proj, caches, keep_from=keep)
+            project_store.write_project(pfile, proj, caches, keep_from=keep,
+                                        drop_ids=self._removed_ids | {sc.id for sc in self.scans if sc.id not in mapping})
             (root / 'ПРОЧТИ.txt').write_text(
                 f'Проект Pulse Scan «{name}»\n\n'
                 f'Откройте {name}.pulse в Pulse Scan (scan_qt.py / run_qt.*): «Проект» → «Открыть».\n'
@@ -404,7 +406,7 @@ class Session:
             caches = {sc.id: sc.to_cache() for sc in self.scans
                       if sc.analyzed and (sc.cache_dirty or not same)}
         keep = self.project_path if (self.project_path and project_store.is_archive(self.project_path)) else None
-        project_store.write_project(path, proj, caches, keep_from=keep)
+        project_store.write_project(path, proj, caches, keep_from=keep, drop_ids=self._removed_ids)
         for sc in self.scans:
             if sc.id in caches:
                 sc.cache_dirty = False
@@ -449,6 +451,38 @@ class Session:
         ok = self.tree.delete_group(gid)
         self.apply_visibility()
         return ok
+
+    def remove_scans(self, ids):
+        """
+        Удалить сканы из проекта (файлы на диске не трогаются): связи, место в дереве,
+        сетки и кеш анализа (при следующем сохранении). Если удалён опорный — опорным
+        становится размещённый скан с наибольшим числом активных связей; позы — по графу.
+        → список удалённых id.
+        """
+        ids = {i for i in ids if self.by_id(i) is not None}
+        if not ids:
+            return []
+        self.scans = [sc for sc in self.scans if sc.id not in ids]
+        self.edges = [e for e in self.edges if e['A'] not in ids and e['B'] not in ids]
+        self.tree.sync([sc.id for sc in self.scans])
+        for k in [k for k in self.meshes if k in ids]:
+            self.meshes.pop(k)
+        self.erase_undo = [[x for x in r if (x[1] if x[0] == 'drop' else x[0]) not in ids] for r in self.erase_undo]
+        self.erase_undo = [r for r in self.erase_undo if r]
+        self._removed_ids |= ids
+        if self.frame in ids:
+            placed = [sc for sc in self.scans if sc.pose is not None]
+            act = self.active_edges()
+            deg = lambda sc: sum(1 for e in act if sc.id in (e['A'], e['B']))
+            new = max(placed, key=deg) if placed else (self.scans[0] if self.scans else None)
+            self.frame = new.id if new is not None else None
+            if new is not None:
+                new.pose = np.eye(4)
+        if self.scans:
+            self.recompute_poses()
+        self._recolor()
+        self.apply_visibility()
+        return sorted(ids)
 
     def show_all(self):
         self.tree.show_all()

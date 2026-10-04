@@ -460,6 +460,8 @@ class MainWindow(QMainWindow):
         g.small('mdi6.eye-check-outline', 'Только выбранное', lambda: self.on_tree_action('only', sel()) if sel()
                 else self.set_status('выберите скан или группу в дереве'))
         g.small('mdi6.eye-outline', 'Показать всё', self.show_all)
+        g.small('mdi6.delete-outline', 'Удалить из проекта', lambda: self.remove_selected(),
+                'Выделенные сканы (группы — вместе со сканами); файлы на диске остаются — ⌘/Ctrl+Delete')
 
         # ── Стыковка ──
         pg = rb.add_tab('reg', 'Стыковка')
@@ -1047,6 +1049,8 @@ class MainWindow(QMainWindow):
                         (']', lambda: self.set_point_size(self.view.point_px + 1)),
                         ('Delete', self.on_erase), ('Backspace', self.on_erase),
                         ('Ctrl+Z', self.on_undo_erase), ('Ctrl+G', self.group_selected),
+                        ('Ctrl+Delete', lambda: self.remove_selected()),
+                        ('Ctrl+Backspace', lambda: self.remove_selected()),
                         ('Return', self.measure_finish),
                         ('Enter', self.measure_finish)):
             sc = QShortcut(QKeySequence(key), self)
@@ -1676,6 +1680,61 @@ class MainWindow(QMainWindow):
         what = f'{len(keys)} узл.' if len(keys) > 1 else short(keys[0]) if self.s.by_id(keys[0]) else 'группа'
         self.set_status(f'{what} → «{where}»' + ('' if index is None else f', позиция {index + 1}'))
 
+    def remove_selected(self, key=None):
+        """Удалить из проекта выделенные сканы (и сканы выделенных групп вместе с группами)."""
+        t = self.s.tree
+        keys = self.tree_panel.selected_keys()
+        if key is not None and key not in keys:
+            keys = [key]
+        if not keys:
+            self.set_status('выделите сканы в дереве')
+            return
+        ids, groups = [], []
+        for k in keys:
+            if t.group(k) is not None:
+                if k != 'root':
+                    groups.append(k)
+                    ids += t.scans_in(k)
+            elif self.s.by_id(k) is not None:
+                ids.append(k)
+        ids = list(dict.fromkeys(ids))
+        if not ids and not groups:
+            return
+        names = ', '.join(short(i) for i in ids[:6]) + (' …' if len(ids) > 6 else '')
+        gtxt = f" и групп: {len(groups)}" if groups else ''
+        ref = ' Среди них опорный — опорным станет другой размещённый скан.' if self.s.frame in ids else ''
+        r = QMessageBox.question(self, 'Удалить из проекта',
+                                 f'Удалить из проекта сканов: {len(ids)}{gtxt}?\n{names}\n\nФайлы сканов на диске '
+                                 f'остаются; связи, ручная чистка и место в дереве удаляются.{ref} Вернуть — '
+                                 f'закрыть проект без сохранения.',
+                                 QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if r != QMessageBox.Yes:
+            return
+        if self.moving is not None and (self.moving.id in ids or self.fixed.id in ids):
+            self.on_manual_cancel(ask=False)
+        for sid in ids:
+            for pre in ('scan:', 'feat:planes:', 'feat:openings:', 'ghost:', 'sel:', 'dyn:', 'mesh:'):
+                self.view.remove(pre + sid)
+            self.dyn_masks.pop(sid, None)
+            self.selection.pop(sid, None)
+            self.ghost_shown.discard(sid)
+        if self.clean_scan is not None and self.clean_scan.id in ids:
+            self.clean_scan = None
+        if self.cand_scan is not None and self.cand_scan.id in ids:
+            self.candidates, self.cand_scan = [], None
+            self.dock.set_candidates([])
+        removed = self.s.remove_scans(ids)
+        for g in groups:
+            if t.group(g) is not None:
+                self.s.delete_group(g)
+        self.tree_sel = None
+        self.redraw_all()
+        self.refresh_all()
+        msg = f'удалено из проекта: {len(removed)} скан.' + (f', групп {len(groups)}' if groups else '') + \
+              f'; размещено {len(self.s.placed())} из {len(self.s.scans)}'
+        self.set_status(msg)
+        self.vp.flash(msg)
+
     def group_selected(self):
         """Группа из выделенных в дереве сканов / групп (на месте первого)."""
         keys = self.tree_panel.selected_keys()
@@ -1749,6 +1808,8 @@ class MainWindow(QMainWindow):
             self.set_status(f'группа «{g.name}» удалена, её содержимое перешло к родителю')
         elif name == 'group_sel':
             self.group_selected()
+        elif name == 'remove':
+            self.remove_selected(key)
         elif name == 'move':
             keys = self.tree_panel.selected_keys() or [key]
             choices = t.group_choices()
