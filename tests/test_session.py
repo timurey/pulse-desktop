@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import open3d as o3d                              # noqa: E402
 import plane_register as pr                       # noqa: E402
+import fileio                                     # noqa: E402
 from scan_session import Session                  # noqa: E402
 from test_registration import scan, gt_pose, FLIP # noqa: E402
 
@@ -27,8 +28,7 @@ def write_scans(tmp):
     origins = {}
     for i, (name, (xy, yaw)) in enumerate(POSES.items()):
         pts, o = scan(xy, yaw, seed=i + 1)
-        o3d.io.write_point_cloud(str(Path(tmp) / name),
-                                 o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pts)))
+        fileio.write_cloud(Path(tmp) / name, pts)   # пути с кириллицей — и на Windows
         origins[name] = (o, yaw)
     return origins
 
