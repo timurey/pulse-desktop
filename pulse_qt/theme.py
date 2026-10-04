@@ -240,6 +240,22 @@ QSlider::groove:horizontal {{ height: 4px; background: {c['bg3']}; border-radius
 QSlider::sub-page:horizontal {{ background: {c['accent']}; border-radius: 2px; }}
 QSlider::handle:horizontal {{ background: {c['ink']}; width: 12px; height: 12px; margin: -4px 0; border-radius: 6px; }}
 QSlider::handle:horizontal:hover {{ background: {c['accent']}; }}
+#Ribbon {{ background: {c['bg1']}; border-bottom: 1px solid {c['line']}; }}
+#RTabs {{ background: {c['bg1']}; }}
+QToolButton#RTab {{ background: transparent; border: 0; border-radius: 0; color: {c['ink3']}; font-size: 13px; padding: 0 12px; min-height: 36px; max-height: 36px; border-bottom: 2px solid transparent; }}
+QToolButton#RTab:hover {{ color: {c['ink']}; background: transparent; }}
+QToolButton#RTab:checked {{ color: {c['ink']}; background: transparent; border-bottom: 2px solid {c['accent']}; font-weight: 500; }}
+#RPage {{ background: {c['bg']}; border-top: 1px solid {c['line']}; }}
+#RGroup {{ background: transparent; }}
+#RCaption {{ color: {c['ink3']}; font-size: 10px; letter-spacing: 0.5px; }}
+#RSep {{ background: {c['line']}; margin: 10px 2px; }}
+QToolButton#RBig {{ min-width: 62px; max-width: 96px; min-height: 64px; padding: 2px 6px; font-size: 11px; border-radius: 7px; color: {c['ink2']}; }}
+QToolButton#RBig:hover {{ background: {c['bg3']}; color: {c['ink']}; }}
+QToolButton#RBig:checked {{ background: {c['accentbg']}; color: {c['accent']}; }}
+QToolButton#RBig::menu-button {{ border: 0; width: 12px; }}
+QToolButton#RSmall {{ min-height: 20px; max-height: 22px; padding: 0 8px 0 4px; font-size: 12px; border-radius: 5px; color: {c['ink2']}; text-align: left; }}
+QToolButton#RSmall:hover {{ background: {c['bg3']}; color: {c['ink']}; }}
+QToolButton#RSmall:checked {{ background: {c['accentbg']}; color: {c['accent']}; }}
 #Glass {{ background: {c['glass']}; border: 1px solid {c['line']}; border-radius: 8px; }}
 #Glass QLabel {{ color: {c['ink2']}; font-size: 12px; background: transparent; }}
 #GlassMono {{ font-family: "{MONO}"; font-size: 11px; color: {c['ink3']}; background: transparent; }}

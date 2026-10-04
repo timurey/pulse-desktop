@@ -255,8 +255,24 @@ def main():
     w.on_manual_cancel()
     pump()
 
-    # качество совмещения: расчёт один раз, ползунок только перекрашивает
+    # лента: вкладка открывает свою панель, режим переключает вкладку
     tp = w.tree_panel
+    rb = w.ribbon
+    rb.group.button(rb.keys.index('clean')).click()
+    check('лента: «Чистка» открывает панель чистки', w.mode == 'clean')
+    rb.group.button(rb.keys.index('result')).click()
+    check('лента: «Результат» открывает поверхность', w.mode == 'surface')
+    rb.group.button(rb.keys.index('control')).click()
+    check('лента: «Контроль» — инспектор', w.mode == 'inspect' and rb.current() == 'control')
+    w.start_manual(fixed.id, moving.id)
+    check('лента: ручная стыковка переключает на «Стыковку»', rb.current() == 'reg' and w.b_manual.isChecked())
+    w.on_manual_cancel()
+    tp.switches['planes'].setChecked(True, emit=True)
+    check('лента: слой в панели отражается на ленте', w._rb_toggles['planes'].isChecked())
+    w._toggle_layer('planes')
+    check('лента: кнопка ленты переключает слой', not tp.layer('planes'))
+
+    # качество совмещения: расчёт один раз, ползунок только перекрашивает
     tp.switches['quality'].setChecked(True, emit=True)
     wait(lambda: w.qual['res'] is not None and not w.qual['busy'], 60)
     res0 = w.qual['res']

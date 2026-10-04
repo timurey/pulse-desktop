@@ -37,6 +37,7 @@ from .cloud_view import CloudView
 from .tree_panel import TreePanel, short
 from .inspector import Inspector, ManualPanel, CleanPanel
 from .surface_panel import SurfacePanel
+from .ribbon import Ribbon
 from .dock import Dock
 from .dialogs import ScannerImportDialog, BagImportDialog, ExportDialog, AskDialog
 
@@ -119,6 +120,10 @@ class Viewport(QWidget):
         self.tools = W.Glass(self)
         self.tools.lay.setContentsMargins(4, 4, 4, 4)
         self.tools.lay.setSpacing(2)
+        self.b_top = W.tool(t.icon('mdi6.map-outline'), tip='Вид сверху (T)', cb=win.view_top, icon_only=True)
+        self.b_3d = W.tool(t.icon('mdi6.cube-outline'), tip='Вид 3D', cb=win.view_3d, icon_only=True)
+        self.b_fly = W.tool(t.icon('mdi6.airplane', 'ink2', 'accent'), tip='Полёт (F)', cb=win.toggle_fly,
+                            checkable=True, icon_only=True)
         self.b_fit = W.tool(t.icon('mdi6.fit-to-screen-outline'), tip='Показать всё', cb=win.fit_all,
                             icon_only=True)
         self.b_proj = W.tool(t.icon('mdi6.perspective-less', 'ink2', 'accent'),
@@ -146,7 +151,7 @@ class Viewport(QWidget):
             f.setObjectName('ToolSep')
             f.setFixedSize(1, 20)
             return f
-        for b in (self.b_fit, self.b_proj, vsep(), size_icon, self.size_slider, self.size_text, vsep(),
+        for b in (self.b_top, self.b_3d, self.b_fly, vsep(), self.b_fit, self.b_proj, vsep(), size_icon, self.size_slider, self.size_text, vsep(),
                   self.b_shot):
             self.tools.lay.addWidget(b)
         self.tools.lay.setSpacing(6)
@@ -259,6 +264,7 @@ class MainWindow(QMainWindow):
         self.clean_scan = None
         self.dyn_masks = {}                      # найденные движущиеся объекты: id скана → маска res['down']
         self.points_hidden = False               # «Поверхность»: показывать только сетки
+        self.plan_step = 1.0                     # шаг поворота плана, град
         # дерево, слои
         self.tree_sel = None
         self._vis_backup = None
@@ -302,6 +308,7 @@ class MainWindow(QMainWindow):
         self.tree_panel.moved.connect(self.on_tree_move_drop)
         self.tree_panel.action.connect(self.on_tree_action)
         self.tree_panel.layerToggled.connect(self.on_layer)
+        self.tree_panel.layerToggled.connect(lambda k, v: self._sync_ribbon())
         self.tree_panel.qualityChanged.connect(lambda thr, m: self.quality_refresh())
         self.tree_panel.setMinimumWidth(220)
         self.split.addWidget(self.tree_panel)
@@ -357,85 +364,132 @@ class MainWindow(QMainWindow):
         self._mac_menubar()
 
     def _topbar(self):
+        """Лента: вкладки-этапы; на ленте команды, параметры и состояние — в правой панели."""
         t = W.THEME
-        bar = QFrame()
-        bar.setObjectName('TopBar')
-        bar.setFixedHeight(48)
-        hl = QHBoxLayout(bar)
-        hl.setContentsMargins(12, 0, 8, 0)
-        hl.setSpacing(10)
+        rb = Ribbon()
+        self.ribbon = rb
         mark = QFrame()
         mark.setObjectName('Mark')
-        mark.setFixedSize(22, 22)
-        hl.addWidget(mark)
-        hl.addWidget(W.label('Pulse Scan', 'AppName'))
+        mark.setFixedSize(20, 20)
+        rb.brand.addWidget(mark)
+        rb.brand.addWidget(W.label('Pulse Scan', 'AppName'))
         self.proj_name = W.label('новый проект', 'ProjName')
-        self.proj_name.setMaximumWidth(260)
-        hl.addWidget(self.proj_name)
+        self.proj_name.setMaximumWidth(240)
+        rb.brand.addWidget(self.proj_name)
         self.dirty_dot = QFrame()
         self.dirty_dot.setObjectName('DirtyDot')
         self.dirty_dot.setFixedSize(7, 7)
         self.dirty_dot.setToolTip('Есть несохранённые изменения')
         self.dirty_dot.hide()
-        hl.addWidget(self.dirty_dot)
-        hl.addStretch(1)
+        rb.brand.addWidget(self.dirty_dot)
+        sel = lambda: self.tree_sel
+        rb_ = {}
 
-        def group(*btns):
-            g = QWidget()
-            gl = QHBoxLayout(g)
-            gl.setContentsMargins(6, 0, 6, 0)
-            gl.setSpacing(2)
-            for b in btns:
-                gl.addWidget(b)
-            return g
+        # ── Проект ──
+        pg = rb.add_tab('project', 'Проект')
+        g = rb.add_group(pg, 'Файл')
+        g.big('mdi6.file-plus-outline', 'Новый', self.on_new_project, 'Новый проект (Ctrl+N)')
+        g.big('mdi6.folder-outline', 'Открыть', self.on_open, 'Открыть проект (Ctrl+O)')
+        g.big('mdi6.content-save-outline', 'Сохранить', self.on_save, 'Сохранить (Ctrl+S)')
+        g.small('mdi6.content-save-edit-outline', 'Сохранить как…', self.on_save_as)
+        g = rb.add_group(pg, 'Импорт')
+        g.big('mdi6.access-point', 'Со\nсканера', self.on_import_scanner, 'Скачать записи со сканера и импортировать')
+        g.big('mdi6.folder-open-outline', 'Bag', self.on_import_bags, 'Импорт bag из папки')
+        g.big('mdi6.cloud-upload-outline', 'Облако', self.on_add_scan, 'Добавить облако (e57, ply, pcd, las)')
+        g = rb.add_group(pg, 'Дерево')
+        g.small('mdi6.folder-plus-outline', 'Новая группа', lambda: self.on_tree_action('new_group', sel()))
+        g.small('mdi6.folder-move-outline', 'В группу…', lambda: self.on_tree_action('move', sel()) if sel()
+                else self.set_status('выберите скан или группу в дереве'))
+        g.small('mdi6.eye-check-outline', 'Только выбранное', lambda: self.on_tree_action('only', sel()) if sel()
+                else self.set_status('выберите скан или группу в дереве'))
+        g.small('mdi6.eye-outline', 'Показать всё', self.show_all)
 
-        def sep():
-            s = QFrame()
-            s.setObjectName('ToolSep')
-            s.setFixedSize(1, 24)
-            return s
-        ic = t.icon
-        self.b_scanner = W.tool(ic('mdi6.access-point'), 'Со сканера', self.on_import_scanner,
-                                tip='Скачать записи со сканера и импортировать')
-        self.b_bag = W.tool(ic('mdi6.folder-open-outline'), 'Bag', self.on_import_bags,
-                            tip='Импорт bag из папки')
-        self.b_auto = W.tool(ic('mdi6.graph-outline'), 'Автостыковка', self.on_auto,
-                             tip='Подобрать пары и позы сканов')
-        am = QMenu(self.b_auto)
+        # ── Стыковка ──
+        pg = rb.add_tab('reg', 'Стыковка')
+        g = rb.add_group(pg, 'Автоматически')
+        am = QMenu(self)
         self.a_reuse = am.addAction('Использовать уже посчитанные пары')
         self.a_reuse.setCheckable(True)
         self.a_reuse.setChecked(True)
         self.a_bytree = am.addAction('По дереву: пары внутри групп и соседних (быстрее)')
         self.a_bytree.setCheckable(True)
         self.a_bytree.setChecked(True)
-        am.addSeparator()
-        am.addAction('Запустить', self.on_auto)
-        self.b_auto.setMenu(am)
-        self.b_auto.setPopupMode(QToolButton.MenuButtonPopup)
-        self.b_auto.setProperty('menuarrow', True)
-        self.b_manual = W.tool(ic('mdi6.vector-combine', 'ink2', 'accent'), 'Ручная',
-                               lambda: self.start_manual(), checkable=True,
-                               tip='Ручная стыковка выбранного скана')
-        self.b_top = W.tool(ic('mdi6.map-outline'), tip='Вид сверху (T)', cb=self.view_top, icon_only=True)
-        self.b_3d = W.tool(ic('mdi6.cube-outline'), tip='Вид 3D', cb=self.view_3d, icon_only=True)
-        self.b_fly = W.tool(ic('mdi6.airplane', 'ink2', 'accent'), tip='Полёт (F)', cb=self.toggle_fly,
-                            checkable=True, icon_only=True)
-        self.b_clean = W.tool(ic('mdi6.selection-drag', 'ink2', 'accent'), 'Чистка',
-                              lambda: self.set_mode('inspect' if self.mode == 'clean' else 'clean'),
-                              checkable=True, tip='Чистка отражений и выделение прямоугольником (R)')
-        self.b_surface = W.tool(ic('mdi6.vector-triangle', 'ink2', 'accent'), 'Поверхность β',
-                                lambda: self.set_mode('inspect' if self.mode == 'surface' else 'surface'),
-                                checkable=True, tip='Экспериментально: сетка (полигоны) по сканам')
-        self.b_export = W.tool(ic('mdi6.export-variant'), 'Экспорт', self.on_export,
-                               tip='Экспорт склейки')
-        hl.addWidget(group(self.b_scanner, self.b_bag))
-        hl.addWidget(sep())
-        hl.addWidget(group(self.b_auto, self.b_manual))
-        hl.addWidget(sep())
-        hl.addWidget(group(self.b_top, self.b_3d, self.b_fly))
-        hl.addWidget(sep())
-        hl.addWidget(group(self.b_clean, self.b_surface, self.b_export))
-        hl.addStretch(1)
+        self.b_auto = g.big('mdi6.graph-outline', 'Авто-\nстыковка', self.on_auto, 'Подобрать пары и позы всех сканов',
+                            menu=am)
+        g.small('mdi6.target', 'Кандидаты позы', lambda: self.on_cand_search(
+            sel() or next((x.id for x in self.s.scans if x.pose is None), None)))
+        g = rb.add_group(pg, 'Вручную')
+        self.b_manual = g.big('mdi6.vector-combine', 'Ручная', lambda: self.start_manual(),
+                              'Ручная стыковка выбранного скана', checkable=True)
+        g.big('mdi6.auto-fix', 'Авто-\nподгонка', self.ribbon_autofit,
+              'Точная подгонка (ICP) после грубой ручной стыковки; в дереве — «Уточнить стыковку» выбранного скана')
+        self.b_pivot = g.small('mdi6.crosshairs-gps', 'Опорная точка', self.ribbon_pivot,
+                               'Совместить одну точку, закрепить и поворачивать скан вокруг неё', checkable=True)
+        g.small('mdi6.function-variant', 'Решить по парам', lambda: self.on_manual_action('solve', None))
+        g = rb.add_group(pg, 'Граф')
+        g.small('mdi6.anchor', 'Сделать опорным', lambda: self.make_ref(sel()))
+        g.small('mdi6.check', 'Принять пару', lambda: self._pair_cmd('accept'))
+        g.small('mdi6.close', 'Отклонить пару', lambda: self._pair_cmd('reject'))
+        g = rb.add_group(pg, 'Горизонт и план')
+        g.big('mdi6.angle-acute', 'По\nгоризонту', self.on_level_project,
+              'Выровнять весь проект по полу и стенам (сохраняется в проекте)')
+        g.small('mdi6.grid', 'План по стенам', self.on_align_plan)
+        g.small('mdi6.rotate-left', 'Повернуть ◀', lambda: self.on_rotate_plan(1))
+        g.small('mdi6.rotate-right', 'Повернуть ▶', lambda: self.on_rotate_plan(-1))
+        sm = QMenu(self)
+        for v in (0.1, 1.0, 5.0):
+            a = sm.addAction(f'шаг {v:g}°')
+            a.triggered.connect(lambda _=False, v=v: self._set_plan_step(v))
+        self.b_plan_step = g.small('mdi6.ruler', f'шаг {self.plan_step:g}°', menu=sm)
+        g.small('mdi6.restore', 'Сбросить горизонт', self.on_level_reset)
+
+        # ── Контроль ──
+        pg = rb.add_tab('control', 'Контроль')
+        g = rb.add_group(pg, 'Совмещение')
+        rb_['quality'] = g.big('mdi6.texture-box', 'Качество\nсовмещения',
+                               lambda: self._toggle_layer('quality'),
+                               'Подсветить места, где поверхность из разных сканов толще порога', checkable=True)
+        g.small('mdi6.sync', 'Циклы графа', lambda: self.dock.tabs.setCurrentIndex(1))
+        g.small('mdi6.format-list-bulleted', 'Список мест', lambda: self.dock.tabs.setCurrentIndex(4))
+        g = rb.add_group(pg, 'Объекты')
+        rb_['planes'] = g.small('mdi6.layers-outline', 'Поверхности', lambda: self._toggle_layer('planes'),
+                                checkable=True)
+        rb_['openings'] = g.small('mdi6.window-closed-variant', 'Проёмы', lambda: self._toggle_layer('openings'),
+                                  checkable=True)
+        rb_['ghosts'] = g.small('mdi6.blur', 'Отражения', lambda: self._toggle_layer('ghosts'), checkable=True)
+
+        # ── Чистка ──
+        pg = rb.add_tab('clean', 'Чистка')
+        g = rb.add_group(pg, 'Движущиеся объекты')
+        g.big('mdi6.walk', 'Найти', self.on_dyn_find, 'Найти точки движущихся объектов')
+        g.small('mdi6.delete-outline', 'Удалить найденное', self.on_dyn_delete)
+        g = rb.add_group(pg, 'Отражения')
+        g.small('mdi6.blur', 'Показать красным', lambda: self.on_clean_action('ghosts', None))
+        g = rb.add_group(pg, 'Вручную')
+        self.b_select = g.big('mdi6.selection-drag', 'Рамка', self.toggle_select,
+                              'Выделение прямоугольником (R); Shift — добавить', checkable=True)
+        g.small('mdi6.delete-outline', 'Удалить (Del)', self.on_erase)
+        g.small('mdi6.selection-off', 'Снять выделение', self.clear_selection)
+        g.small('mdi6.undo', 'Отменить (Ctrl+Z)', self.on_undo_erase)
+        g.small('mdi6.restore', 'Сбросить скан', lambda: self.on_clean_action('reset_scan', None))
+
+        # ── Результат ──
+        pg = rb.add_tab('result', 'Результат')
+        g = rb.add_group(pg, 'Облако')
+        g.big('mdi6.export-variant', 'Экспорт\nсклейки', self.on_export, 'Экспорт склейки (E57 / PLY / PCD)')
+        g.small('mdi6.file-tree-outline', 'Экспорт ветки', lambda: self.on_export(sel()) if sel()
+                else self.set_status('выберите ветку или скан в дереве'))
+        g = rb.add_group(pg, 'Поверхность β')
+        self.b_build = g.big('mdi6.vector-triangle', 'Построить', lambda: self.on_surface_action('build', None),
+                             'Экспериментально: сетка (полигоны) по сканам; параметры — в правой панели')
+        g.small('mdi6.export', 'Экспорт сетки', self._export_last_mesh)
+        g = rb.add_group(pg, 'Документы')
+        g.big('mdi6.camera-outline', 'Скриншот', self.save_screenshot, 'Скриншот окна и 3D-вида (F12)')
+        rb.finish()
+        self._rb_toggles = rb_
+
+        # быстрые кнопки справа
+        ic = t.icon
         self.b_save = W.tool(ic('mdi6.content-save-outline'), tip='Сохранить (Ctrl+S)', cb=self.on_save,
                              icon_only=True)
         self.b_theme = W.tool(ic('mdi6.white-balance-sunny' if t.dark else 'mdi6.weather-night'),
@@ -444,8 +498,83 @@ class MainWindow(QMainWindow):
         self.b_menu.setMenu(self._file_menu())
         self.b_menu.setPopupMode(QToolButton.InstantPopup)
         for b in (self.b_save, self.b_theme, self.b_menu):
-            hl.addWidget(b)
-        return bar
+            rb.quick.addWidget(b)
+        rb.tabChanged.connect(self.on_tab)
+        if self.settings.value('ribbon_collapsed') in (True, 'true'):
+            rb.toggle_collapsed()
+        return rb
+
+    # ── лента: вкладки ↔ правая панель ───────────────────────────────────
+    TAB_OF_MODE = {'manual': 'reg', 'clean': 'clean', 'surface': 'result'}
+
+    def on_tab(self, key):
+        self.settings.setValue('ribbon_collapsed', self.ribbon.collapsed)
+        if key in ('project', 'reg', 'control'):
+            self._free_tab = key
+        want = {'clean': 'clean', 'result': 'surface'}.get(key)
+        if want is None:
+            want = 'manual' if (key == 'reg' and self.moving is not None) else 'inspect'
+        if want != self.mode:
+            self.set_mode(want)
+        self._sync_ribbon()
+
+    def _sync_ribbon(self):
+        """Вкладка и переключатели ленты — по состоянию окна."""
+        rb = getattr(self, 'ribbon', None)
+        if rb is None:
+            return
+        tab = self.TAB_OF_MODE.get(self.mode)
+        if tab is None and rb.current() in ('clean', 'result'):
+            tab = getattr(self, '_free_tab', 'project')
+        if tab is not None and rb.current() != tab:
+            rb.set_tab(tab)
+        self.b_manual.setChecked(self.mode == 'manual')
+        self.b_select.setChecked(self.select_mode)
+        self.b_pivot.setChecked(self.pivot is not None or self.pivot_pick)
+        for k, b in self._rb_toggles.items():
+            b.setChecked(self.tree_panel.layer(k))
+
+    def _toggle_layer(self, key):
+        sw = self.tree_panel.switches[key]
+        sw.setChecked(not sw.isChecked(), emit=True)
+        self._sync_ribbon()
+
+    def ribbon_autofit(self):
+        if self.moving is not None:
+            return self.on_autofit()
+        if self.tree_sel and self.s.by_id(self.tree_sel) is not None:
+            return self.refine_scan(self.tree_sel)
+        self.set_status('выберите размещённый скан в дереве или начните ручную стыковку')
+
+    def ribbon_pivot(self):
+        if self.moving is None:
+            self.start_manual()
+            if self.moving is None:
+                self._sync_ribbon()
+                return
+        if self.pivot is not None:
+            self.on_manual_action('pivot_clear', None)
+        else:
+            self.on_manual_action('pivot_pick', None)
+        self._sync_ribbon()
+
+    def _pair_cmd(self, state):
+        i = self.dock.selected_pair()
+        if i < 0:
+            self.dock.tabs.setCurrentIndex(0)
+            self.set_status('выберите пару в таблице «Пары»')
+            return
+        self.on_pair_action(state, i)
+
+    def _set_plan_step(self, v):
+        self.plan_step = v
+        self.b_plan_step.setText(f'шаг {v:g}°')
+
+    def _export_last_mesh(self):
+        if not self.s.meshes:
+            self.set_status('сеток нет — сначала «Построить»')
+            return
+        self.on_surface_action('mesh_export', list(self.s.meshes)[-1])
 
     def _file_menu(self, m=None):
         t = W.THEME
@@ -1350,7 +1479,7 @@ class MainWindow(QMainWindow):
         self.set_status(f'план повёрнут на {d:+.2f}°: стены вдоль осей X/Y (сохраняется в проекте)')
 
     def on_rotate_plan(self, sign):
-        st = self.inspector.plan_step.value() * sign
+        st = self.plan_step * sign
         self._with_plan_change(lambda: self.s.rotate_plan(st))
         self.redraw_all()
         self.set_status(f'план повёрнут на {st:+.2f}°')
@@ -1367,16 +1496,11 @@ class MainWindow(QMainWindow):
         if self.mode == 'manual' and mode != 'manual' and self.moving is not None and not force:
             if self.on_manual_cancel() and mode != 'inspect':
                 self.set_mode(mode)
-            else:
-                self.b_clean.setChecked(self.mode == 'clean')
-                self.b_surface.setChecked(self.mode == 'surface')
+            self._sync_ribbon()
             return
         self.mode = mode
         self.right.setCurrentWidget({'inspect': self.inspector, 'manual': self.manual,
                                      'clean': self.clean, 'surface': self.surface_panel}[mode])
-        self.b_manual.setChecked(mode == 'manual')
-        self.b_clean.setChecked(mode == 'clean')
-        self.b_surface.setChecked(mode == 'surface')
         if mode == 'surface':
             self.refresh_surface()
         if mode == 'clean':
@@ -1387,6 +1511,7 @@ class MainWindow(QMainWindow):
         self._banner()
 
     def _banner(self):
+        self._sync_ribbon()
         if self.view.fly:
             text = ''
         elif self.select_mode:
@@ -2191,7 +2316,7 @@ class MainWindow(QMainWindow):
         if on and self.view.basis()[2, 2] > 0.95 and self.s.frame:
             return self.fly_to_scan(self.s.frame)
         self.view.set_fly(on)
-        self.b_fly.setChecked(on)
+        self.vp.b_fly.setChecked(on)
         self.vp.b_proj.setChecked(self.view.parallel)     # полёт — только в перспективе
         self.view.setFocus()
         self._banner()
@@ -2204,7 +2329,7 @@ class MainWindow(QMainWindow):
             return
         T = self.s.Tc(sc)
         self.view.set_fly(True, eye=T[:3, 3], forward=T[:3, 0])
-        self.b_fly.setChecked(True)
+        self.vp.b_fly.setChecked(True)
         self.vp.b_proj.setChecked(False)
         self.view.setFocus()
         self._banner()
@@ -2318,7 +2443,7 @@ class MainWindow(QMainWindow):
 
     def _mesh_finished(self):
         self._mesh_building = False
-        self.surface_panel.b_build.setText('Построить')
+        self.b_build.setText('Построить')
 
     def _draw_meshes(self, force=False):
         show = self.tree_panel.layer('mesh')
@@ -2388,7 +2513,7 @@ class MainWindow(QMainWindow):
             if self.run_bg(f"поверхность ({'Пуассон' if prm['method'] == 'poisson' else 'ball pivoting'}, "
                            f"{prm['acc'] * 100:.0f} см)…", work, done):
                 self._mesh_building = True
-                sp.b_build.setText('Остановить')
+                self.b_build.setText('Остановить')
         elif name == 'mesh_visible':
             key, vis = arg
             if key in self.s.meshes:
@@ -2526,8 +2651,6 @@ class MainWindow(QMainWindow):
         else:
             rows = [('анализ', 'выполняется…')]
         self.clean.report.set(rows)
-        self.clean.b_ghosts.setText('Скрыть отражения' if sc.id in self.ghost_shown else 'Показать отражения красным')
-        self.clean.b_select.setChecked(self.select_mode)
 
     def on_clean_action(self, name, arg):
         sc = self.clean_scan
@@ -2653,7 +2776,6 @@ class MainWindow(QMainWindow):
         if self.mode != 'clean':
             self.set_mode('clean')
         self.select_mode = not self.select_mode
-        self.clean.b_select.setChecked(self.select_mode)
         if not self.select_mode:
             self._rect = None
             self.view.rubber = None

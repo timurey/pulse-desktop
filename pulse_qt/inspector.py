@@ -119,7 +119,7 @@ class Inspector(_Panel):
         for i, (text, name, ic) in enumerate(items):
             b = W.button(text, lambda n=name: self.action.emit(n), icon=t.icon(ic))
             self.act_lay.addWidget(b, i // 2, i % 2)
-        self.sec_act.setVisible(bool(items))
+        self.sec_act.setVisible(False)               # команды — на ленте
 
     def show_project(self, rows, has_scans):
         self.title.setText('ПРОЕКТ')
@@ -127,7 +127,7 @@ class Inspector(_Panel):
         self._kv('project', rows)
         for k in ('source', 'analysis', 'links'):
             self._kv(k, [])
-        self.sec_level.setVisible(has_scans)
+        self.sec_level.setVisible(False)             # команды — на ленте («Стыковка»)
         self._actions([('Импорт со сканера', 'import_scanner', 'mdi6.access-point'),
                        ('Импорт bag', 'import_bags', 'mdi6.folder-open-outline'),
                        ('Добавить облако', 'add_scan', 'mdi6.plus'),
@@ -265,20 +265,13 @@ class ManualPanel(_Panel):
         sf = self.add(W.Section('Подгонка'))
         self.fit_target = W.Segmented([('к неподвижному', 'fixed'), ('ко всем размещённым', 'all')], 'fixed')
         sf.add(self.fit_target)
-        self.b_fit = W.button('Автоподгонка (ICP)', lambda: self.action.emit('autofit', None),
-                              icon=t.icon('mdi6.auto-fix'),
-                              tip='Точная подгонка после грубой ручной стыковки: захват до 60 см, затем 25 и 8 см. '
-                                  'При закреплённой опорной точке — только поворот вокруг неё')
-        sf.add(self.b_fit)
+        sf.add(W.label('«Автоподгонка» на ленте: захват до 60 см, затем 25 и 8 см; при закреплённой опорной '
+                       'точке — только поворот вокруг неё.', 'Hint', wrap=True))
         self.fit_label = W.label('', 'KV_v', wrap=True)
         sf.add(self.fit_label)
         # опорная точка: совместить одну точку, закрепить, затем только поворачивать вокруг неё
         sp = self.add(W.Section('Опорная точка'))
-        self.b_pivot = W.button('Совместить точку', lambda: self.action.emit('pivot_pick', None),
-                                icon=t.icon('mdi6.crosshairs-gps'))
-        self.b_pivot.setCheckable(True)
-        sp.add(self.b_pivot)
-        self.pivot_hint = W.label('Ctrl/⌘ + клик: характерная точка в неподвижном, затем та же точка в '
+        self.pivot_hint = W.label('«Опорная точка» на ленте, затем Ctrl/⌘ + клик: характерная точка в неподвижном, затем та же точка в '
                                   'подвижном — скан сдвинется, точка закрепится; дальше скан только '
                                   'поворачивается вокруг неё (транспортиры в 3D-виде тянутся мышью).',
                                   'Hint', wrap=True)
@@ -313,10 +306,8 @@ class ManualPanel(_Panel):
         pl.setColumnStretch(1, 1)
         g4 = QGridLayout()
         g4.setSpacing(6)
-        g4.addWidget(W.button('Подогнать поворот', lambda: self.action.emit('autofit', None),
-                              icon=t.icon('mdi6.auto-fix'), tip='ICP: только поворот вокруг опорной точки'), 0, 0)
         g4.addWidget(W.button('Снять точку', lambda: self.action.emit('pivot_clear', None),
-                              icon=t.icon('mdi6.close')), 0, 1)
+                              icon=t.icon('mdi6.close')), 0, 0)
         pl.addLayout(g4, 3, 0, 1, 4)
         self.pivot_box.setVisible(False)
         sp.add(self.pivot_box)
@@ -416,16 +407,16 @@ class ManualPanel(_Panel):
 
     def set_pivot(self, state, angles=None, picking=False):
         """state: None — нет точки; 'A' — выбрана в неподвижном; 'fixed' — закреплена."""
-        self.b_pivot.setChecked(picking or state == 'A')
         self.pivot_box.setVisible(state == 'fixed')
         self.pivot_hint.setVisible(state != 'fixed')
         if state == 'A':
             self.pivot_hint.setText('Точка в неподвижном выбрана. Ctrl/⌘ + клик по той же точке в подвижном.')
+        elif picking:
+            self.pivot_hint.setText('Ctrl/⌘ + клик: характерная точка в неподвижном скане.')
         elif state is None:
-            self.pivot_hint.setText('Ctrl/⌘ + клик: характерная точка в неподвижном, затем та же точка в '
-                                    'подвижном — скан сдвинется, точка закрепится; дальше скан только '
-                                    'поворачивается вокруг неё (транспортиры в 3D-виде тянутся мышью).')
-        self.b_pivot.setText('Точка закреплена' if state == 'fixed' else 'Совместить точку')
+            self.pivot_hint.setText('«Опорная точка» на ленте, затем Ctrl/⌘ + клик: характерная точка в '
+                                    'неподвижном, затем та же точка в подвижном — скан сдвинется, точка '
+                                    'закрепится; дальше скан только поворачивается вокруг неё.')
         if angles is not None:
             for k, sb in self.angles.items():
                 sb.blockSignals(True)
@@ -442,7 +433,6 @@ class CleanPanel(_Panel):
 
     def __init__(self):
         super().__init__('Чистка', closable=True)
-        t = W.THEME
         s1 = self.add(W.Section('Скан'))
         self.scan = QComboBox()
         self.scan.activated.connect(lambda i: self.action.emit('scan', self.scan.currentData()))
@@ -452,9 +442,6 @@ class CleanPanel(_Panel):
         s1.add(W.hbox(QLabel('Убирать зеркальные отражения'), None, self.sw_clean))
         self.report = W.KV()
         s1.add(self.report)
-        self.b_ghosts = W.button('Показать отражения красным', lambda: self.action.emit('ghosts', None),
-                                 icon=t.icon('mdi6.blur'))
-        s1.add(self.b_ghosts)
         # движущиеся объекты: неподтверждённые точки
         sd = self.add(W.Section('Движущиеся объекты'))
         self.cb_cross = QCheckBox('между сканами (по текущим позам)')
@@ -476,39 +463,17 @@ class CleanPanel(_Panel):
         sd.add(W.hbox(QLabel('Все видимые сканы'), None, self.sw_dyn_all))
         self.dyn_label = W.label('', 'KV_v', wrap=True)
         sd.add(self.dyn_label)
-        g0 = QGridLayout()
-        g0.setSpacing(6)
-        g0.addWidget(W.button('Найти', lambda: self.action.emit('dyn_find', None),
-                              icon=t.icon('mdi6.walk')), 0, 0)
-        g0.addWidget(W.button('Удалить найденное', lambda: self.action.emit('dyn_delete', None),
-                              icon=t.icon('mdi6.delete-outline')), 0, 1)
-        sd.add(g0)
-        sd.add(W.label('Найденное — пурпурным, удаление отменяется Ctrl+Z. Сравнение сканов пропускает '
+        sd.add(W.label('«Найти» и «Удалить найденное» — на ленте; найденное — пурпурным, удаление отменяется Ctrl+Z. Сравнение сканов пропускает '
                        'большие плоскости (пол, стены): их расхождение — ошибка совмещения, см. слой '
                        '«Качество». «По полуоборотам» есть только у сканов, импортированных из bag этой '
                        'версией (иначе — переимпортируйте bag).', 'Hint', wrap=True))
         s2 = self.add(W.Section('Выделение прямоугольником'))
-        self.b_select = W.button('Выделять (R)', lambda: self.action.emit('select', None),
-                                 icon=t.icon('mdi6.selection-drag'))
-        self.b_select.setCheckable(True)
-        s2.add(self.b_select)
         self.sw_all = W.Switch(False)
         s2.add(W.hbox(QLabel('Все видимые сканы'), None, self.sw_all))
-        s2.add(W.label('Левая кнопка — прямоугольник, Shift — добавить. Удаляется всё в прямоугольнике '
+        s2.add(W.label('«Рамка» на ленте (R). Левая кнопка — прямоугольник, Shift — добавить. Удаляется всё в прямоугольнике '
                        'на всю глубину взгляда; вид — кубом навигации, масштаб — колесом.', 'Hint', wrap=True))
         self.sel_label = W.label('', 'KV_v')
         s2.add(self.sel_label)
-        g = QGridLayout()
-        g.setSpacing(6)
-        g.addWidget(W.button('Удалить (Del)', lambda: self.action.emit('erase', None),
-                             icon=t.icon('mdi6.delete-outline')), 0, 0)
-        g.addWidget(W.button('Снять', lambda: self.action.emit('unselect', None),
-                             icon=t.icon('mdi6.selection-off')), 0, 1)
-        g.addWidget(W.button('Отменить (Ctrl+Z)', lambda: self.action.emit('undo', None),
-                             icon=t.icon('mdi6.undo')), 1, 0)
-        g.addWidget(W.button('Сбросить скан', lambda: self.action.emit('reset_scan', None),
-                             icon=t.icon('mdi6.restore')), 1, 1)
-        s2.add(g)
         self.finish()
 
     def dyn_threshold(self):

@@ -77,8 +77,7 @@ class SurfacePanel(_Panel):
                             'для отдельного скана; больше 800 тыс. точек — точность загрубляется. После '
                             'построения точки сканов скрываются (слой «Точки сканов»).', 'Hint', wrap=True)
         s2.add(self.hint)
-        self.b_build = W.button('Построить', lambda: self.action.emit('build', None), primary=True)
-        s2.add(self.b_build)
+        s2.add(W.label('«Построить» и «Экспорт сетки» — на ленте («Результат»).', 'Hint', wrap=True))
         s3 = self.add(W.Section('Построенные'))
         self.list = QVBoxLayout()
         self.list.setSpacing(6)
