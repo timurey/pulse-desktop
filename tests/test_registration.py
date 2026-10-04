@@ -156,3 +156,14 @@ class TestRegisterPair(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class TestEdgeOk(unittest.TestCase):
+    def test_strong_pair_tolerates_changed_scene(self):
+        import scan_project as sp
+        base = {'score': 0.7, 'margin': 1.5, 'close': 0.9, 'violations': 0.027}
+        self.assertTrue(sp.edge_ok(base))                                   # сильная однозначная
+        self.assertFalse(sp.edge_ok(dict(base, margin=0.3)))               # неоднозначная
+        self.assertFalse(sp.edge_ok(dict(base, score=0.3)))                # слабая
+        self.assertFalse(sp.edge_ok(dict(base, violations=0.06)))          # слишком много нарушений
+        self.assertTrue(sp.edge_ok({'score': 0.1, 'margin': 0.2, 'violations': 0.01}))

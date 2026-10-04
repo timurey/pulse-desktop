@@ -1168,9 +1168,16 @@ class MainWindow(QMainWindow):
 
     # ── сцена ────────────────────────────────────────────────────────────
     def pose_of(self, sc):
+        """
+        Поза показа скана. Неразмещённый показывается в своей системе: его сканер — в точке
+        опорного (общая система без сдвига); с этого положения начинается и ручная стыковка.
+        """
         if sc is self.moving and self.T_moving is not None:
             return self.T_moving
-        return self.s.Tc(sc)
+        T = self.s.Tc(sc)
+        if T is None and self.s.scans and self.s.ref.pose is not None:
+            T = self.s.Tc(self.s.ref)
+        return T
 
     def _show_scan(self, sc):
         name = f'scan:{sc.id}'

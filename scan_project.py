@@ -76,9 +76,25 @@ LOOP_MAX_T      = 0.10    # м — допустимая невязка цикл�
 LOOP_MAX_DEG    = 1.5
 
 
+# Сильная однозначная пара допускается и с бо́льшими нарушениями: если между съёмками
+# в помещении что-то сдвинули (мебель, дверь, человек), точки изменившихся предметов
+# попадают в «пустоту» другого скана. Проверено 2026-10-04 на static_20261001: две серии
+# сканов одного помещения с разницей 4 ч — пары между сериями давали 2.4–3 % нарушений при
+# совпадении 90 % и отрыве 1–1.9; все 20 циклов сошлись до 0.4 см. На static_20260922 правило
+# не добавляет ни одной пары.
+EDGE_STRONG_SCORE  = 0.5
+EDGE_STRONG_MARGIN = 0.5
+EDGE_STRONG_CLOSE  = 0.8
+EDGE_STRONG_VIOL   = 0.05
+
+
 def edge_ok(r):
-    return (r['score'] >= EDGE_MIN_SCORE and r['violations'] <= EDGE_MAX_VIOL
-            and r['margin'] >= EDGE_MIN_MARGIN)
+    if r['score'] < EDGE_MIN_SCORE or r['margin'] < EDGE_MIN_MARGIN:
+        return False
+    if r['violations'] <= EDGE_MAX_VIOL:
+        return True
+    return (r['violations'] <= EDGE_STRONG_VIOL and r['score'] >= EDGE_STRONG_SCORE
+            and r['margin'] >= EDGE_STRONG_MARGIN and r.get('close', 0) >= EDGE_STRONG_CLOSE)
 
 
 def information(r, resA, resB):
