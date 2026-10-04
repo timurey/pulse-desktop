@@ -1577,8 +1577,8 @@ class MainWindow(QMainWindow):
         import bag_reconstruct as br
         gname = v.get('group') or 'Импорт'
         gid = self.s.tree.add_group('root', gname, 'прочее')
-        params = {'voxel': v['voxel'], 'min_range': br.DEFAULTS['min_range'], 'max_range': v['max_range'],
-                  'tilt': v['tilt'], 'dyn_version': br.DYN_VERSION}
+        ov = v.get('calib_override')
+        prm = dict(voxel=v['voxel'], min_range=br.DEFAULTS['min_range'], max_range=v['max_range'], tilt=v['tilt'])
         added = []
 
         def work(progress):
@@ -1590,7 +1590,8 @@ class MainWindow(QMainWindow):
                 if out.exists() and meta_path.exists():
                     try:
                         old = json.loads(meta_path.read_text(encoding='utf-8'))
-                        if old.get('params') == params and Path(b).stat().st_mtime <= out.stat().st_mtime:
+                        want = br.expected_params(b, calib_override=ov, **prm)
+                        if old.get('params') == want and Path(b).stat().st_mtime <= out.stat().st_mtime:
                             meta = old
                     except Exception:                    # noqa: BLE001
                         meta = None
@@ -1598,8 +1599,8 @@ class MainWindow(QMainWindow):
                     def prog(f, msg, k=k):
                         progress((k + f) / len(bags), f'[{k + 1}/{len(bags)}] {msg}')
                     try:
-                        P, meta = br.reconstruct(b, params['voxel'], params['min_range'], params['max_range'],
-                                                 params['tilt'], prog)
+                        P, meta = br.reconstruct(b, prm['voxel'], prm['min_range'], prm['max_range'],
+                                                 prm['tilt'], prog, calib_override=ov)
                     except Exception as e:               # noqa: BLE001
                         bg.post(lambda e=e, name=name: self.set_status(f'{name}: пропущен ({e})'))
                         continue
@@ -1925,6 +1926,8 @@ class MainWindow(QMainWindow):
                        ('оборотов', m.get('rotations', '?')),
                        ('наклон оси', f"{lv.get('tilt_deg', 0)}° · {lv.get('method', '')}"),
                        ('угол платформы', m.get('angle_source', '?')),
+                       ('калибровка', __import__('calibration').describe(m['calibration'])
+                        if m.get('calibration') else 'до учёта калибровки (переимпортируйте bag)'),
                        ('точек', f"{m.get('points', 0) / 1e6:.2f} млн"),
                        ('обработан', m.get('processed', ''))]
             ana = []

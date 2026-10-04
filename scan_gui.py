@@ -1255,7 +1255,8 @@ class App:
                 if out.exists() and meta_path.exists():   # уже реконструирован с теми же параметрами
                     try:
                         old = json.loads(meta_path.read_text(encoding='utf-8'))
-                        if old.get('params') == params and Path(b).stat().st_mtime <= out.stat().st_mtime:
+                        want = br.expected_params(b, voxel, params['min_range'], max_range, tilt)
+                        if old.get('params') == want and Path(b).stat().st_mtime <= out.stat().st_mtime:
                             meta = old
                     except Exception:                    # noqa: BLE001
                         meta = None

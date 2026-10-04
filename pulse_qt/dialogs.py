@@ -10,8 +10,8 @@ from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QGridLayout, Q
 from . import widgets as W
 from . import bg
 
-TILT_MODES = [('по полу и стенам', 'geometry'), ('по IMU (плата осью X вверх)', 'imu_x'),
-              ('не исправлять', 'none')]
+TILT_MODES = [('по полу и стенам', 'geometry'), ('по калибровке устройства', 'calib'),
+              ('по IMU (плата осью X вверх)', 'imu_x'), ('не исправлять', 'none')]
 
 
 def _spin(value, lo, hi, step, dec=2, suffix=''):
@@ -106,14 +106,40 @@ class _ReconOptions:
         lay.addWidget(W.field('Группа в дереве', self.group))
         self.dest, row = _path_field(dest_default, dest_caption, parent)
         lay.addWidget(W.field(dest_caption, row))
+        lay.addWidget(W.label('КАЛИБРОВКА ЛИДАРА', 'STitle'))
+        self.calib_info = W.label('из записи, иначе по дате', 'Hint', wrap=True)
+        lay.addWidget(self.calib_info)
+        self.yaw_manual = W.Switch(False)
+        self.yaw = _spin(-0.6, -20, 20, 0.05, 3, '°')
+        self.yaw.setEnabled(False)
+        self.yaw_manual.toggled.connect(self.yaw.setEnabled)
+        lay.addWidget(W.hbox(QLabel('yaw крепления вручную'), None, self.yaw_manual))
+        lay.addWidget(self.yaw)
         self.auto = W.Switch(True)
         lay.addWidget(W.hbox(QLabel('Затем автостыковка'), None, self.auto))
         lay.addStretch(1)
 
+    def show_calibration(self, bags):
+        """Какая калибровка будет применена к выбранным bag'ам (кратко)."""
+        import calibration
+        if not bags:
+            self.calib_info.setText('из записи, иначе по дате')
+            return
+        seen = {}
+        for b in bags[:50]:
+            c = calibration.resolve(b)
+            seen.setdefault(calibration.describe(c), 0)
+            seen[calibration.describe(c)] += 1
+        self.calib_info.setText('; '.join(f'{k} — {n}' if len(seen) > 1 else k for k, n in seen.items()))
+        first = calibration.resolve(bags[0])
+        if not self.yaw_manual.isChecked():
+            self.yaw.setValue(first['mount_rpy_deg'][2])
+
     def values(self):
         return {'tilt': TILT_MODES[max(0, self.tilt.currentIndex())][1], 'voxel': self.voxel.value(),
                 'max_range': self.rmax.value(), 'group': self.group.text().strip(),
-                'dest': Path(self.dest.text().strip()), 'auto': self.auto.isChecked()}
+                'dest': Path(self.dest.text().strip()), 'auto': self.auto.isChecked(),
+                'calib_override': {'mount_yaw_deg': self.yaw.value()} if self.yaw_manual.isChecked() else None}
 
 
 class _BagRow(QFrame):
@@ -383,6 +409,7 @@ class BagImportDialog(_Modal):
         self.opts = _ReconOptions(ol, group_default, 'Папка сканов', out_default, defaults, self)
         self.body.addWidget(opts)
         self.b_ok.setText(f'Импортировать · {len(bags)}')
+        self.opts.show_calibration(bags)
         self.hint.setText('Уже реконструированные с теми же параметрами берутся из папки сканов')
 
     def values(self):

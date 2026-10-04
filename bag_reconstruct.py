@@ -174,21 +174,43 @@ def level_by_geometry(P):
     return R_up.T @ Rc @ R_up, dict(info, applied=True)
 
 
+def expected_params(bag, voxel=DEFAULTS['voxel'], min_range=DEFAULTS['min_range'],
+                    max_range=DEFAULTS['max_range'], tilt='geometry', calib_override=None):
+    """
+    Параметры, с которыми reconstruct построит скан из этого bag'а (для проверки, можно ли
+    взять уже готовый скан из папки): включают отпечаток калибровки — после смены
+    калибровки устройства или таблицы скан пересчитывается.
+    """
+    import calibration
+    return {'voxel': voxel, 'min_range': min_range, 'max_range': max_range, 'tilt': tilt,
+            'dyn_version': DYN_VERSION, 'calib': calibration.resolve(bag, calib_override)['fingerprint']}
+
+
 def reconstruct(bag, voxel=DEFAULTS['voxel'], min_range=DEFAULTS['min_range'],
-                max_range=DEFAULTS['max_range'], tilt='geometry', progress=None):
+                max_range=DEFAULTS['max_range'], tilt='geometry', progress=None, calib_override=None):
     """
     bag → (точки N×3 float32 в системе лидара при θ=0, метаданные).
-    tilt: 'geometry' (по полу/стенам, по умолчанию) | 'imu_x' (как world_map: IMU осью X
-    вверх) | 'none'.
+    Калибровка устройства (углы крепления, смещение, наклон оси) — из самого bag'а
+    (/pulse/calibration), иначе по дате записи (calibration.HISTORY); calib_override — ручная.
+    tilt: 'geometry' (по полу/стенам, по умолчанию) | 'calib' (поправка наклона из калибровки;
+    если её нет — по геометрии) | 'imu_x' (как world_map: IMU осью X вверх) | 'none'.
     """
+    import calibration
     t0 = time.time()
+    calib = calibration.resolve(bag, calib_override)
+    if tilt == 'calib' and calib.get('tilt_R') is None:
+        tilt_used = 'geometry'
+    else:
+        tilt_used = tilt
     if progress:
         progress(0.0, f'чтение {bag_name(bag)}')
     log = io.StringIO()
     with contextlib.redirect_stdout(log):          # read_bag печатает диагностику
         angle_times, angle_values, clouds = read_bag(bag)
         R_tilt, tilt_deg = (np.eye(3), 0.0)
-        if tilt == 'imu_x':
+        if tilt_used == 'calib':
+            R_tilt, tilt_deg = np.asarray(calib['tilt_R'], float), float(calib.get('tilt_deg', 0.0))
+        if tilt_used == 'imu_x':
             from world_map import read_imu_tilt
             R_tilt, tilt_deg = read_imu_tilt(bag)
     angle_source = next((l.split(':', 1)[1].strip() for l in log.getvalue().splitlines()
@@ -201,16 +223,16 @@ def reconstruct(bag, voxel=DEFAULTS['voxel'], min_range=DEFAULTS['min_range'],
         if progress:
             progress(0.1 + 0.9 * f, f'{bag_name(bag)}: {msg}')
     P, stats = process_frames(frames, angle_times, angle_values, R_tilt, voxel, min_range,
-                              max_range, progress=prog)
-    level = {'method': tilt}
-    if tilt == 'geometry':
+                              max_range, progress=prog, deskew_params=calibration.deskew_params(calib))
+    level = {'method': tilt_used}
+    if tilt_used == 'geometry':
         if progress:
             progress(0.97, f'{bag_name(bag)}: выравнивание по полу и стенам')
         R_geo, info = level_by_geometry(P)
         P = (P @ np.asarray(R_geo, np.float32).T)
         level.update(tilt_deg=round(info['tilt_deg'], 2), applied=info['applied'],
                      horizontal=info['horizontal'], walls=info['walls'])
-    elif tilt == 'imu_x':
+    elif tilt_used in ('imu_x', 'calib'):
         level.update(tilt_deg=round(float(tilt_deg), 2), applied=True)
     g = imu_gravity(bag)
     imu_info = None if g is None else {
@@ -219,8 +241,9 @@ def reconstruct(bag, voxel=DEFAULTS['voxel'], min_range=DEFAULTS['min_range'],
             np.max(np.abs(g)) / max(np.linalg.norm(g), 1e-9)))), 2)}
     meta = {'bag': str(Path(bag).resolve()), 'name': bag_name(bag), 'angle_source': angle_source,
             'level': level, 'imu': imu_info,
+            'calibration': {k: v for k, v in calib.items() if k != 'tilt_R'},
             'params': {'voxel': voxel, 'min_range': min_range, 'max_range': max_range,
-                       'tilt': tilt, 'dyn_version': DYN_VERSION},
+                       'tilt': tilt, 'dyn_version': DYN_VERSION, 'calib': calib['fingerprint']},
             'processed': time.strftime('%Y-%m-%d %H:%M:%S'),
             'seconds': round(time.time() - t0, 1), **stats}
     dyn = meta.pop('dyn', None)
@@ -269,15 +292,17 @@ def main():
     ap.add_argument('--voxel', type=float, default=DEFAULTS['voxel'])
     ap.add_argument('--min-range', type=float, default=DEFAULTS['min_range'])
     ap.add_argument('--max-range', type=float, default=DEFAULTS['max_range'])
-    ap.add_argument('--tilt', default='geometry', choices=['geometry', 'imu_x', 'none'],
+    ap.add_argument('--yaw', type=float, default=None, help='yaw крепления вручную (иначе из bag / по дате)')
+    ap.add_argument('--tilt', default='geometry', choices=['geometry', 'calib', 'imu_x', 'none'],
                     help='поправка наклона: по полу/стенам (по умолчанию), по IMU осью X, нет')
     a = ap.parse_args()
     bags = find_bags(a.path)
     if not bags:
         sys.exit(f'bag не найден: {a.path}')
     for b in bags:
+        ov = None if a.yaw is None else {'mount_yaw_deg': a.yaw}
         P, meta = reconstruct(b, a.voxel, a.min_range, a.max_range, a.tilt,
-                              progress=lambda f, m: None)
+                              progress=lambda f, m: None, calib_override=ov)
         out = Path(a.output) if (a.output and len(bags) == 1) else \
             Path(a.out_dir) / f"{meta['name']}.{a.format}"
         save_scan(P, out, meta)
