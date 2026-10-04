@@ -476,7 +476,8 @@ class MainWindow(QMainWindow):
         self.b_auto = g.big('mdi6.graph-outline', 'Авто-\nстыковка', self.on_auto, 'Подобрать пары и позы всех сканов',
                             menu=am)
         g.small('mdi6.folder-network-outline', 'Внутри групп', self.on_auto_within,
-                'Стыковка пар внутри групп (выбранной группы или каждой); связи между группами не трогаются')
+                'Выделена группа в дереве — пары только внутри неё (с подгруппами); ничего не выделено — '
+                'внутри каждой группы. Связи между группами не трогаются. Также: правая кнопка на группе')
         g.small('mdi6.vector-arrange-above', 'Группы между собой', self.on_auto_groups,
                 'Каждая группа — жёсткое целое (облако по внутренним связям); стыкуются дочерние группы '
                 'выбранной ветки (или верхние группы)')
@@ -1809,6 +1810,10 @@ class MainWindow(QMainWindow):
             self.set_status(f'группа «{g.name}» удалена, её содержимое перешло к родителю')
         elif name == 'group_sel':
             self.group_selected()
+        elif name in ('auto_group', 'auto_subgroups'):
+            self.tree_panel.select_keys([key])
+            self.tree_sel = key
+            (self.on_auto_within if name == 'auto_group' else self.on_auto_groups)()
         elif name == 'remove':
             self.remove_selected(key)
         elif name == 'move':

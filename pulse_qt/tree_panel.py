@@ -339,6 +339,9 @@ class TreePanel(QFrame):
             return
         if key is not None:
             if is_group:
+                act('Автостыковка внутри группы', 'auto_group', 'mdi6.folder-network-outline')
+                act('Стыковка подгрупп между собой', 'auto_subgroups', 'mdi6.vector-arrange-above')
+                m.addSeparator()
                 act('Переименовать', 'rename', 'mdi6.pencil-outline')
                 act('Удалить группу (содержимое — родителю)', 'delete_group', 'mdi6.folder-remove-outline')
                 act('Удалить группу вместе со сканами…', 'remove', 'mdi6.delete-outline')
