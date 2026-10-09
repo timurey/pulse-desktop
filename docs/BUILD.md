@@ -15,7 +15,7 @@ Pulse Scan собирается [PyInstaller](https://pyinstaller.org) в пап
 | Сборка на Windows одной командой | `packaging/build_windows.bat` |
 | Сборка обеих ОС на GitHub | `.github/workflows/release.yml` |
 | Самопроверка собранного приложения | `pulse_qt/selftest.py` (`--selftest`) |
-| Руководство пользователя | `docs/manual/README.md` + `docs/manual/img/` |
+| Руководство пользователя | `docs/manual/README.md` + `docs/manual/img/`; PDF — `docs/manual/PulseScan-manual.pdf` (`packaging/manual_pdf.py`) |
 | Снимки для руководства | `tests/manual_shots.py` |
 | Примечания к выпуску | `docs/RELEASE_NOTES.md` |
 
@@ -145,6 +145,15 @@ git push origin <ветка> vX.Y.Z
 
 Скрипт подменяет сканер заглушкой, проходит все вкладки и состояния (импорт, стыковка, опорная точка, качество, сечения, замеры, чистка, поверхность, экспорт, передача) и возвращает настройки пользователя (тема, проекция и т. п.) как были.
 
+**PDF-версия** собирается из того же `README.md` и снимков:
+
+```bash
+.venv312/bin/pip install markdown pypdf
+.venv312/bin/python packaging/manual_pdf.py        # → docs/manual/PulseScan-manual.pdf
+```
+
+Вёрстка A4, шрифты IBM Plex из `pulse_qt/fonts`, титульная страница, оглавление со ссылками, каждый раздел с новой страницы, номера страниц. Печатает headless Chrome (на Windows подойдёт Edge; путь — `--chrome`). PDF лежит в репозитории: пересоберите его после правок руководства, иначе в пакет попадёт старый. В DMG и zip он входит вместе с папкой «Руководство».
+
 В `.gitignore` стоит `*.png`. Снимки руководства и `packaging/icon.png` добавляются принудительно (`git add -f`) или исключением в `.gitignore`: `!docs/manual/img/*.png`, `!packaging/icon.png`.
 
 ---
@@ -154,7 +163,7 @@ git push origin <ветка> vX.Y.Z
 1. [ ] `pulse_qt/version.py`, `docs/RELEASE_NOTES.md` обновлены.
 2. [ ] Тесты: `python -m unittest discover -s tests`.
 3. [ ] Проверки окна: `python tests/qt_interact.py X.pulse`, `python tests/qt_smoke.py X.pulse OUT`.
-4. [ ] Руководство актуально; снимки пересняты при изменениях интерфейса.
+4. [ ] Руководство актуально; снимки пересняты при изменениях интерфейса; PDF пересобран (`packaging/manual_pdf.py`).
 5. [ ] Коммит, тег `vX.Y.Z[-rcN]`.
 6. [ ] macOS: сборка из чистой копии тега, `--selftest` с проектом и bag, DMG.
 7. [ ] Windows: `build_windows.bat проект.pulse` на Windows-машине или GitHub Actions.
