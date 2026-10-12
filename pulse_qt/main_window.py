@@ -291,6 +291,7 @@ class MainWindow(QMainWindow):
         self.scanner_host = self.settings.value('scanner_host', 'pulse.local')
         self.scanner_ok = None
         self._dl_cancel = False
+        self._bg_cancel = False
         self.downloading = False
         self._saved_sig = None
         self._closing_ok = False
@@ -1040,11 +1041,18 @@ class MainWindow(QMainWindow):
         self.st_text.setMinimumWidth(80)
         hl.addWidget(self.st_text, 1)
         self.progress = QProgressBar()
-        self.progress.setFixedWidth(120)
+        self.progress.setFixedWidth(150)
         self.progress.setRange(0, 1000)
-        self.progress.setTextVisible(False)
+        self.progress.setFormat('%p %')
+        self.progress.setTextVisible(True)
         self.progress.hide()
         hl.addWidget(self.progress)
+        self.b_stop = QToolButton()
+        self.b_stop.setText('Остановить')
+        self.b_stop.setToolTip('Остановить операцию (Esc). Уже посчитанное сохранится')
+        self.b_stop.clicked.connect(self.stop_bg)
+        self.b_stop.hide()
+        hl.addWidget(self.b_stop)
         self.st_cache = QLabel('')
         hl.addWidget(self.st_cache)
         self.st_points = QLabel('')
@@ -1123,15 +1131,21 @@ class MainWindow(QMainWindow):
         self.progress.setValue(int(1000 * max(0.0, min(1.0, frac))))
         self.set_status(msg, log=False)
 
-    def run_bg(self, title, fn, done=None):
-        """fn(progress) в потоке; done(результат) — в главном. Одна операция за раз."""
+    def run_bg(self, title, fn, done=None, cancellable=False):
+        """
+        fn(progress) в потоке; done(результат) — в главном. Одна операция за раз.
+        cancellable — показать «Остановить» (и Esc): fn сама опрашивает self.bg_cancelled().
+        """
         if self.busy:
             self.set_status('Подождите: выполняется другая операция')
             return False
         self.busy = True
+        self._bg_cancel = False
         self.set_status(title)
         self.progress.setValue(0)
         self.progress.show()
+        self.b_stop.setEnabled(True)
+        self.b_stop.setVisible(cancellable)
 
         def progress(frac, msg):
             bg.post(lambda: self._set_progress(frac, msg))
@@ -1139,15 +1153,28 @@ class MainWindow(QMainWindow):
         def ok(r):
             self.busy = False
             self.progress.hide()
+            self.b_stop.hide()
             if done:
                 done(r)
 
         def fail(e):
             self.busy = False
             self.progress.hide()
+            self.b_stop.hide()
             self.set_status(f'Ошибка: {e}')
         bg.run(lambda: fn(progress), ok, fail)
         return True
+
+    def bg_cancelled(self):
+        return self._bg_cancel
+
+    def stop_bg(self):
+        if self.busy and self.b_stop.isVisible() and not self._bg_cancel:
+            self._bg_cancel = True
+            self.b_stop.setEnabled(False)
+            self.set_status('останавливается после текущей пары…')
+            return True
+        return False
 
     def dirty(self):
         return bool(self.s.scans) and self.s.state_signature() != self._saved_sig
@@ -1559,6 +1586,7 @@ class MainWindow(QMainWindow):
     def download_and_import(self, v):
         names, client, dest = v['names'], v['client'], v['dest']
         self._dl_cancel = False
+        self._bg_cancel = False
         self.downloading = True
 
         def work(progress):
@@ -2200,14 +2228,20 @@ class MainWindow(QMainWindow):
         by_tree = self.a_bytree.isChecked() and not self.s.tree.is_flat()
 
         def work(progress):
-            self.s.run_auto(progress, reuse=reuse, by_tree=by_tree)
-            return True
+            return self.s.run_auto(progress, reuse=reuse, by_tree=by_tree, cancel=self.bg_cancelled)
 
-        def done(_):
+        def done(r):
             self.redraw_all()
             self.refresh_all()
-            self.set_status(f'Автостыковка: размещено {len(self.s.placed())} из {len(self.s.scans)}')
-        self.run_bg('автостыковка…', work, done)
+            self.set_status(f'Автостыковка{self._auto_note(r)}: размещено {len(self.s.placed())} из {len(self.s.scans)}')
+        self.run_bg('автостыковка…', work, done, cancellable=True)
+
+    @staticmethod
+    def _auto_note(r):
+        if r and r.get('cancelled'):
+            return (f" остановлена (посчитано пар {r['done']} из {r['pairs']}; "
+                    f"повторный запуск продолжит с места)")
+        return ''
 
     def _scope_group(self):
         """Выбранная в дереве группа (или группа выбранного скана); None — весь проект."""
@@ -2231,13 +2265,14 @@ class MainWindow(QMainWindow):
         reuse = self.a_reuse.isChecked()
         name = self.s.tree.group(gid).name if gid else 'все группы'
 
-        def done(_):
+        def done(r):
             self.redraw_all()
             self.refresh_all()
-            self.set_status(f'стыковка внутри групп ({name}, пар {len(pairs)}): размещено '
+            self.set_status(f'стыковка внутри групп ({name}, пар {len(pairs)}){self._auto_note(r)}: размещено '
                             f'{len(self.s.placed())} из {len(self.s.scans)}')
         self.run_bg(f'стыковка внутри групп ({name}, пар {len(pairs)})…',
-                    lambda p: self.s.run_auto(p, reuse=reuse, combos=pairs), done)
+                    lambda p: self.s.run_auto(p, reuse=reuse, combos=pairs, cancel=self.bg_cancelled), done,
+                    cancellable=True)
 
     def on_auto_groups(self):
         gid = self._scope_group()
@@ -3651,7 +3686,9 @@ class MainWindow(QMainWindow):
             else:
                 self.set_measure_mode(None)
             return
-        if getattr(self, '_mesh_building', False):
+        if self.stop_bg():
+            pass
+        elif getattr(self, '_mesh_building', False):
             self._mesh_cancel = True
             self.set_status('построение сетки останавливается…')
         elif self.downloading:

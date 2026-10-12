@@ -625,12 +625,15 @@ class Session:
         return np.asarray(pc.points)
 
     # ── автостыковка ─────────────────────────────────────────────────────
-    def run_auto(self, progress=None, yaw='manhattan', reuse=True, by_tree=None, combos=None):
+    def run_auto(self, progress=None, yaw='manhattan', reuse=True, by_tree=None, combos=None, cancel=None):
         """
         Автоматическая стыковка, затем позы по графу.
         by_tree=True — только пары по дереву (внутри групп + представители соседних
         веток), иначе все пары. По умолчанию — по дереву, если в нём есть группы.
         combos — явный список пар (например, только внутри групп — within_group_pairs).
+        cancel() → True — остановить: посчитанные пары сохраняются, позы — по ним
+        (повторный запуск с reuse продолжит с места).
+        → {'pairs': всего пар, 'done': посчитано, 'cancelled': bool}
         """
         names = [s.id for s in self.scans]
         old = {(e['A'], e['B']): e for e in self.edges if e.get('method') not in ('manual', 'group')}
@@ -647,12 +650,23 @@ class Session:
             combos = list(itertools.combinations(names, 2))
         chosen = set(combos)
         edges = []
+        n = len(combos)
+        cached = lambda c: reuse and c in old and 'T_canon' in old[c]
+        todo = sum(1 for c in combos if not cached(c))
+        cancelled = False
+        t0, k = time.time(), 0                        # k — посчитано заново (для оценки времени)
         for i, (a, b) in enumerate(combos):
-            if progress:
-                progress(i / max(1, len(combos)), f"стыковка {a} <- {b}")
-            if reuse and (a, b) in old and 'T_canon' in old[(a, b)]:
+            if cancel is not None and cancel():
+                cancelled = True
+                chosen = {(e['A'], e['B']) for e in edges}
+                break
+            if cached((a, b)):
                 e = dict(old[(a, b)])
             else:
+                if progress:
+                    eta = f", осталось {fmt_eta((time.time() - t0) / k * (todo - k))}" if k else ''
+                    progress(i / max(1, n), f"стыковка: пара {i + 1} из {n}{eta} ({a} <- {b})")
+                k += 1
                 sa, sb = self.by_id(a), self.by_id(b)
                 e = pr.register_pair(_clean_res(sa), _clean_res(sb), yaw, verbose=False)
                 e['A'], e['B'] = a, b
@@ -670,6 +684,7 @@ class Session:
         self.recompute_poses()
         if progress:
             progress(1.0, "готово")
+        return {'pairs': n, 'done': len([e for e in edges if (e['A'], e['B']) in chosen]), 'cancelled': cancelled}
 
     # ── стыковка групп ───────────────────────────────────────────────────
     def within_group_pairs(self, gid=None):
@@ -1245,6 +1260,14 @@ def _rot_rpy(droll_deg=0.0, dpitch_deg=0.0, dyaw_deg=0.0):
     Rx = np.array([[1, 0, 0], [0, np.cos(r), -np.sin(r)], [0, np.sin(r), np.cos(r)]])
     Ry = np.array([[np.cos(p), 0, np.sin(p)], [0, 1, 0], [-np.sin(p), 0, np.cos(p)]])
     return pr.rot_z(np.radians(dyaw_deg)) @ Ry @ Rx
+
+
+def fmt_eta(sec):
+    """Оставшееся время для строки состояния: «~40 с», «~12 мин», «~1 ч 20 мин»."""
+    if sec < 60:
+        return f'~{max(5, int(round(sec / 5)) * 5)} с'
+    m = int(round(sec / 60))
+    return f'~{m} мин' if m < 60 else f'~{m // 60} ч {m % 60:02d} мин'
 
 
 def voxel_keys(P, size=DROP_VOXEL):
