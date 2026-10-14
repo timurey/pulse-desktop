@@ -20,10 +20,17 @@ class Group:
     def __init__(self, gid, name, kind='прочее', visible=True):
         self.id, self.name, self.kind, self.visible = gid, name, kind, visible
         self.children = []          # Group | Leaf
+        self.baked = None           # запечена: {'root': id, 'poses': {id: 4×4 списком}} (baked.py)
+        self.display = None         # настройки отображения ветки (display.py)
 
     def to_json(self):
-        return {'id': self.id, 'name': self.name, 'kind': self.kind, 'visible': self.visible,
-                'children': [c.to_json() for c in self.children]}
+        d = {'id': self.id, 'name': self.name, 'kind': self.kind, 'visible': self.visible,
+             'children': [c.to_json() for c in self.children]}
+        if self.baked:
+            d['baked'] = self.baked
+        if self.display:
+            d['display'] = self.display
+        return d
 
 
 class Leaf:
@@ -50,6 +57,8 @@ class Tree:
                 g = Group(d['id'], d.get('name', d['id']), d.get('kind', 'прочее'),
                           d.get('visible', True))
                 g.children = [build(c) for c in d.get('children', [])]
+                g.baked = d.get('baked')
+                g.display = d.get('display')
                 return g
             t.root = build(data)
             nums = [int(g.id[1:]) for g in t.groups() if g.id[:1] == 'g' and g.id[1:].isdigit()]
@@ -115,6 +124,14 @@ class Tree:
                 if (isinstance(c, Group) and c.id == key) or (isinstance(c, Leaf) and c.scan == key):
                     return g
         return None
+
+    def baked_owner(self, key):
+        """Внешняя запечённая группа, в которую входит узел (или сама группа key), иначе None."""
+        chain = list(reversed(self.ancestors(key)))
+        g = self.group(key)
+        if g is not None:
+            chain.append(g)
+        return next((x for x in chain if x.baked), None)
 
     def ancestors(self, key):
         out = []

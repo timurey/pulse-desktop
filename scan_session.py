@@ -28,6 +28,7 @@ import planes
 import plane_register as pr
 import scan_project as sp
 import openings as op_mod
+import baked as bk
 import reflections
 import manual_clean
 import project_store
@@ -231,6 +232,7 @@ class Session:
         self.zero = None             # нулевой уровень {'z', 'source'} (общая система); None — пол опорного
         self.measures = []           # замеры (measure.py), точки в общей системе
         self.section = None          # сечение (section.py), общая система
+        self._units = {}             # запечённые группы: gid → BakedGroup (по полю baked в дереве)
         self.lock = threading.RLock()
 
     # ── загрузка / сохранение ─────────────────────────────────────────────
@@ -302,8 +304,9 @@ class Session:
                 or not Path(self.project_path).exists():
             return 0
         caches = {sc.id: sc.to_cache() for sc in self.scans if sc.analyzed and sc.cache_dirty}
+        caches.update(self._unit_caches())
         if caches and project_store.update_cache(self.project_path, caches):
-            for sc in self.scans:
+            for sc in list(self.scans) + list(self._units.values()):
                 if sc.id in caches:
                     sc.cache_dirty = False
         return len(caches)
@@ -405,13 +408,22 @@ class Session:
             same = self.project_path and Path(self.project_path).resolve() == Path(path).resolve()
             caches = {sc.id: sc.to_cache() for sc in self.scans
                       if sc.analyzed and (sc.cache_dirty or not same)}
+            caches.update(self._unit_caches(all_=not same))
         keep = self.project_path if (self.project_path and project_store.is_archive(self.project_path)) else None
         project_store.write_project(path, proj, caches, keep_from=keep, drop_ids=self._removed_ids)
-        for sc in self.scans:
+        for sc in list(self.scans) + list(self._units.values()):
             if sc.id in caches:
                 sc.cache_dirty = False
         self.project_path = str(path)
         return path
+
+    def _unit_caches(self, all_=False):
+        """Кеш анализа запечённых групп (посчитанный, новый или все при сохранении в другой файл)."""
+        out = {}
+        for u in self._units.values():
+            if u._res is not None and u._openings is not None and (u.cache_dirty or all_):
+                out[u.id] = u.to_cache()
+        return out
 
     def _recolor(self):
         for i, s in enumerate(self.scans):
@@ -437,17 +449,22 @@ class Session:
 
     def move_nodes(self, keys, target_gid, index=None):
         """Переместить несколько узлов (порядок дерева сохраняется) в группу на позицию index."""
+        moving_out = [k for k in keys if self.tree.parent(k) is None or self.tree.parent(k).id != target_gid]
+        self._check_baked(moving_out, target_gid if moving_out else None)
         ok = self.tree.move_many(keys, target_gid, index)
         self.apply_visibility()
         return ok
 
     def group_nodes(self, keys, name, kind='прочее'):
         """Создать группу из выбранных узлов. → id группы или None."""
+        self._check_baked(keys)
         gid = self.tree.group_from(keys, name, kind)
         self.apply_visibility()
         return gid
 
     def delete_group(self, gid):
+        for g in [x for x in self.tree.groups(self.tree.group(gid)) if x.baked] if self.tree.group(gid) else []:
+            self.unbake(g.id)
         ok = self.tree.delete_group(gid)
         self.apply_visibility()
         return ok
@@ -459,9 +476,14 @@ class Session:
         становится размещённый скан с наибольшим числом активных связей; позы — по графу.
         → список удалённых id.
         """
-        ids = {i for i in ids if self.by_id(i) is not None}
+        ids = {i for i in ids if self.by_id(i) is not None and bk.gid_of(i) is None}
         if not ids:
             return []
+        for i in ids:                                      # скан из запечённой группы — группа распекается
+            g = self.tree.baked_owner(i)
+            while g is not None:
+                self.unbake(g.id)
+                g = self.tree.baked_owner(i)
         self.scans = [sc for sc in self.scans if sc.id not in ids]
         self.edges = [e for e in self.edges if e['A'] not in ids and e['B'] not in ids]
         self.tree.sync([sc.id for sc in self.scans])
@@ -489,7 +511,141 @@ class Session:
         self.apply_visibility()
 
     def by_id(self, sid):
+        gid = bk.gid_of(sid)
+        if gid is not None:
+            return self.baked_unit(gid)
         return next((s for s in self.scans if s.id == sid), None)
+
+    # ── запечённые группы (baked.py) ─────────────────────────────────────
+    def baked_unit(self, gid):
+        """BakedGroup запечённой группы gid (или None)."""
+        g = self.tree.group(gid)
+        if g is None or not g.baked:
+            self._units.pop(gid, None)
+            return None
+        u = self._units.get(gid)
+        if u is None or u._spec is not g.baked:
+            u = bk.BakedGroup(self, gid, g.baked['root'], g.baked['poses'], g.name)
+            u._spec = g.baked
+            self._units[gid] = u
+        u.name = g.name
+        return u
+
+    def units(self):
+        """Узлы графа стыковки: сканы вне запечённых групп и внешние запечённые группы (по порядку сканов)."""
+        out, seen = [], set()
+        for sc in self.scans:
+            g = self.tree.baked_owner(sc.id)
+            if g is None:
+                out.append(sc)
+            elif g.id not in seen:
+                seen.add(g.id)
+                u = self.baked_unit(g.id)
+                if u is not None:
+                    out.append(u)
+        return out
+
+    def unit_of(self, sid):
+        """Узел графа, в который входит скан (запечённая группа или сам скан)."""
+        if bk.gid_of(sid) is not None:
+            return self.by_id(sid)
+        g = self.tree.baked_owner(sid)
+        return self.baked_unit(g.id) if g is not None else self.by_id(sid)
+
+    @staticmethod
+    def members(obj):
+        """{id скана: P} — сканы объекта (скан или запечённая группа) и их позы в его системе."""
+        return dict(obj.members) if isinstance(obj, bk.BakedGroup) else {obj.id: np.eye(4)}
+
+    def _unit_edges(self, edges):
+        """Рёбра на уровне узлов: внутренние для запечённой группы — пропуск, остальные — пересчёт."""
+        out = []
+        for e in edges:
+            ua, ub = self.unit_of(e['A']), self.unit_of(e['B'])
+            if ua is None or ub is None or ua is ub:
+                continue
+            if ua.id == e['A'] and ub.id == e['B']:
+                out.append(e)
+                continue
+            PA = self.members(ua).get(e['A'], np.eye(4))
+            PB = self.members(ub).get(e['B'], np.eye(4))
+            out.append(dict(e, A=ua.id, B=ub.id, T_canon=(PA @ np.asarray(e['T_canon']) @ np.linalg.inv(PB)).tolist()))
+        return out
+
+    def _check_baked(self, keys, target_gid=None):
+        """Перенос узлов в запечённую группу и из неё запрещён (ValueError с понятным текстом)."""
+        for k in keys:
+            g = self.tree.baked_owner(k)
+            if g is not None and g.id != k:
+                raise ValueError(f'«{short_name(k)}» в запечённой группе «{g.name}»: сначала распеките её')
+        if target_gid is not None:
+            g = self.tree.baked_owner(target_gid)
+            if g is not None:
+                raise ValueError(f'группа «{g.name}» запечена: сначала распеките её')
+
+    def bake(self, gid):
+        """
+        Запечь группу: внутренние позы — по графу её внутренних активных связей (запечённые
+        подгруппы — одно целое), главный скан — самый крупный. Все сканы ветки должны быть
+        связаны между собой. → BakedGroup.
+        """
+        g = self.tree.group(gid)
+        if g is None or g is self.tree.root:
+            raise ValueError('выберите группу')
+        if g.baked:
+            return self.baked_unit(gid)
+        ids = [i for i in self.tree.scans_in(gid) if self.by_id(i) is not None]
+        if len(ids) < 2:
+            raise ValueError('в группе меньше двух сканов')
+        not_ready = [i for i in ids if not self.by_id(i).analyzed]
+        if not_ready:
+            raise ValueError(f'дождитесь анализа сканов: {", ".join(short_name(i) for i in not_ready[:4])}')
+        inner = {}                                         # узлы внутри: запечённые подгруппы и сканы
+        for i in ids:
+            o = self.tree.baked_owner(i)
+            u = self.baked_unit(o.id) if o is not None and o is not g else self.by_id(i)
+            inner[u.id] = u
+        names = list(inner)
+        inside = set(ids) | set(names)
+        edges = self._unit_edges([e for e in self.active_edges() if e['A'] in inside and e['B'] in inside])
+        edges = [e for e in edges if e['A'] in inner and e['B'] in inner]
+        root_u = max(inner.values(), key=lambda u: len(u.down))
+        poses = sp.spanning_poses(names, edges, root_u.id)
+        missing = [n for n in names if n not in poses]
+        if missing:
+            raise ValueError('не связаны с остальными сканами группы: ' +
+                             ', '.join(short_name(n) for n in missing[:6]) +
+                             (' …' if len(missing) > 6 else '') + ' — состыкуйте их внутри группы')
+        if len(edges) > len(poses) - 1 and len(poses) > 1:
+            infos = [sp.information(e, _clean_res(inner[e['A']]), _clean_res(inner[e['B']])) *
+                     float(e.get('weight', 1.0)) + (MANUAL_INFO * np.eye(6) if e.get('method') == 'manual' else 0)
+                     for e in edges]
+            poses = sp.optimize(names, edges, poses, infos, root_u.id)
+        members = {}
+        for n, T in poses.items():
+            for sid, P in self.members(inner[n]).items():
+                members[sid] = np.asarray(T) @ P
+        root = root_u.root if isinstance(root_u, bk.BakedGroup) else root_u.id
+        Pr = members[root]                                 # система группы = система её главного скана
+        members = {sid: np.linalg.inv(Pr) @ P for sid, P in members.items()}
+        g.baked = {'root': root, 'poses': {sid: np.round(P, 9).tolist() for sid, P in members.items()}}
+        self.recompute_poses()
+        return self.baked_unit(gid)
+
+    def unbake(self, gid):
+        """Распечь группу: позы сканов остаются, связи группы переходят на её главный скан."""
+        g = self.tree.group(gid)
+        if g is None or not g.baked:
+            return False
+        uid, root = bk.unit_id(gid), g.baked['root']
+        for e in self.edges:
+            for k in ('A', 'B'):
+                if e[k] == uid:
+                    e[k] = root
+        g.baked = None
+        self._units.pop(gid, None)
+        self.recompute_poses()
+        return True
 
     @property
     def ref(self):
@@ -635,19 +791,17 @@ class Session:
         (повторный запуск с reuse продолжит с места).
         → {'pairs': всего пар, 'done': посчитано, 'cancelled': bool}
         """
-        names = [s.id for s in self.scans]
+        names = [u.id for u in self.units()]
+        known = set(names) | {s.id for s in self.scans}
         old = {(e['A'], e['B']): e for e in self.edges if e.get('method') not in ('manual', 'group')}
         manual = [e for e in self.edges if e.get('method') in ('manual', 'group')]
         if by_tree is None:
             by_tree = not self.tree.is_flat()
-        if combos is not None:
-            order = {n: i for i, n in enumerate(names)}
-            combos = [tuple(sorted(c, key=order.get)) for c in combos if c[0] in order and c[1] in order]
-        elif by_tree:
-            weight = {sc.id: sc.res.get('n_points', 0) for sc in self.scans}
-            combos = self.tree.registration_pairs(names, weight)
-        else:
-            combos = list(itertools.combinations(names, 2))
+        if combos is None:
+            combos = self.auto_pairs('tree' if by_tree else 'all')
+        order = {n: i for i, n in enumerate(names)}
+        combos = self._unit_pairs(combos)
+        combos = [tuple(sorted(c, key=order.get)) for c in combos if c[0] in order and c[1] in order]
         chosen = set(combos)
         edges = []
         n = len(combos)
@@ -676,7 +830,7 @@ class Session:
             edges.append(e)
         # ранее посчитанные пары вне выбранных — тоже данные, не выбрасываем
         edges += [dict(e, auto_ok=sp.edge_ok(e)) for k, e in old.items()
-                  if k not in chosen and 'T_canon' in e and k[0] in names and k[1] in names]
+                  if k not in chosen and 'T_canon' in e and k[0] in known and k[1] in known]
         with self.lock:
             self.edges = edges + manual
         if progress:
@@ -694,15 +848,28 @@ class Session:
         gid — только сканы этой ветки.
         """
         if method == 'within':
-            return self.within_group_pairs(gid)
+            return self._unit_pairs(self.within_group_pairs(gid))
         ids = [s.id for s in self.scans]
         if gid is not None and gid != 'root' and self.tree.group(gid) is not None:
             inside = set(self.tree.scans_in(gid))
             ids = [i for i in ids if i in inside]
         if method == 'tree' and not self.tree.is_flat():
             weight = {sc.id: sc.res.get('n_points', 0) if sc.analyzed else 0 for sc in self.scans}
-            return self.tree.registration_pairs(ids, weight)
-        return list(itertools.combinations(ids, 2))
+            return self._unit_pairs(self.tree.registration_pairs(ids, weight))
+        return self._unit_pairs(list(itertools.combinations(ids, 2)))
+
+    def _unit_pairs(self, combos):
+        """Пары сканов → пары узлов графа (запечённая группа — один узел), без повторов и пар внутри узла."""
+        out, seen = [], set()
+        for a, b in combos:
+            ua, ub = self.unit_of(a), self.unit_of(b)
+            if ua is None or ub is None or ua is ub:
+                continue
+            k = frozenset((ua.id, ub.id))
+            if k not in seen:
+                seen.add(k)
+                out.append((ua.id, ub.id))
+        return out
 
     def pending_pairs(self, combos, reuse=True):
         """Сколько пар из combos придётся считать (остальные уже посчитаны)."""
@@ -732,6 +899,10 @@ class Session:
         Группа как жёсткое целое по её внутренним активным связям (независимо от связи
         с опорным сканом). → (главный скан, {id: поза канон. скана → канон. главного}).
         """
+        g = self.tree.group(gid)
+        if g is not None and g.baked:
+            u = self.baked_unit(gid)
+            return u.root, dict(u.members)
         ids = [i for i in self.tree.scans_in(gid) if self.by_id(i) is not None and self.by_id(i).analyzed]
         if not ids:
             return None, {}
@@ -741,6 +912,11 @@ class Session:
 
     def group_res(self, gid):
         """Облако группы в системе её главного скана + плоскости и слои (как у одного скана)."""
+        u = self.baked_unit(gid)
+        if u is not None:                                  # запечённая: анализ уже есть (и в кеше проекта)
+            r = dict(u.res)
+            r.update(down=u.down, members=sorted(u.members), group=gid)
+            return r
         root, poses = self.group_frame(gid)
         if root is None:
             return None
@@ -855,10 +1031,15 @@ class Session:
         return sp.loop_checks(self.active_edges(), [s.id for s in self.scans])
 
     def recompute_poses(self):
-        """Позы всех сканов, связанных с опорным активными рёбрами."""
-        edges = self.active_edges()
-        names = [s.id for s in self.scans]
-        poses = sp.spanning_poses(names, edges, self.frame)
+        """
+        Позы всех сканов, связанных с опорным активными рёбрами. Граф строится по узлам
+        (units): запечённая группа — один узел, её внутренние связи не участвуют.
+        """
+        units = self.units()
+        names = [u.id for u in units]
+        edges = self._unit_edges(self.active_edges())
+        fu = self.unit_of(self.frame)
+        poses = sp.spanning_poses(names, edges, fu.id)
         if len(edges) > len(poses) - 1 and len(poses) > 1:
             infos = []
             for e in edges:
@@ -867,13 +1048,15 @@ class Session:
                 if e.get('method') == 'manual':
                     info = info + MANUAL_INFO * np.eye(6)
                 infos.append(info * float(e.get('weight', 1.0)))
-            poses = sp.optimize(names, edges, poses, infos, self.frame)
+            poses = sp.optimize(names, edges, poses, infos, fu.id)
+        # граф — в канон. системе опорного узла; опорный скан остаётся в единичной позе
+        G = homog(self.level) @ np.linalg.inv(self.members(fu).get(self.frame, np.eye(4)))
         with self.lock:
-            for s in self.scans:
-                if s.id in poses:
-                    self.set_Tc(s, homog(self.level) @ poses[s.id])   # граф — в канон. системе опорного
-                elif s.id != self.frame:
-                    s.pose = None
+            for u in units:
+                if u.id in poses:
+                    self.set_Tc(u, G @ poses[u.id])
+                elif u is not fu:
+                    u.pose = None
             self.ref.pose = np.eye(4)
 
     def set_frame(self, sid):
@@ -1029,9 +1212,11 @@ class Session:
         медиана толщины по плоскостям, м (None — нет общих поверхностей). → (медиана, ячеек).
         """
         import quality
-        q = quality.plane_cells(self, scan_ids={moving.id} | {s.id for s in fixed_list},
-                                poses={moving.id: np.asarray(T)})
-        pairs = [k for k in range(len(q)) if moving.id in q.scans[k]]
+        mem = self.members(moving)
+        fixed_ids = {i for s in fixed_list for i in self.members(s)} - set(mem)
+        q = quality.plane_cells(self, scan_ids=set(mem) | fixed_ids,
+                                poses={i: np.asarray(T) @ P for i, P in mem.items()})
+        pairs = [k for k in range(len(q)) if set(mem) & set(q.scans[k]) and fixed_ids & set(q.scans[k])]
         if not pairs:
             return None, 0
         return float(np.median(q.thick[pairs])), len(pairs)
@@ -1285,6 +1470,17 @@ def _rot_rpy(droll_deg=0.0, dpitch_deg=0.0, dyaw_deg=0.0):
     Rx = np.array([[1, 0, 0], [0, np.cos(r), -np.sin(r)], [0, np.sin(r), np.cos(r)]])
     Ry = np.array([[np.cos(p), 0, np.sin(p)], [0, 1, 0], [-np.sin(p), 0, np.cos(p)]])
     return pr.rot_z(np.radians(dyaw_deg)) @ Ry @ Rx
+
+
+def short_name(sid):
+    """Короткое имя скана для сообщений: без даты и расширения."""
+    import re
+    n = str(sid)
+    for ext in ('.ply', '.e57', '.pcd', '.las'):
+        if n.endswith(ext):
+            n = n[:-len(ext)]
+    m = re.search(r'(\d{6})(?:_\d+)?$', n)
+    return n if m is None else n[m.start():]
 
 
 def fmt_eta(sec):

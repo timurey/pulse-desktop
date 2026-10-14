@@ -29,6 +29,7 @@ import dynamic
 import surface
 import measure
 import section
+import baked as bk
 from scan_session import Session
 from scan_tree import KINDS
 
@@ -509,6 +510,11 @@ class MainWindow(QMainWindow):
                 'Каждая группа — жёсткое целое (облако по внутренним связям); стыкуются группы между собой' + SH)
         g.small('mdi6.target', 'Кандидаты позы', tool('cand'),
                 'Гипотезы позы скана относительно размещённых' + SH)
+        g = rb.add_group(pg, 'Группы')
+        g.big('mdi6.lock-outline', 'Запечь\nгруппу', lambda: self.bake_group(None, True),
+              'Зафиксировать позы внутри выбранной группы: при стыковке групп она — одно облако')
+        g.small('mdi6.lock-open-variant-outline', 'Распечь', lambda: self.bake_group(None, False),
+                'Снова стыковать сканы группы по отдельности (позы сохраняются)')
         g = rb.add_group(pg, 'Вручную')
         self.b_manual = g.big('mdi6.vector-combine', 'Ручная', lambda: self.start_manual(),
                               'Ручная стыковка выбранного скана', checkable=True)
@@ -1361,12 +1367,14 @@ class MainWindow(QMainWindow):
 
         def ok(r):
             finish()
+            self._bake_fail = None
             if done:
                 done(r)
 
         def fail(e):
             finish()
-            self.set_status(f'Ошибка: {e}')
+            f, self._bake_fail = getattr(self, '_bake_fail', None), None
+            (f or (lambda e: self.set_status(f'Ошибка: {e}')))(e)
         bg.run(lambda: fn(progress), ok, fail)
         return True
 
@@ -1403,7 +1411,18 @@ class MainWindow(QMainWindow):
         return 0
 
     def scan_color(self, sid):
+        g = self.s.tree.baked_owner(sid) if self.s.by_id(sid) is not None else None
+        if g is not None and g.baked:
+            sid = g.baked['root']
         return scan_rgb(self.scan_index(sid), self.theme.dark)
+
+    def _names(self, obj):
+        """Имена облаков 3D-вида объекта (скан или запечённая группа)."""
+        return {f'scan:{i}' for i in self.s.members(obj)}
+
+    @staticmethod
+    def _tree_key(obj):
+        return obj.gid if isinstance(obj, bk.BakedGroup) else obj.id
 
     def has_manual_edge(self, sid):
         return any(e.get('method') == 'manual' and sid in (e['A'], e['B']) and self.s.edge_active(e)
@@ -1451,6 +1470,8 @@ class MainWindow(QMainWindow):
         """
         if sc is self.moving and self.T_moving is not None:
             return self.T_moving
+        if isinstance(self.moving, bk.BakedGroup) and self.T_moving is not None and sc.id in self.moving.members:
+            return self.T_moving @ self.moving.members[sc.id]
         T = self.s.Tc(sc)
         if T is None and self.s.scans and self.s.ref.pose is not None:
             T = self.s.Tc(self.s.ref)
@@ -1940,7 +1961,13 @@ class MainWindow(QMainWindow):
 
     def on_tree_move_drop(self, keys, gid, index=None):
         keys = [keys] if isinstance(keys, str) else list(keys)
-        if not self.s.move_nodes(keys, gid, index):
+        try:
+            ok = self.s.move_nodes(keys, gid, index)
+        except ValueError as e:
+            self.set_status(f'нельзя переместить: {e}')
+            self.tree_panel.rebuild()
+            return
+        if not ok:
             self.set_status('нельзя переместить сюда (группу нельзя вложить в саму себя)')
             return
         self.apply_visibility()
@@ -2020,7 +2047,11 @@ class MainWindow(QMainWindow):
             return
         nm, kind = d.values()
         keys = [k for k in keys if self.s.tree.node(k) is not None]     # дерево могло измениться
-        gid = self.s.group_nodes(keys, nm.strip() or 'Группа', kind) if keys else None
+        try:
+            gid = self.s.group_nodes(keys, nm.strip() or 'Группа', kind) if keys else None
+        except ValueError as e:
+            self.set_status(f'группа не создана: {e}')
+            return
         if gid is None:
             QMessageBox.warning(self, 'Группа не создана',
                                 'Не удалось создать группу из выделенного: узлы не найдены в дереве или '
@@ -2098,6 +2129,8 @@ class MainWindow(QMainWindow):
                 self.set_points_visible(True)
                 self.refresh_surface()
                 self.tree_panel.rebuild()
+        elif name in ('bake', 'unbake'):
+            self.bake_group(key, name == 'bake')
         elif name in ('auto_group', 'auto_subgroups'):
             self.tree_panel.select_keys([key])
             self.tree_sel = key
@@ -2137,13 +2170,57 @@ class MainWindow(QMainWindow):
         elif name == 'focus':
             self.focus_node(key)
 
+    def bake_group(self, key=None, bake=True):
+        """Запечь / распечь группу (выбранную в дереве или группу выбранного скана)."""
+        key = key or self.tree_sel
+        g = self.s.tree.group(key) if key else None
+        if g is None and key:
+            g = self.s.tree.baked_owner(key) if not bake else self.s.tree.parent(key)
+        if g is None or g is self.s.tree.root:
+            self.set_status('выберите группу в дереве')
+            return
+        if not bake:
+            self.s.unbake(g.id)
+            self.redraw_all()
+            self.refresh_all()
+            self.set_status(f'группа «{g.name}» распечена: сканы снова стыкуются по отдельности')
+            return
+        if g.baked:
+            self.set_status(f'группа «{g.name}» уже запечена')
+            return
+        sess = self.s
+
+        def work(p):
+            p(0.2, f'запекание «{g.name}»: позы внутри группы')
+            u = sess.bake(g.id)
+            p(0.5, f'запекание «{g.name}»: анализ общего облака')
+            u.analyze()
+            return u
+
+        def done(u):
+            self.redraw_all()
+            self.refresh_all()
+            self.tree_panel.select_keys([g.id])
+            self.set_status(f'группа «{g.name}» запечена: {len(u.members)} скан. — при стыковке одно облако '
+                            f'({len(u.down):,} точек, плоскостей {len(u.planes)})'.replace(',', ' '))
+
+        def fail(e):
+            self.set_status(f'группа не запечена: {e}')
+        if self.analyzing:
+            self.set_status('дождитесь окончания фонового анализа')
+            return
+        self._bake_fail = fail
+        if not self.run_bg(f'запекание группы «{g.name}»…', work, done):
+            self._bake_fail = None
+
     def refine_scan(self, sid):
         """Уточнить стыковку размещённого скана: ручная стыковка с соседом по графу + автоподгонка."""
-        sc = self.s.by_id(sid)
-        if sc is None or sc.pose is None or sid == self.s.frame:
+        sc = self.s.unit_of(sid) if sid else None
+        if sc is None or sc.pose is None or sc is self.s.unit_of(self.s.frame):
             self.set_status('уточнить можно размещённый скан, кроме опорного')
             return
-        cand = [e for e in self.s.active_edges() if sid in (e['A'], e['B'])]
+        sid = sc.id
+        cand = [e for e in self.s._unit_edges(self.s.active_edges()) if sid in (e['A'], e['B'])]
         cand.sort(key=lambda e: (e.get('method') != 'manual', -e.get('score', 0)))   # сначала ручные связи
         partner = next((e['B'] if e['A'] == sid else e['A'] for e in cand), self.s.frame)
         self.start_manual(partner, sid)
@@ -2524,7 +2601,9 @@ class MainWindow(QMainWindow):
 
     # ── ручная стыковка ──────────────────────────────────────────────────
     def manual_items(self):
-        return [(sc.id, short(sc.id), self.scan_color(sc.id)[1], sc.pose is not None) for sc in self.s.scans]
+        return [(u.id, f'«{u.name}» · группа' if isinstance(u, bk.BakedGroup) else short(u.id),
+                 self.scan_color(u.root if isinstance(u, bk.BakedGroup) else u.id)[1], u.pose is not None)
+                for u in self.s.units()]
 
     def start_manual(self, fixed_id=None, moving_id=None, T_init=None):
         """Начать ручную стыковку; по умолчанию подвижный — выбранный в дереве или неразмещённый."""
@@ -2538,17 +2617,19 @@ class MainWindow(QMainWindow):
                 self.b_manual.setChecked(True)
                 return
         s = self.s
+        fu = s.unit_of(s.frame) if s.frame else None
         if moving_id is None:
-            sel = s.by_id(self.tree_sel) if self.tree_sel else None
-            if sel is not None and sel.id != s.frame:
+            sel = (s.baked_unit(self.tree_sel) or s.unit_of(self.tree_sel)) if self.tree_sel else None
+            if sel is not None and sel is not fu:
                 moving_id = sel.id
             else:
-                un = [sc.id for sc in s.scans if sc.pose is None]
-                moving_id = un[0] if un else next((sc.id for sc in s.scans if sc.id != s.frame), None)
+                un = [u.id for u in s.units() if u.pose is None]
+                moving_id = un[0] if un else next((u.id for u in s.units() if u is not fu), None)
+        moving = s.unit_of(moving_id) if moving_id else None
         if fixed_id is None:
-            fixed_id = s.frame if s.frame != moving_id else next(
-                (sc.id for sc in s.placed() if sc.id != moving_id), None)
-        fixed, moving = s.by_id(fixed_id), s.by_id(moving_id)
+            fixed_id = fu.id if fu is not None and fu is not moving else next(
+                (u.id for u in s.units() if u.pose is not None and u is not moving), None)
+        fixed = s.unit_of(fixed_id) if fixed_id else None
         if fixed is None or moving is None or fixed is moving or fixed.pose is None:
             self.b_manual.setChecked(False)
             self.set_status('Нужны размещённый неподвижный и другой подвижный скан')
@@ -2576,7 +2657,7 @@ class MainWindow(QMainWindow):
         if self.ribbon.current() != 'reg':
             self.ribbon.set_tab('reg')
         self.manual.set_scans(self.manual_items(), fixed.id, moving.id)
-        self.only_show({fixed.id, moving.id})
+        self.only_show({self._tree_key(fixed), self._tree_key(moving)})
         self.redraw_all()
         self.refresh_manual()
         self.live_score()
@@ -2697,14 +2778,18 @@ class MainWindow(QMainWindow):
     def _update_moving(self):
         if self.moving is None:
             return
-        n = f'scan:{self.moving.id}'
-        if self.view.has(n):
-            self.view.set_transform(n, self.T_moving)
-        else:
-            self._show_scan(self.moving)
+        for sid, P in self.s.members(self.moving).items():
+            n = f'scan:{sid}'
+            T = self.T_moving @ P
+            if self.view.has(n):
+                self.view.set_transform(n, T)
+            elif self.s.by_id(sid) is not None:
+                self._show_scan(self.s.by_id(sid))
+            for name in (f'feat:planes:{sid}', f'feat:openings:{sid}'):
+                if self.view.has(name):
+                    self.view.set_transform(name, T)
         for name in list(self.view.items):
-            if name.endswith(':B') and name.startswith('pick:') or name in (
-                    f'feat:planes:{self.moving.id}', f'feat:openings:{self.moving.id}'):
+            if name.endswith(':B') and name.startswith('pick:'):
                 self.view.set_transform(name, self.T_moving)
         self._score_rows()
 
@@ -2804,7 +2889,7 @@ class MainWindow(QMainWindow):
     # ── автоподгонка и опорная точка ─────────────────────────────────────
     def _fit_targets(self):
         if self.manual.fit_target.value() == 'all':
-            return [s for s in self.s.placed() if s is not self.moving] or [self.fixed]
+            return [u for u in self.s.units() if u.pose is not None and u is not self.moving] or [self.fixed]
         return [self.fixed]
 
     def on_autofit(self):
@@ -3169,7 +3254,7 @@ class MainWindow(QMainWindow):
         if kind == 'press' and ev.button() == Qt.LeftButton:
             if manual and self.pivot_pick and mods & (Qt.ControlModifier | Qt.MetaModifier):
                 want = self.fixed if self.pivot_A is None else self.moving
-                hit = self.view.pick_point(x, y, names={f'scan:{want.id}'})
+                hit = self.view.pick_point(x, y, names=self._names(want))
                 if hit is None:
                     self.set_status('мимо облака')
                 else:
@@ -3189,12 +3274,13 @@ class MainWindow(QMainWindow):
                 # сначала — скан, который ожидается по шагу (неподвижный, затем подвижный):
                 # сканы перекрываются, и ближайшая к глазу точка часто чужая
                 want = self.moving if self.pending is not None else self.fixed
-                hit = self.view.pick_point(x, y, names={f'scan:{want.id}'}) or \
-                    self.view.pick_point(x, y, names={f'scan:{self.fixed.id}', f'scan:{self.moving.id}'})
+                hit = self.view.pick_point(x, y, names=self._names(want)) or \
+                    self.view.pick_point(x, y, names=self._names(self.fixed) | self._names(self.moving))
                 if hit is None:
                     self.set_status('мимо облака')
                 else:
-                    self.pick_world(hit[1], self._scan_of(hit[0]))
+                    sc = self._scan_of(hit[0])
+                    self.pick_world(hit[1], self.s.unit_of(sc.id) if sc is not None else None)
                 return True
             if manual and mods & (Qt.ShiftModifier | Qt.AltModifier):
                 z0 = float(self.T_moving[2, 3])

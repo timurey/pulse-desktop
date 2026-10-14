@@ -237,7 +237,7 @@ class TreePanel(QFrame):
             return
         t = s.tree
 
-        def add(parent, node):
+        def add(parent, node, locked=False):
             if isinstance(node, Group):
                 ids = t.scans_in(node.id)
                 if flt and not any(flt in x.lower() for x in ids):
@@ -246,13 +246,21 @@ class TreePanel(QFrame):
                 it.setData(0, ROLE, node.id)
                 it.setData(0, ROLE + 1, True)
                 it.setSizeHint(0, QSize(10, 30))
-                it.setFlags(it.flags() | Qt.ItemIsDropEnabled | Qt.ItemIsDragEnabled)
+                if locked:                                 # внутри запечённой группы — без перетаскивания
+                    it.setFlags(it.flags() & ~Qt.ItemIsDropEnabled & ~Qt.ItemIsDragEnabled)
+                elif node.baked:                           # запечённую можно перенести целиком, но не в неё
+                    it.setFlags((it.flags() | Qt.ItemIsDragEnabled) & ~Qt.ItemIsDropEnabled)
+                else:
+                    it.setFlags(it.flags() | Qt.ItemIsDropEnabled | Qt.ItemIsDragEnabled)
                 self._items[node.id] = it
-                row = _Row(self, node.id, node.name, node.visible, group=True, count=len(ids))
-                row.setToolTip(f'{node.kind}: сканов {len(ids)}')
+                row = _Row(self, node.id, node.name, node.visible, group=True, count=len(ids),
+                           chip=('запечена', 'acc') if node.baked else None)
+                row.setToolTip(f'{node.kind}: сканов {len(ids)}' + (
+                    '. Запечена: при стыковке — одно облако, внутренние позы зафиксированы '
+                    '(правая кнопка — «Распечь»)' if node.baked else ''))
                 tree.setItemWidget(it, 0, row)
                 for ch in node.children:
-                    add(it, ch)
+                    add(it, ch, locked or bool(node.baked))
                 it.setExpanded(first or flt != '' or node.id in expanded or node.id in self.expand_next)
             else:
                 if flt and flt not in node.scan.lower():
@@ -261,7 +269,8 @@ class TreePanel(QFrame):
                 it.setData(0, ROLE, node.scan)
                 it.setData(0, ROLE + 1, False)
                 it.setSizeHint(0, QSize(10, 30))
-                it.setFlags((it.flags() | Qt.ItemIsDragEnabled) & ~Qt.ItemIsDropEnabled)
+                it.setFlags(((it.flags() | Qt.ItemIsDragEnabled) if not locked else
+                             (it.flags() & ~Qt.ItemIsDragEnabled)) & ~Qt.ItemIsDropEnabled)
                 self._items[node.scan] = it
                 st = self.status_of(node.scan) if self.status_of else None
                 row = _Row(self, node.scan, short(node.scan), node.visible,
@@ -364,6 +373,12 @@ class TreePanel(QFrame):
             return
         if key is not None:
             if is_group:
+                g = self.session.tree.group(key) if self.session else None
+                if g is not None and g.baked:
+                    act('Распечь группу', 'unbake', 'mdi6.lock-open-variant-outline')
+                else:
+                    act('Запечь группу (одно облако для стыковки)', 'bake', 'mdi6.lock-outline')
+                m.addSeparator()
                 act('Автостыковка внутри группы', 'auto_group', 'mdi6.folder-network-outline')
                 act('Стыковка подгрупп между собой', 'auto_subgroups', 'mdi6.vector-arrange-above')
                 m.addSeparator()
