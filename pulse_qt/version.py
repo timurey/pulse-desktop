@@ -1,4 +1,4 @@
 """Версия Pulse Scan (окно Qt + логика стыковки)."""
 
-__version__ = '0.9.0-rc4'
-RELEASE_DATE = '2026-10-13'
+__version__ = '0.9.0-rc5'
+RELEASE_DATE = '2026-10-14'
