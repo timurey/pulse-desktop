@@ -336,6 +336,139 @@ class Session:
             e['path'] = sp.rel_path(src, path)
         return proj
 
+    def import_project(self, path, bake=False, progress=None):
+        """
+        Импорт другого проекта (.pulse / .json) в этот: его дерево — новой группой (имя —
+        имя проекта) с подгруппами; сканы с чисткой, настройками отображения и кешем анализа;
+        связи между его сканами (автоматические и ручные); запечённые группы. Позы внутри
+        импортированной части — по её связям; относительно этого проекта она не размещена,
+        если нет общих сканов. Скан с тем же файлом, что уже есть, не дублируется (его связи
+        с импортированными сохраняются); совпадающее имя другого файла получает суффикс.
+        Опорный скан, горизонт, нулевой уровень, замеры и сечение импортируемого проекта не
+        переносятся. bake — сразу запечь импортированную группу.
+        → {'group', 'added', 'shared', 'renamed', 'missing', 'edges', 'cached', 'baked', 'bake_error'}
+        """
+        path = Path(path)
+        if not path.exists():
+            raise ValueError(f'файл проекта не найден: {path}')
+        if self.project_path and path.resolve() == Path(self.project_path).resolve():
+            raise ValueError('это тот же проект')
+        proj = sp.load_project(path)
+        say = progress or (lambda f, m: None)
+        by_path = {str(Path(sc.path).resolve()): sc.id for sc in self.scans}
+        used = {sc.id for sc in self.scans}
+        idmap, added, shared, renamed, missing = {}, [], [], {}, []
+        for k, e in enumerate(proj['scans']):
+            say(0.6 * k / max(1, len(proj['scans'])), f"импорт проекта: {e['id']}")
+            src = str(Path(e['path']).resolve())
+            if src in by_path:                             # тот же файл уже в проекте
+                idmap[e['id']] = by_path[src]
+                shared.append(by_path[src])
+                continue
+            if not Path(src).exists():
+                missing.append(e['id'])
+                continue
+            sid = e['id']
+            if sid in used:
+                stem, suf = Path(sid).stem, Path(sid).suffix
+                n = 2
+                while f'{stem}_{n}{suf}' in used:
+                    n += 1
+                sid = f'{stem}_{n}{suf}'
+                renamed[e['id']] = sid
+            used.add(sid)
+            sc = Scan(src, e.get('up', 'auto'), None, sid)
+            sc.clean = e.get('clean', True)
+            sc.erase = [np.asarray(r, float) for r in e.get('erase', [])]
+            sc.drop = np.asarray(e.get('drop', []), np.int64)
+            sc.source = e.get('source')
+            sc.display = e.get('display')
+            idmap[e['id']] = sid
+            added.append(sc)
+        # кеш анализа из импортируемого архива (ключ — по самому файлу скана)
+        cached = 0
+        for k, sc in enumerate(added):
+            say(0.6 + 0.3 * k / max(1, len(added)), f'кеш анализа: {sc.id}')
+            old = next((o for o, n in idmap.items() if n == sc.id), sc.id)
+            try:
+                c = project_store.read_cache(str(path), old, sc.cache_key())
+            except OSError:
+                c = None
+            if c is not None and sc.load_cache(*c):
+                sc.cache_dirty = True                      # записать в кеш этого проекта
+                cached += 1
+        if not added and not shared:
+            raise ValueError('в проекте нет сканов, которые можно импортировать (файлы не найдены)')
+        self.scans += added
+        if self.frame is None and added:
+            self.frame = added[0].id
+            added[0].pose = np.eye(4)
+        # дерево: новая группа с подгруппами импортируемого проекта
+        other = Tree.from_json(proj.get('tree'), [e['id'] for e in proj['scans']])
+        gmap = {}
+        top = self.tree.add_group('root', path.stem, 'прочее')
+        gmap[other.root.id] = top
+        self.tree.sync([sc.id for sc in self.scans])       # новые сканы — в корень, затем переносим
+
+        def copy(src_g, dst_gid):
+            for ch in src_g.children:
+                if hasattr(ch, 'children'):
+                    gid = self.tree.add_group(dst_gid, ch.name, ch.kind)
+                    g = self.tree.group(gid)
+                    g.visible, g.display = ch.visible, ch.display
+                    gmap[ch.id] = gid
+                    copy(ch, gid)
+                elif ch.scan in idmap and idmap[ch.scan] in {x.id for x in added}:
+                    self.tree.move(idmap[ch.scan], dst_gid)
+                    lf = self.tree.leaf(idmap[ch.scan])
+                    if lf is not None:
+                        lf.visible = ch.visible
+        copy(other.root, top)
+        # запечённые группы импортируемого проекта (позы — по новым id)
+        for og in other.groups():
+            if og.baked and og.id in gmap:
+                poses = {idmap[k]: v for k, v in og.baked['poses'].items() if k in idmap}
+                root = idmap.get(og.baked['root'])
+                if root is not None and len(poses) == len(og.baked['poses']):
+                    self.tree.group(gmap[og.id]).baked = {'root': root, 'poses': poses}
+        # связи: id сканов и запечённых групп — новые; между двумя уже бывшими сканами — не дублируем
+        def rid(x):
+            g = bk.gid_of(x)
+            if g is not None:
+                return bk.unit_id(gmap[g]) if g in gmap else None
+            return idmap.get(x)
+        new_ids = {sc.id for sc in added}
+        n_edges = 0
+        for e in proj.get('pairs', []) + proj.get('manual_edges', []):
+            a, b = rid(e['A']), rid(e['B'])
+            if a is None or b is None or a == b:
+                continue
+            if not ({a, b} & (new_ids | {bk.unit_id(g) for g in gmap.values()})):
+                continue
+            e2 = dict(e, A=a, B=b)
+            if 'groups' in e2:
+                e2['groups'] = [gmap.get(g, g) for g in e2['groups']]
+            self.edges.append(e2)
+            n_edges += 1
+        self._recolor()
+        self.apply_visibility()
+        self.sync_filters()
+        say(0.95, 'позы по графу')
+        self.recompute_poses()
+        baked_ok, err = False, None
+        if bake:
+            todo = [sc for sc in added if not sc.analyzed]
+            for k, sc in enumerate(todo):                  # запекание — по проанализированным сканам
+                say(0.95, f'анализ {sc.id} ({k + 1}/{len(todo)})')
+                sc.analyze()
+            try:
+                self.bake(top)
+                baked_ok = True
+            except ValueError as ex:
+                err = str(ex)
+        return {'group': top, 'added': [sc.id for sc in added], 'shared': shared, 'renamed': renamed,
+                'missing': missing, 'edges': n_edges, 'cached': cached, 'baked': baked_ok, 'bake_error': err}
+
     def pack(self, dest, as_zip=False, progress=None):
         """
         Проект для передачи другому человеку: папка (или один zip) с проектом .pulse,

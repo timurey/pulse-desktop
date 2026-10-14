@@ -489,6 +489,8 @@ class MainWindow(QMainWindow):
         g.big('mdi6.access-point', 'Со\nсканера', self.on_import_scanner, 'Скачать записи со сканера и импортировать')
         g.big('mdi6.folder-open-outline', 'Bag', self.on_import_bags, 'Импорт bag из папки')
         g.big('mdi6.cloud-upload-outline', 'Облако', self.on_add_scan, 'Добавить облако (e57, ply, pcd, las)')
+        g.big('mdi6.file-import-outline', 'Проект', self.on_import_project,
+              'Импорт другого проекта: его сканы, группы, связи и чистка — новой группой')
         g = rb.add_group(pg, 'Дерево')
         g.small('mdi6.folder-plus-outline', 'Новая группа', lambda: self.on_tree_action('new_group', sel()))
         g.small('mdi6.folder-plus', 'Сгруппировать', self.group_selected,
@@ -1485,6 +1487,9 @@ class MainWindow(QMainWindow):
         T = self.s.Tc(sc)
         if T is None and self.s.scans and self.s.ref.pose is not None:
             T = self.s.Tc(self.s.ref)
+            u = self.s.unit_of(sc.id)
+            if isinstance(u, bk.BakedGroup) and sc.id in u.members:    # неразмещённая запечённая группа —
+                T = T @ u.members[sc.id]                               # со своей взаимной раскладкой
         return T
 
     def _show_scan(self, sc):
@@ -1785,6 +1790,50 @@ class MainWindow(QMainWindow):
             self._ingest([self.s.add_scan(p) for p in clouds])
         if bags:
             self.import_bags_dialog(bags[0])
+
+    def on_import_project(self):
+        """Импорт другого проекта (Session.import_project) — новой группой, можно сразу запечь."""
+        path, _ = QFileDialog.getOpenFileName(self, 'Импорт проекта', self._start_dir(),
+                                              'Проекты Pulse (*.pulse *.json)')
+        if not path:
+            return
+        d = AskDialog(self, f'Импорт проекта «{Path(path).stem}»',
+                      [('Сразу запечь (при стыковке — одно облако со своими позами)', 'combo', 'да', ['да', 'нет'])],
+                      'mdi6.file-import-outline', 'Импортировать')
+        if not d.exec():
+            return
+        bake = d.values()[0] == 'да'
+        sess = self.s
+
+        def done(r):
+            new = [sess.by_id(i) for i in r['added'] if sess.by_id(i) is not None]
+            for sc in new:
+                sc._display = sess.display_points(sc) if sc.analyzed else sc.quick_points(quick_voxel())
+            self.tree_panel.expand_next = {r['group']}
+            self.refresh_all()
+            self.redraw_all()
+            self._ingest([sc for sc in new if not sc.analyzed], show=True)
+            self.tree_panel.select_keys([r['group']])
+            parts = [f"импортировано сканов: {len(r['added'])}", f"связей: {r['edges']}"]
+            if r['shared']:
+                parts.append(f"уже были в проекте: {', '.join(short(x) for x in r['shared'])}")
+            if r['renamed']:
+                parts.append('переименованы: ' + ', '.join(f'{short(a)} → {b}' for a, b in r['renamed'].items()))
+            if r['missing']:
+                parts.append(f"не найдены файлы: {', '.join(short(x) for x in r['missing'][:5])}")
+            if r['baked']:
+                parts.append('группа запечена — пристыкуйте её («Группы между собой», автостыковка или ручная)')
+            elif r['bake_error']:
+                parts.append(f"не запечена: {r['bake_error']}")
+            self.set_status('; '.join(parts))
+            self._update_title()
+
+        def fail(e):
+            QMessageBox.warning(self, 'Импорт проекта', f'Проект не импортирован:\n{e}')
+        self._bake_fail = fail
+        if not self.run_bg(f'импорт проекта «{Path(path).stem}»…',
+                           lambda p: sess.import_project(path, bake=bake, progress=p), done):
+            self._bake_fail = None
 
     # ── импорт ───────────────────────────────────────────────────────────
     def _bags_dir(self):
