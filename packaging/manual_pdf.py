@@ -8,6 +8,9 @@ headless Chrome / Chromium.
 
     .venv312/bin/pip install markdown pypdf
     .venv312/bin/python packaging/manual_pdf.py [--out файл.pdf] [--chrome путь]
+    # выдержка «что нового» — та же вёрстка, другой исходник и подзаголовок:
+    .venv312/bin/python packaging/manual_pdf.py --src docs/manual/CHANGES-0.9.0-rc5.md \
+        --subtitle 'Что нового в 0.9.0-rc5' --out docs/manual/PulseScan-0.9.0-rc5-changes.pdf
 """
 
 import argparse
@@ -41,7 +44,7 @@ CSS = """
 @page {
   size: A4; margin: 18mm 17mm 18mm 17mm;
   @bottom-right { content: counter(page); font: 9pt 'Plex'; color: #8a93a3; }
-  @bottom-left { content: 'Pulse Scan {version} · руководство пользователя'; font: 9pt 'Plex'; color: #8a93a3; }
+  @bottom-left { content: 'Pulse Scan {version} · {footer}'; font: 9pt 'Plex'; color: #8a93a3; }
 }
 @page :first { @bottom-right { content: none; } @bottom-left { content: none; } }
 * { box-sizing: border-box; }
@@ -89,10 +92,10 @@ def find_chrome(explicit=None):
     raise SystemExit('не найден Chrome / Chromium / Edge: укажите --chrome путь')
 
 
-def build_html(version):
+def build_html(version, src_path=MANUAL, subtitle='Руководство пользователя'):
     import markdown
     from markdown.extensions.toc import slugify_unicode
-    src = MANUAL.read_text(encoding='utf-8')
+    src = Path(src_path).read_text(encoding='utf-8')
     # заголовок и строку версии — на титульную страницу; «Содержание» — отдельной страницей
     src = re.sub(r'\A# .*?\n', '', src, count=1)
     src = re.sub(r'\AВерсия программы:.*?\n', '', src.lstrip(), count=1)
@@ -113,14 +116,15 @@ def build_html(version):
                            lambda m: f'href="#{ids.get(urllib.parse.unquote(m.group(1)), m.group(1))}"', h)
     body_html, toc_html = fix(body_html), fix(toc_html)
     icon = (ROOT / 'packaging' / 'icon.png').as_uri()
-    css = CSS.replace('{fonts}', FONTS.as_uri()).replace('{version}', version)
+    css = (CSS.replace('{fonts}', FONTS.as_uri()).replace('{version}', version)
+           .replace('{footer}', subtitle[:1].lower() + subtitle[1:]))
     return f"""<!doctype html><html lang="ru"><head><meta charset="utf-8">
-<base href="{(MANUAL.parent.as_uri())}/"><title>Pulse Scan — руководство пользователя</title>
+<base href="{(MANUAL.parent.as_uri())}/"><title>Pulse Scan — {subtitle.lower()}</title>
 <style>{css}</style></head><body>
 <section class="cover">
   <img src="{icon}" alt="">
   <div class="t">Pulse Scan</div>
-  <div class="s">Руководство пользователя</div>
+  <div class="s">{subtitle}</div>
   <div class="lead">{md(lead)}</div>
   <div class="v">Версия {version} · {time.strftime('%Y-%m-%d')}</div>
 </section>
@@ -155,14 +159,14 @@ def print_pdf(html, out, chrome):
     shutil.rmtree(tmp, ignore_errors=True)
 
 
-def set_meta(out, version):
+def set_meta(out, version, subtitle='руководство пользователя'):
     try:
         from pypdf import PdfReader, PdfWriter
     except ImportError:
         return None
     r = PdfReader(str(out))
     w = PdfWriter(clone_from=r)
-    w.add_metadata({'/Title': f'Pulse Scan {version} — руководство пользователя', '/Author': 'Pulse',
+    w.add_metadata({'/Title': f'Pulse Scan {version} — {subtitle}', '/Author': 'Pulse',
                     '/Subject': 'Обработка сканов лидара Pulse: импорт, стыковка, контроль, чистка, экспорт'})
     with open(out, 'wb') as f:
         w.write(f)
@@ -173,15 +177,17 @@ def main():
     ap = argparse.ArgumentParser(description='Руководство Pulse Scan в PDF')
     ap.add_argument('--out', default=str(ROOT / 'docs' / 'manual' / 'PulseScan-manual.pdf'))
     ap.add_argument('--chrome', default=None)
+    ap.add_argument('--src', default=str(MANUAL), help='исходник Markdown (в docs/manual: картинки — img/)')
+    ap.add_argument('--subtitle', default='Руководство пользователя')
     a = ap.parse_args()
     sys.path.insert(0, str(ROOT))
     from pulse_qt.version import __version__
     out = Path(a.out)
-    html = build_html(__version__)
+    html = build_html(__version__, a.src, a.subtitle)
     if os.environ.get('PULSE_MANUAL_HTML'):
         Path(os.environ['PULSE_MANUAL_HTML']).write_text(html, encoding='utf-8')
     print_pdf(html, out, find_chrome(a.chrome))
-    n = set_meta(out, __version__)
+    n = set_meta(out, __version__, a.subtitle[:1].lower() + a.subtitle[1:])
     print(f'{out}: {out.stat().st_size / 1e6:.1f} МБ' + (f', страниц {n}' if n else ''))
 
 

@@ -150,6 +150,8 @@ git push origin <ветка> vX.Y.Z
 ```bash
 .venv312/bin/pip install markdown pypdf
 .venv312/bin/python packaging/manual_pdf.py        # → docs/manual/PulseScan-manual.pdf
+.venv312/bin/python packaging/manual_pdf.py --src docs/manual/CHANGES-0.9.0-rc5.md \
+    --subtitle 'Что нового в 0.9.0-rc5' --out docs/manual/PulseScan-0.9.0-rc5-changes.pdf   # выдержка «что нового»
 ```
 
 Вёрстка A4, шрифты IBM Plex из `pulse_qt/fonts`, титульная страница, оглавление со ссылками, каждый раздел с новой страницы, номера страниц. Печатает headless Chrome (на Windows подойдёт Edge; путь — `--chrome`). PDF лежит в репозитории: пересоберите его после правок руководства, иначе в пакет попадёт старый. В DMG и zip он входит вместе с папкой «Руководство».
