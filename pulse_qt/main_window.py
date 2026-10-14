@@ -2660,6 +2660,16 @@ class MainWindow(QMainWindow):
             self.refresh_all()
             msg = (f'Автостыковка ({what}, пар {len(combos)}){self._auto_note(r)}: размещено '
                    f'{len(self.s.placed())} из {len(self.s.scans)}')
+            lr = [e for e in self.s.edges if e.get('loop_rejected')]
+            if lr:
+                msg += (f"; не приняты из-за несходящихся циклов: "
+                        f"{', '.join(short(e['A']) + '–' + short(e['B']) for e in lr[:4])}{' …' if len(lr) > 4 else ''}")
+            mr = self.s.edge_residuals()
+            if mr:
+                msg += ('; связи не согласуются между собой: ' +
+                        ', '.join(f"{short(e['A'])}–{short(e['B'])}{' (ручная)' if e.get('method') == 'manual' else ''} "
+                                  f"{dt * 100:.0f} см / {da:.1f}°" for e, dt, da in mr[:4]) +
+                        ' — неверную (часто грубую ручную) отклоните во вкладке «Пары»')
             self.set_status(msg)
             self.auto_panel.set_result(msg)
             if self.tool == 'auto':

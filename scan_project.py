@@ -76,6 +76,59 @@ LOOP_MAX_T      = 0.10    # м — допустимая невязка цикл�
 LOOP_MAX_DEG    = 1.5
 
 
+# Пара с малым перекрытием (сканы далеко, мало общих стен — улица, парковка): совпадает мало
+# точек, и оценка ниже порога даже в верной позе. Принимается, если противоречий почти нет и
+# общие плоскости разных сканов сошлись тонко (quality.plane_cells: толщина и число ячеек
+# 20 см — поля 'thick', 'thick_cells' ребра). Проверено 2026-10-14 на проект13.10: пара
+# 132644–132748 (20 м) в верной позе — оценка +0.044, нарушений 0.5 %, толщина 2.2–3.0 см на 350–900 ячейках;
+# 132407–132644 — 1.7 см на 1251 ячейке.
+EDGE_THIN_VIOL  = 0.01
+EDGE_THIN_THICK = 0.04    # м — на 20 м шум лидара сам даёт 2–3 см
+EDGE_THIN_CELLS = 100
+EDGE_THIN_CLOSE = 0.05    # хотя бы столько совпадающих точек: на клочке (стена через проём) подгонка
+                          # сходится к локальному минимуму (static_20260922: коридор—фасад, 2–3 %, 10–18 см)
+EDGE_WEAK_SCORE = 0.3     # слабая пара: проверяется по циклам (prune_loops)
+
+
+def thin_ok(r):
+    return (r.get('thick') is not None and r.get('violations', 1) <= EDGE_THIN_VIOL
+            and r['thick'] <= EDGE_THIN_THICK and r.get('thick_cells', 0) >= EDGE_THIN_CELLS
+            and r.get('close', 0) >= EDGE_THIN_CLOSE
+            and r.get('score', -1) >= 0 and r.get('margin', 0) >= EDGE_MIN_MARGIN)
+
+
+def weak_edge(e):
+    """Автоматическая пара со слабым подтверждением — её принятие проверяется по циклам."""
+    return (e.get('method') not in ('manual', 'group') and 'user' not in e and
+            (thin_ok(e) or e.get('hypothesis') == 'текущая поза' or e.get('score', 0) < EDGE_WEAK_SCORE))
+
+
+def prune_loops(edges, names, active):
+    """
+    Отключить (auto_ok=False, loop_rejected=True) слабые пары, из-за которых циклы графа не
+    сходятся: по одной — ту, что входит в больше всего несходящихся циклов (при равенстве —
+    с меньшей оценкой), пока такие пары есть. active(e) — активна ли связь. → отключённые.
+    """
+    out = []
+    while True:
+        act = [e for e in edges if active(e)]
+        bad = [l for l in loop_checks(act, names) if not l['ok']]
+        if not bad:
+            return out
+        count = {}
+        for l in bad:
+            a, b, c = l['loop']
+            for e in act:
+                if weak_edge(e) and {e['A'], e['B']} in ({a, b}, {b, c}, {a, c}):
+                    count[id(e)] = count.get(id(e), 0) + 1
+        if not count:
+            return out
+        e = max((x for x in act if id(x) in count), key=lambda x: (count[id(x)], -x.get('score', 0)))
+        e['auto_ok'] = False
+        e['loop_rejected'] = True
+        out.append(e)
+
+
 # Сильная однозначная пара допускается и с бо́льшими нарушениями: если между съёмками
 # в помещении что-то сдвинули (мебель, дверь, человек), точки изменившихся предметов
 # попадают в «пустоту» другого скана. Проверено 2026-10-04 на static_20261001: две серии
@@ -89,6 +142,8 @@ EDGE_STRONG_VIOL   = 0.05
 
 
 def edge_ok(r):
+    if thin_ok(r):
+        return True
     if r['score'] < EDGE_MIN_SCORE or r['margin'] < EDGE_MIN_MARGIN:
         return False
     if r['violations'] <= EDGE_MAX_VIOL:

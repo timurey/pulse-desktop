@@ -71,5 +71,31 @@ class TestAcceptPose(unittest.TestCase):
         self.assertEqual(s.auto_pairs('all', ['A.ply', 'C.ply']), [('A.ply', 'C.ply')])
 
 
+    def test_thin_rule_and_hint(self):
+        import scan_project as sp
+        base = {'score': 0.04, 'margin': 0.5, 'violations': 0.005, 'close': 0.083}
+        self.assertFalse(sp.edge_ok(base))                                   # без толщины — мало перекрытия
+        self.assertTrue(sp.edge_ok(dict(base, thick=0.022, thick_cells=354)))
+        self.assertFalse(sp.edge_ok(dict(base, thick=0.06, thick_cells=900)))   # толсто
+        self.assertFalse(sp.edge_ok(dict(base, thick=0.02, thick_cells=40)))    # мало ячеек
+        self.assertFalse(sp.edge_ok(dict(base, violations=0.03, thick=0.02, thick_cells=900)))
+        self.assertFalse(sp.edge_ok(dict(base, close=0.02, thick=0.006, thick_cells=450)))  # клочок через проём
+        # подсказка «текущая поза» — уточняется широкой подгонкой от сдвига на 40 см
+        s = Session.from_scans(self.paths)
+        for sc in s.scans:
+            sc.analyze()
+        s.run_auto(by_tree=False)
+        A, B = s.by_id('A.ply'), s.by_id('B.ply')
+        from scan_session import _clean_res
+        good = np.linalg.inv(s.Tc(A)) @ s.Tc(B)
+        hint = good @ pr.make_T(np.eye(3), [0.4, -0.2, 0.0])
+        e = pr.register_pair(_clean_res(A), _clean_res(B), verbose=False, hints=[hint])
+        self.assertLess(pr.pose_delta(np.asarray(e['T_canon']), good)[0], 0.03)
+        self.assertIn(e['hypothesis'], ('текущая поза', 'плоскости'))
+        th, n = s.pair_thick(A, B, good)
+        self.assertGreater(n, 50)
+        self.assertLess(th, 0.02)
+
+
 if __name__ == '__main__':
     unittest.main()

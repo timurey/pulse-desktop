@@ -623,9 +623,11 @@ def pose_delta(T1, T2):
 
 
 # ── автоматическая стыковка пары ───────────────────────────────────────────
-def register_pair(resA, resB, yaw_mode='manhattan', top=3, icp=True, verbose=True):
+def register_pair(resA, resB, yaw_mode='manhattan', top=3, icp=True, verbose=True, hints=None):
     """
     resA/resB — результаты planes.analyze_scan. Поза в канонических системах.
+    hints — дополнительные гипотезы T_canon (например, текущая взаимная поза уже размещённых
+    сканов): уточняются широкой подгонкой (захват 0.6 → 0.25 → 0.08 м) и оцениваются наравне.
     → dict: T (B→A в исходных системах), T_canon, score, ambiguity, …
     """
     PA, PB = resA['planes'], resB['planes']
@@ -653,13 +655,21 @@ def register_pair(resA, resB, yaw_mode='manhattan', top=3, icp=True, verbose=Tru
             uniq.append(h)
         if len(uniq) >= top:
             break
+    for T in hints or []:                                # подсказки — всегда, со своей (широкой) подгонкой
+        T = np.asarray(T, float)
+        s_, close, viol = scorer.score(T)
+        uniq.append({'T': T, 'score': s_, 'close': close, 'viol': viol,
+                     'yaw': float(np.arctan2(T[1, 0], T[0, 0])), 'hint': True})
     if verbose:
         for h in uniq:
             print(f"   гипотеза yaw={np.degrees(h['yaw']):7.1f}°  t={np.round(h['T'][:3, 3], 2)}  "
                   f"оценка={h['score']:.3f} (близко {h['close']:.3f}, нарушений {h['viol']:.3f})")
     if icp:
         for h in uniq:
-            T, fit, rmse = refine_icp(downA, downB, h['T'])
+            if h.get('hint'):
+                T, fit, rmse = refine_icp(downA, downB, h['T'], voxels=(0.15, 0.08, 0.04), dists=(0.6, 0.25, 0.08))
+            else:
+                T, fit, rmse = refine_icp(downA, downB, h['T'])
             h['T0'] = h['T']
             h['T'], h['fitness'], h['rmse'] = T, fit, rmse
             h['icp_shift'] = pose_delta(h['T0'], T)
@@ -686,6 +696,7 @@ def register_pair(resA, resB, yaw_mode='manhattan', top=3, icp=True, verbose=Tru
         'second_score': float(second),
         'margin': float(best['score'] - second),
         'method': 'planes+icp' if icp else 'planes',
+        'hypothesis': 'текущая поза' if best.get('hint') else 'плоскости',
     }
     if icp:
         out.update(fitness=best['fitness'], rmse=best['rmse'],

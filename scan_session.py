@@ -993,7 +993,15 @@ class Session:
         chosen = set(combos)
         edges = []
         n = len(combos)
-        cached = lambda c: reuse and c in old and 'T_canon' in old[c]
+        def cached(c):
+            if not (reuse and c in old and 'T_canon' in old[c]):
+                return False
+            o = old[c]
+            if sp.edge_ok(o) or o.get('hint_tried') or 'user' in o:
+                return True
+            ua, ub = self.by_id(c[0]), self.by_id(c[1])         # неудачная пара размещённых сканов —
+            return not (ua is not None and ub is not None and    # один раз пересчитать от текущей позы
+                        ua.pose is not None and ub.pose is not None)
         todo = sum(1 for c in combos if not cached(c))
         cancelled = False
         t0, k = time.time(), 0                        # k — посчитано заново (для оценки времени)
@@ -1010,8 +1018,15 @@ class Session:
                     progress(i / max(1, n), f"стыковка: пара {i + 1} из {n}{eta} ({a} <- {b})")
                 k += 1
                 sa, sb = self.by_id(a), self.by_id(b)
-                e = pr.register_pair(_clean_res(sa), _clean_res(sb), yaw, verbose=False)
+                hints = []
+                if sa.pose is not None and sb.pose is not None:     # уже размещены — уточнить от текущей позы
+                    hints.append(np.linalg.inv(self.Tc(sa)) @ self.Tc(sb))
+                e = pr.register_pair(_clean_res(sa), _clean_res(sb), yaw, verbose=False, hints=hints)
                 e['A'], e['B'] = a, b
+                if hints:
+                    e['hint_tried'] = True
+                if not sp.edge_ok(e) and e['violations'] <= sp.EDGE_THIN_VIOL:
+                    e['thick'], e['thick_cells'] = self.pair_thick(sa, sb, np.asarray(e['T_canon']))
                 o = old.get((a, b))
                 if o is not None and 'user' in o and 'T_canon' in o:
                     # решение пользователя относится к прежнему результату: переносим, только если
@@ -1024,8 +1039,16 @@ class Session:
         # ранее посчитанные пары вне выбранных — тоже данные, не выбрасываем
         edges += [dict(e, auto_ok=sp.edge_ok(e)) for k, e in old.items()
                   if k not in chosen and 'T_canon' in e and k[0] in known and k[1] in known]
+        for e in edges:
+            e.pop('loop_rejected', None)
         with self.lock:
             self.edges = edges + manual
+        # слабые пары, из-за которых не сходятся циклы, — отключить (по узлам графа)
+        ue = {id(e): u for e in self.edges for u in self._unit_edges([e])}
+        view = [dict(u, _src=e) for e in self.edges for u in [ue.get(id(e))] if u is not None]
+        for v in sp.prune_loops(view, [u.id for u in self.units()], lambda v: self.edge_active(v)):
+            v['_src']['auto_ok'] = False
+            v['_src']['loop_rejected'] = True
         if progress:
             progress(1.0, "оптимизация графа поз")
         self.recompute_poses()
@@ -1402,6 +1425,21 @@ class Session:
             T2, fit, rmse = pr.refine_icp(A, moving.down, np.asarray(T))
         return T2, {'fitness': fit, 'rmse': rmse, 'shift': pr.pose_delta(T, T2)}
 
+    def pair_thick(self, a, b, T_canon):
+        """
+        Толщина общих плоскостей пары (узлы a, b; T_canon — канон. b → канон. a), не трогая
+        позы сеанса: (медиана, м | None, число ячеек 20 см).
+        """
+        import quality
+        mA, mB = self.members(a), self.members(b)
+        poses = dict(mA)
+        poses.update({i: np.asarray(T_canon) @ P for i, P in mB.items()})
+        q = quality.plane_cells(self, scan_ids=set(poses), poses=poses)
+        cells = [k for k in range(len(q)) if set(mA) & set(q.scans[k]) and set(mB) & set(q.scans[k])]
+        if not cells:
+            return None, 0
+        return float(np.median(q.thick[cells])), len(cells)
+
     def pair_thickness(self, fixed_list, moving, T):
         """
         Насколько расходятся одни и те же поверхности подвижного (в позе T) и неподвижных:
@@ -1485,6 +1523,25 @@ class Session:
             if dt > CONFLICT_T or da > CONFLICT_DEG:
                 return float(dt), float(da)
         return None
+
+    def edge_residuals(self):
+        """
+        Активные связи, которые итоговые позы не выполняют (расхождение больше CONFLICT_T /
+        CONFLICT_DEG): граф свёл противоречащие связи — обычно грубую ручную расстановку и
+        уточнившую её автоматическую пару. → [(ребро, м, °)].
+        """
+        out = []
+        for e in self.active_edges():
+            ue = self._unit_edges([e])
+            if not ue:
+                continue
+            a, b = self.by_id(ue[0]['A']), self.by_id(ue[0]['B'])
+            if a is None or b is None or a.pose is None or b.pose is None:
+                continue
+            dt, da = pr.pose_delta(np.linalg.inv(self.Tc(a)) @ self.Tc(b), np.asarray(ue[0]['T_canon']))
+            if dt > CONFLICT_T or da > CONFLICT_DEG:
+                out.append((e, float(dt), float(da)))
+        return out
 
     def reject_conflicts(self, moving, Tc):
         """
