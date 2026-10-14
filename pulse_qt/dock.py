@@ -1,13 +1,16 @@
-"""Нижняя панель: пары (рёбра графа), циклы, кандидаты позы, журнал."""
+"""Нижняя панель: пары (рёбра графа), циклы, кандидаты позы, журнал, качество, связи (дерево поз)."""
 
 import time
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (QFrame, QVBoxLayout, QHBoxLayout, QTabBar, QStackedWidget, QTableWidget,
                                QTableWidgetItem, QHeaderView, QAbstractItemView, QPlainTextEdit, QMenu,
-                               QWidget, QComboBox)
+                               QWidget, QComboBox, QTreeWidget, QTreeWidgetItem, QSplitter, QLabel,
+                               QScrollArea)
 
 from . import widgets as W
+from PySide6.QtGui import QPixmap, QPainter, QIcon
+
 from .theme import mono_font
 
 
@@ -48,6 +51,9 @@ class Dock(QFrame):
     candAction = Signal(str, int)
     autoRequested = Signal()
     qualitySelected = Signal(int)
+    linkSelected = Signal(str)
+    linkAction = Signal(str, object)
+    TAB_LINKS = 5
 
     def __init__(self):
         super().__init__()
@@ -67,7 +73,7 @@ class Dock(QFrame):
         t = W.THEME
         for ic, text in (('mdi6.graph-outline', 'Пары'), ('mdi6.sync', 'Циклы'),
                          ('mdi6.target', 'Кандидаты'), ('mdi6.text-box-outline', 'Журнал'),
-                         ('mdi6.texture-box', 'Качество')):
+                         ('mdi6.texture-box', 'Качество'), ('mdi6.family-tree', 'Связи')):
             self.tabs.addTab(t.icon(ic, 'ink3'), text)
         hl.addWidget(self.tabs)
         hl.addStretch(1)
@@ -145,6 +151,41 @@ class Dock(QFrame):
         ql.addWidget(self.qual_empty, 1)
         self.qual.setVisible(False)
         self.stack.addWidget(qw)
+        # связи: от какого скана получена поза
+        sp = QSplitter(Qt.Horizontal)
+        sp.setChildrenCollapsible(False)
+        self.links = QTreeWidget()
+        self.links.setColumnCount(5)
+        self.links.setHeaderLabels(['Скан', 'Поза от', 'Связь', 'Расхождение', 'Ещё связей'])
+        self.links.setRootIsDecorated(True)
+        self.links.setUniformRowHeights(True)
+        self.links.setFocusPolicy(Qt.NoFocus)
+        self.links.setFrameShape(QFrame.NoFrame)
+        lh = self.links.header()
+        lh.setSectionResizeMode(QHeaderView.ResizeToContents)
+        lh.setStretchLastSection(True)
+        self.links.itemSelectionChanged.connect(self._link_sel)
+        self.links.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.links.customContextMenuRequested.connect(self._link_menu)
+        sp.addWidget(self.links)
+        self.link_info = QLabel('')
+        self.link_info.setObjectName('Hint')
+        self.link_info.setWordWrap(True)
+        self.link_info.setTextFormat(Qt.RichText)
+        self.link_info.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        self.link_info.setContentsMargins(12, 8, 12, 8)
+        self.link_info.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        sc = QScrollArea()
+        sc.setWidgetResizable(True)
+        sc.setFrameShape(QFrame.NoFrame)
+        sc.setWidget(self.link_info)
+        sp.addWidget(sc)
+        self.link_info.setMinimumWidth(300)
+        sp.setStretchFactor(0, 1)
+        sp.setStretchFactor(1, 1)
+        sp.setSizes([700, 500])
+        self._link_rows = {}
+        self.stack.addWidget(sp)
 
     # ── пары ─────────────────────────────────────────────────────────────
     def set_pairs(self, rows):
@@ -251,6 +292,93 @@ class Dock(QFrame):
     def _row(table):
         r = table.selectionModel().selectedRows()
         return r[0].row() if r else -1
+
+    # ── связи ────────────────────────────────────────────────────────────
+    def set_links(self, rows, summary):
+        """
+        rows: [{'id', 'parent' (id строки или None), 'cols': 5 строк, 'state': 'ok'|'bad'|'mut',
+                'info': текст (HTML) для правой части, 'links': [(номер связи, подпись)]}] —
+        родитель раньше детей. summary — текст справа, пока строка не выбрана.
+        """
+        cur = self.selected_link()
+        t = self.links
+        t.blockSignals(True)
+        t.clear()
+        self._link_rows = {}
+        items = {}
+        th = W.THEME
+        for row in rows:
+            par = items.get(row['parent'])
+            it = QTreeWidgetItem(par if par is not None else t, row['cols'])
+            it.setData(0, Qt.UserRole, row['id'])
+            if row.get('color') is not None:
+                pm = QPixmap(10, 10)
+                pm.fill(Qt.transparent)
+                p = QPainter(pm)
+                p.setRenderHint(QPainter.Antialiasing)
+                p.setBrush(row['color'])
+                p.setPen(Qt.NoPen)
+                p.drawRoundedRect(0, 0, 10, 10, 3, 3)
+                p.end()
+                it.setIcon(0, QIcon(pm))
+            for c in (2, 3, 4):
+                it.setFont(c, mono_font(12))
+            if row.get('state') == 'bad':
+                it.setForeground(3, th.q('bad'))
+            elif row.get('state') == 'mut':
+                for c in range(5):
+                    it.setForeground(c, th.q('ink3'))
+            items[row['id']] = it
+            self._link_rows[row['id']] = row
+        t.expandAll()
+        t.blockSignals(False)
+        self._link_summary = summary
+        if cur in items:
+            items[cur].setSelected(True)
+            t.setCurrentItem(items[cur])
+        self._link_sel(emit=False)
+        n = sum(1 for r in rows if r.get('state') != 'mut')
+        self.tabs.setTabText(self.TAB_LINKS, f'Связи · {n}' if rows else 'Связи')
+
+    def selected_link(self):
+        it = self.links.currentItem() if self.links.selectedItems() else None
+        return it.data(0, Qt.UserRole) if it is not None else None
+
+    def _link_sel(self, emit=True):
+        k = self.selected_link()
+        row = self._link_rows.get(k)
+        self.link_info.setText(row['info'] if row else getattr(self, '_link_summary', ''))
+        if emit and k:
+            self.linkSelected.emit(k)
+
+    def _link_menu(self, pos):
+        it = self.links.itemAt(pos)
+        if it is None:
+            return
+        row = self._link_rows.get(it.data(0, Qt.UserRole))
+        if row is None:
+            return
+        t = W.THEME
+        m = QMenu(self)
+        uid = row['id']
+        if row.get('edge') is not None:
+            for text, name, ic in (('Показать пару', 'show', 'mdi6.eye-outline'),
+                                   ('Ручная стыковка этой пары', 'manual', 'mdi6.vector-combine'),
+                                   ('Отклонить эту связь', 'reject', 'mdi6.close')):
+                a = m.addAction(t.icon(ic), text)
+                a.triggered.connect(lambda _=False, n=name: self.linkAction.emit('pair_' + n, row['edge']))
+        if row.get('links'):
+            sm = m.addMenu(t.icon('mdi6.link-variant-off'), 'Отклонить связь…')
+            for i, text in row['links']:
+                a = sm.addAction(text)
+                a.triggered.connect(lambda _=False, i=i: self.linkAction.emit('pair_reject', i))
+        if row.get('placed'):
+            m.addSeparator()
+            a = m.addAction(t.icon('mdi6.anchor'), 'Сделать опорным')
+            a.triggered.connect(lambda: self.linkAction.emit('ref', uid))
+        if not m.isEmpty():
+            from PySide6.QtGui import QCursor
+            m.exec(QCursor.pos())
 
     # ── журнал ───────────────────────────────────────────────────────────
     def add_log(self, msg):

@@ -128,6 +128,16 @@ def main():
     shot('05_pairs')
     w.dock.tabs.setCurrentIndex(1)
     shot('05b_loops')
+    w.dock.tabs.setCurrentIndex(w.dock.TAB_LINKS)
+    lt = w.dock.links
+    it = lt.topLevelItem(0)
+    deep = it
+    while deep is not None and deep.childCount():
+        deep = deep.child(0)
+    if deep is not None:
+        lt.setCurrentItem(deep)
+        deep.setSelected(True)
+    shot('05c_links')
     w.dock.tabs.setCurrentIndex(0)
     # 6. ручная стыковка: пара «пол — пол»
     unpl = [x for x in s.scans if x.pose is None]

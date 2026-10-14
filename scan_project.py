@@ -178,23 +178,33 @@ def loop_checks(edges, names):
     return out
 
 
-def spanning_poses(names, edges, ref):
-    """Начальные позы (канон. система скана → канон. система ref) по дереву max score."""
+def spanning_tree(names, edges, ref):
+    """
+    Дерево max score от ref: (позы — канон. система скана → канон. система ref,
+    родители {узел: (родитель, номер ребра в edges)}).
+    """
     adj = {n: [] for n in names}
-    for e in edges:
+    for i, e in enumerate(edges):
         T = np.array(e['T_canon'])
-        adj[e['A']].append((e['score'], e['B'], T))            # x_A = T x_B
-        adj[e['B']].append((e['score'], e['A'], np.linalg.inv(T)))
+        adj[e['A']].append((e['score'], e['B'], T, i))            # x_A = T x_B
+        adj[e['B']].append((e['score'], e['A'], np.linalg.inv(T), i))
     poses = {ref: np.eye(4)}
-    frontier = [(s, ref, nb, T) for s, nb, T in adj[ref]]
+    parent = {}
+    frontier = [(s, ref, nb, T, i) for s, nb, T, i in adj[ref]]
     while frontier:
         frontier.sort(key=lambda x: -x[0])
-        s, par, n, T = frontier.pop(0)
+        s, par, n, T, i = frontier.pop(0)
         if n in poses:
             continue
         poses[n] = poses[par] @ T
-        frontier += [(s2, n, nb, T2) for s2, nb, T2 in adj[n] if nb not in poses]
-    return poses
+        parent[n] = (par, i)
+        frontier += [(s2, n, nb, T2, i2) for s2, nb, T2, i2 in adj[n] if nb not in poses]
+    return poses, parent
+
+
+def spanning_poses(names, edges, ref):
+    """Начальные позы (канон. система скана → канон. система ref) по дереву max score."""
+    return spanning_tree(names, edges, ref)[0]
 
 
 def optimize(names, edges, poses, infos, ref):

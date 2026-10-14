@@ -1543,6 +1543,88 @@ class Session:
                 out.append((e, float(dt), float(da)))
         return out
 
+    @staticmethod
+    def unit_label(u):
+        """Имя узла для сообщений: короткое имя скана или «группа» запечённой группы."""
+        return f'«{u.name}»' if isinstance(u, bk.BakedGroup) else short_name(u.id)
+
+    def pose_tree(self):
+        """
+        Откуда у узлов (сканов, запечённых групп) их позы — как в recompute_poses: начальные
+        позы идут по дереву связей с наибольшей оценкой от опорного узла (ручные связи —
+        оценка 1, раньше автоматических), остальные активные связи — дополнительные, их
+        сводит оптимизация графа. У каждой связи — расхождение итоговых поз с ней.
+        → {'ref': id опорного узла, 'optimized': bool, 'order': [id в порядке дерева],
+           'nodes': {id: {'parent', 'edge' (номер в self.edges), 'depth', 'children', 'extra'}},
+           'links': {номер ребра: {'A', 'B' (узлы), 'tree', 'dt', 'deg'}},
+           'unplaced': [{'id', 'reason', 'edges': [номера связей]}]}
+        """
+        units = self.units()
+        names = [u.id for u in units]
+        idx, act = [], []
+        for i, e in enumerate(self.edges):
+            if self.edge_active(e):
+                ue = self._unit_edges([e])
+                if ue:
+                    idx.append(i)
+                    act.append(ue[0])
+        fu = self.unit_of(self.frame)
+        ref = fu.id if fu is not None else None
+        nodes, links, order = {}, {}, []
+        if ref is not None:
+            _, parent = sp.spanning_tree(names, act, ref)
+            nodes[ref] = {'parent': None, 'edge': None, 'depth': 0, 'children': [], 'extra': []}
+            # порядок обхода: родитель раньше детей
+            pending = dict(parent)
+            order = [ref]
+            while pending:
+                for n, (par, k) in list(pending.items()):
+                    if par in nodes:
+                        nodes[n] = {'parent': par, 'edge': idx[k], 'depth': nodes[par]['depth'] + 1,
+                                    'children': [], 'extra': []}
+                        nodes[par]['children'].append(n)
+                        order.append(n)
+                        del pending[n]
+            tree_edges = {nd['edge'] for nd in nodes.values() if nd['edge'] is not None}
+            for i, e in zip(idx, act):
+                if e['A'] not in nodes or e['B'] not in nodes:
+                    continue
+                a, b = self.by_id(e['A']), self.by_id(e['B'])
+                dt = deg = None
+                if a is not None and b is not None and a.pose is not None and b.pose is not None:
+                    dt, deg = pr.pose_delta(np.linalg.inv(self.Tc(a)) @ self.Tc(b), np.asarray(e['T_canon']))
+                links[i] = {'A': e['A'], 'B': e['B'], 'tree': i in tree_edges,
+                            'dt': None if dt is None else float(dt), 'deg': None if deg is None else float(deg)}
+                if i not in tree_edges:
+                    nodes[e['A']]['extra'].append(i)
+                    nodes[e['B']]['extra'].append(i)
+        unplaced = []
+        for u in units:
+            if u.id in nodes:
+                continue
+            mine = [i for i, e in enumerate(self.edges)
+                    if any(self.unit_of(x) is u for x in (e['A'], e['B']) if self.unit_of(x) is not None)
+                    and self.unit_of(e['A']) is not self.unit_of(e['B'])]
+            on = [i for i in mine if self.edge_active(self.edges[i])]
+            if not mine:
+                reason = 'нет связей: автостыковка не нашла пару, ручной стыковки не было'
+            elif not on:
+                rej = sum(1 for i in mine if self.edges[i].get('user') == 'reject')
+                parts = []
+                if rej:
+                    parts.append(f'отклонено вручную: {rej}')
+                if len(mine) - rej:
+                    parts.append(f'не прошли проверку: {len(mine) - rej}')
+                reason = 'все связи неактивны (' + ', '.join(parts) + ')'
+            else:
+                others = sorted({self.unit_label(self.unit_of(x)) for i in on
+                                 for x in (self.edges[i]['A'], self.edges[i]['B']) if self.unit_of(x) is not u})
+                reason = 'связан только с неразмещёнными: ' + ', '.join(others)
+            unplaced.append({'id': u.id, 'reason': reason,
+                             'edges': sorted(mine, key=lambda i: -self.edges[i].get('score', -1))})
+        return {'ref': ref, 'optimized': len(links) > len(nodes) - 1 and len(nodes) > 1,
+                'order': order, 'nodes': nodes, 'links': links, 'unplaced': unplaced}
+
     def reject_conflicts(self, moving, Tc):
         """
         Отключить (user='reject') активные связи узла moving, которые противоречат его позе

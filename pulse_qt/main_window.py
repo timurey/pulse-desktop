@@ -31,7 +31,7 @@ import measure
 import section
 import baked as bk
 import display as dsp
-from scan_session import Session
+from scan_session import Session, CONFLICT_T, CONFLICT_DEG
 from scan_tree import KINDS
 
 from . import bg
@@ -403,6 +403,8 @@ class MainWindow(QMainWindow):
         self.dock.candSelected.connect(self.on_cand_selected)
         self.dock.candAction.connect(self.on_cand_action)
         self.dock.qualitySelected.connect(self.on_quality_selected)
+        self.dock.linkSelected.connect(self.on_link_selected)
+        self.dock.linkAction.connect(self.on_link_action)
         self.dock.setMinimumHeight(120)
         self.vsplit.addWidget(self.dock)
         self.vsplit.setStretchFactor(0, 1)
@@ -2627,6 +2629,158 @@ class MainWindow(QMainWindow):
         else:
             chip = (f'невязка циклов ≤ {worst * 100:.1f} см', 'ok')
         self.dock.set_loops(lrows, chip)
+        self.refresh_links()
+
+    # ── связи: откуда у скана поза ───────────────────────────────────────
+    @staticmethod
+    def _edge_kind(e):
+        """Вид связи для подписей: «вручную», «плоскости+ICP», … и пометки «принято», «×10»."""
+        m = e.get('method')
+        if m == 'manual':
+            src = e.get('source')
+            text = 'вручную' if src in (None, 'manual', 'ручная') else f'вручную ({src})'
+        else:
+            text = {'group': 'группы', 'planes+icp': 'плоскости+ICP'}.get(m, m or 'авто')
+        if e.get('user') == 'accept':
+            text += ', принято'
+        w = float(e.get('weight', 1.0)) * (10 if m == 'manual' else 1)
+        if w > 1:
+            text += f', вес ×{w:g}'
+        return text
+
+    @staticmethod
+    def _resid(l):
+        if l is None or l.get('dt') is None:
+            return '—', False
+        bad = l['dt'] > CONFLICT_T or l['deg'] > CONFLICT_DEG
+        return f"{l['dt'] * 100:.1f} см · {l['deg']:.2f}°", bad
+
+    def refresh_links(self):
+        s = self.s
+        if not s.scans:
+            self.dock.set_links([], '')
+            return
+        t = s.pose_tree()
+        def label(uid):
+            u = s.by_id(uid)
+            return f'«{u.name}»' if isinstance(u, bk.BakedGroup) else short(uid)
+
+        def color(uid):
+            u = s.by_id(uid)
+            return self.scan_color(u.root if isinstance(u, bk.BakedGroup) else uid)[1] if u is not None else None
+        nodes, links = t['nodes'], t['links']
+
+        def other(i, uid):
+            l = links.get(i)
+            if l is not None:
+                return l['B'] if l['A'] == uid else l['A']
+            e = s.edges[i]
+            ua = s.unit_of(e['A'])
+            return (s.unit_of(e['B']) if ua is not None and ua.id == uid else ua).id
+
+        def link_line(i, uid):
+            e = s.edges[i]
+            text, bad = self._resid(links.get(i))
+            sc = '' if e.get('method') == 'manual' else f", оценка {e.get('score', 0):+.2f}"
+            line = f"{label(other(i, uid))} — {self._edge_kind(e)}{sc}"
+            if i in links:
+                line += f", расхождение {text}"
+            return f"<span style='color:{W.THEME.q('bad').name()}'>{line}</span>" if bad else line
+
+        def members_note(uid):
+            u = s.by_id(uid)
+            if isinstance(u, bk.BakedGroup):
+                return (f"<br>Запечённая группа: {len(u.members)} скан(ов) — одно целое, главный "
+                        f"{short(u.root)}; внутренние позы зафиксированы при запекании.")
+            return ''
+
+        rows = []
+        for uid in t['order']:
+            nd = nodes[uid]
+            name = label(uid)
+            extra = sorted(set(nd['extra']))
+            if nd['parent'] is None:
+                info = (f"<b>{name}</b> — опорный: его поза задаёт систему координат проекта, "
+                        f"остальные сканы ставятся относительно него.{members_note(uid)}")
+                if extra:
+                    info += '<br><br>Связи:<br>' + '<br>'.join(link_line(i, uid) for i in extra)
+                rows.append({'id': uid, 'parent': None, 'placed': True, 'state': 'ok', 'color': color(uid),
+                             'cols': [name, 'опорный', '', '', str(len(extra)) if extra else ''],
+                             'info': info, 'links': [(i, label(other(i, uid))) for i in extra]})
+                continue
+            e = s.edges[nd['edge']]
+            l = links.get(nd['edge'])
+            res, bad = self._resid(l)
+            chain = []
+            k = uid
+            while k is not None:
+                chain.append(label(k))
+                k = nodes[k]['parent']
+            info = [f"<b>{name}</b>: поза получена от <b>{label(nd['parent'])}</b> — "
+                    f"{self._edge_kind(e)}"
+                    + ('' if e.get('method') == 'manual' else f", оценка {e.get('score', 0):+.2f}") + '.',
+                    'Цепочка до опорного: ' + ' → '.join(reversed(chain)) + '.']
+            if extra:
+                info.append(f"Ещё связей: {len(extra)}. "
+                            + ('Граф свёл все связи вместе (ручные весят больше), поэтому итог может '
+                               'немного отличаться от каждой из них.' if t['optimized'] else ''))
+            if bad:
+                info.append(f"<span style='color:{W.THEME.q('bad').name()}'>Итог расходится со связью "
+                            f"с {label(nd['parent'])} на {res}: позу перетянули другие связи — одна из "
+                            f"них, вероятно, ошибочная (красные ниже).</span>")
+            all_links = [nd['edge']] + extra
+            info = '<br>'.join(info) + members_note(uid)
+            info += '<br><br>Связи:<br>' + '<br>'.join(link_line(i, uid) for i in all_links)
+            rows.append({'id': uid, 'parent': nd['parent'], 'placed': True, 'edge': nd['edge'], 'color': color(uid),
+                         'state': 'bad' if bad or any(self._resid(links.get(i))[1] for i in extra) else 'ok',
+                         'cols': [name, label(nd['parent']), self._edge_kind(e), res,
+                                  str(len(extra)) if extra else ''],
+                         'info': info, 'links': [(i, label(other(i, uid))) for i in all_links]})
+        if t['unplaced']:
+            rows.append({'id': '__unplaced__', 'parent': None, 'state': 'mut',
+                         'cols': [f"Не размещены · {len(t['unplaced'])}", '', '', '', ''],
+                         'info': 'Сканы без цепочки связей до опорного: их позы не определены. '
+                                 'Состыкуйте вручную или запустите автостыковку для них '
+                                 '(выделите в дереве, правая кнопка — «Автостыковка выделенных»).'})
+            for u in t['unplaced']:
+                cand = u['edges'][:5]
+                info = f"<b>{label(u['id'])}</b> не размещён: {u['reason']}."
+                if cand:
+                    lines = []
+                    for i in cand:
+                        e = s.edges[i]
+                        st = ('отклонено' if e.get('user') == 'reject' else
+                              'активно' if s.edge_active(e) else 'не прошла проверку')
+                        sc = '' if e.get('method') == 'manual' else f", оценка {e.get('score', 0):+.2f}"
+                        lines.append(f"{label(other(i, u['id']))} — {self._edge_kind(e)}{sc}, {st}")
+                    info += '<br><br>Связи (лучшие):<br>' + '<br>'.join(lines)
+                    info += ('<br><br>Связь можно принять во вкладке «Пары» (правая кнопка — «Принять»), '
+                             'если пара верная.')
+                rows.append({'id': u['id'], 'parent': '__unplaced__', 'state': 'mut', 'placed': False,
+                             'color': color(u['id']),
+                             'cols': [label(u['id']), '—', u['reason'], '', ''], 'info': info})
+        n = len(nodes)
+        summary = (f"Размещено {n} из {n + len(t['unplaced'])}. Каждый скан получает позу от «родителя» по "
+                   f"связи с наибольшей оценкой (ручные — в первую очередь), начиная с опорного"
+                   + (', затем граф сводит все активные связи вместе' if t['optimized'] else '')
+                   + '. Красным — связи, которые итог не выполняет (больше '
+                   f'{CONFLICT_T * 100:.0f} см или {CONFLICT_DEG:g}°). Выберите скан, чтобы увидеть, '
+                   'почему он стоит именно так.')
+        self.dock.set_links(rows, summary)
+
+    def on_link_selected(self, uid):
+        u = self.s.by_id(uid)
+        if u is None:
+            return
+        key = u.gid if isinstance(u, bk.BakedGroup) else u.id
+        self.tree_panel.select(key)
+
+    def on_link_action(self, name, arg):
+        if name.startswith('pair_'):
+            return self.on_pair_action(name[5:], arg)
+        if name == 'ref':
+            u = self.s.by_id(arg)
+            return self.make_ref(u.root if isinstance(u, bk.BakedGroup) else arg)
 
     def on_auto(self):
         """Автостыковка всего проекта (после импорта и из меню): способ и «посчитанные пары» — из панели."""

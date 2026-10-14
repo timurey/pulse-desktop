@@ -399,6 +399,25 @@ def main():
           f'{n0} → {n1} точек за {dt * 1000:.0f} мс')
     pump(0.4)
     check('качество: список мест', w.dock.qual.rowCount() > 0, f'{w.dock.qual.rowCount()} мест')
+    w.refresh_links()
+    lt = w.dock.links
+    placed = sum(1 for u in w.s.units() if u.pose is not None)
+    root = lt.topLevelItem(0)
+    n_items = 0
+    stack = [lt.topLevelItem(i) for i in range(lt.topLevelItemCount())]
+    while stack:
+        it = stack.pop()
+        n_items += it.data(0, Qt.UserRole) != '__unplaced__'
+        stack += [it.child(i) for i in range(it.childCount())]
+    check('связи: дерево поз', root is not None and root.data(0, Qt.UserRole) == w.s.unit_of(w.s.frame).id
+          and n_items == len(w.s.units()), f'{placed} размещено, строк {n_items}')
+    if root is not None and root.childCount():
+        ch = root.child(0)
+        lt.setCurrentItem(ch)
+        ch.setSelected(True)
+        pump(0.2)
+        check('связи: выбор строки выделяет скан в дереве и объясняет позу',
+              w.tree_sel == ch.data(0, Qt.UserRole) and 'поза получена от' in w.dock.link_info.text())
     w.on_quality_selected(0)
     check('качество: клик по месту подводит камеру', True)
     w.quality_panel.method.group.button(1).click()
