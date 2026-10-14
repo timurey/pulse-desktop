@@ -362,6 +362,8 @@ class TreePanel(QFrame):
         act('Новая группа', 'new_group', 'mdi6.folder-plus-outline')
         many = self.selected_keys()
         if key is not None and key in many and len(many) > 1:
+            act(f'Автостыковка выделенных ({len(many)})', 'auto_sel', 'mdi6.graph-outline')
+            m.addSeparator()
             act(f'Сгруппировать выделенные ({len(many)})  ⌘/Ctrl+G', 'group_sel', 'mdi6.folder-plus')
             act(f'Переместить выделенные ({len(many)}) в группу…', 'move', 'mdi6.folder-move-outline')
             act('Показать только выделенные', 'only', 'mdi6.eye-check-outline')

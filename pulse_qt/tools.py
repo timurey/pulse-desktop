@@ -157,13 +157,14 @@ class AutoPanel(ToolPanel):
 
     def __init__(self):
         super().__init__('Автостыковка', 'Выполнить стыковку', 'mdi6.graph-outline',
-                         scopes=[('весь проект', 'project'), ('выбранная группа', 'group')], scope='project')
+                         scopes=[('весь проект', 'project'), ('выбранная группа', 'group'),
+                                 ('выделенные', 'selection')], scope='project')
         p = self.params_sec
         self.method = QComboBox()
         for text, v in self.METHODS:
             self.method.addItem(text, v)
         self.method.activated.connect(lambda _: self.set_method(self.method.currentData(), emit=True))
-        p.add(W.field('Какие пары', self.method))
+        self.method_row = p.add(W.field('Какие пары', self.method))
         self.hint = W.label('', 'Hint', wrap=True)
         p.add(self.hint)
         self.reuse = QCheckBox('Использовать уже посчитанные пары')
@@ -187,6 +188,11 @@ class AutoPanel(ToolPanel):
 
     def method_value(self):
         return self.method.currentData()
+
+    def set_selection_mode(self, on):
+        """Область «выделенные»: всегда все пары среди выделенных — выбор способа не нужен."""
+        self.method_row.setVisible(not on)
+        self.hint.setVisible(not on)
 
     def state(self):
         return {'method': self.method_value(), 'reuse': self.reuse.isChecked()}

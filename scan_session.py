@@ -1012,8 +1012,13 @@ class Session:
                 sa, sb = self.by_id(a), self.by_id(b)
                 e = pr.register_pair(_clean_res(sa), _clean_res(sb), yaw, verbose=False)
                 e['A'], e['B'] = a, b
-                if (a, b) in old and 'user' in old[(a, b)]:
-                    e['user'] = old[(a, b)]['user']
+                o = old.get((a, b))
+                if o is not None and 'user' in o and 'T_canon' in o:
+                    # решение пользователя относится к прежнему результату: переносим, только если
+                    # пара пересчиталась в ту же позу, иначе её снова решает автоматика
+                    dt, da = pr.pose_delta(np.asarray(e['T_canon']), np.asarray(o['T_canon']))
+                    if dt <= CONFLICT_T and da <= CONFLICT_DEG:
+                        e['user'] = o['user']
             e['auto_ok'] = sp.edge_ok(e)
             edges.append(e)
         # ранее посчитанные пары вне выбранных — тоже данные, не выбрасываем
@@ -1038,6 +1043,9 @@ class Session:
         if method == 'within':
             return self._unit_pairs(self.within_group_pairs(gid))
         ids = [s.id for s in self.scans]
+        if isinstance(gid, (list, tuple, set)):            # выделенные узлы дерева: все пары среди них
+            inside = {i for k in gid for i in self.tree.scans_in(k)}
+            return self._unit_pairs(list(itertools.combinations([i for i in ids if i in inside], 2)))
         if gid is not None and gid != 'root' and self.tree.group(gid) is not None:
             inside = set(self.tree.scans_in(gid))
             ids = [i for i in ids if i in inside]

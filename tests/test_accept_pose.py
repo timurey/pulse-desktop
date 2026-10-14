@@ -52,5 +52,24 @@ class TestAcceptPose(unittest.TestCase):
         self.assertIsNotNone(s.manual_conflict(i))
 
 
+    def test_rerun_drops_stale_user_flag(self):
+        s = Session.from_scans(self.paths)
+        for sc in s.scans:
+            sc.analyze()
+        s.run_auto(by_tree=False)
+        e = next(e for e in s.edges if {e['A'], e['B']} == {'A.ply', 'B.ply'})
+        good = np.asarray(e['T_canon']).copy()
+        e['user'] = 'reject'                                   # решение по той же позе — переносится
+        s.run_auto(by_tree=False, reuse=False)
+        e = next(e for e in s.edges if {e['A'], e['B']} == {'A.ply', 'B.ply'})
+        self.assertEqual(e.get('user'), 'reject')
+        e['T_canon'] = (good @ pr.make_T(np.eye(3), [3.0, 0, 0])).tolist()
+        e['user'] = 'accept'                                   # «принято» для другой (ошибочной) позы
+        s.run_auto(by_tree=False, reuse=False)
+        e = next(e for e in s.edges if {e['A'], e['B']} == {'A.ply', 'B.ply'})
+        self.assertNotIn('user', e)
+        self.assertEqual(s.auto_pairs('all', ['A.ply', 'C.ply']), [('A.ply', 'C.ply')])
+
+
 if __name__ == '__main__':
     unittest.main()

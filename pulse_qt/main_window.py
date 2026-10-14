@@ -777,7 +777,12 @@ class MainWindow(QMainWindow):
 
     # ── автостыковка: панель ─────────────────────────────────────────────
     def _auto_gid(self):
-        if self.auto_panel.scope.value() != 'group':
+        """Область автостыковки: None — весь проект, id группы, список выделенных узлов."""
+        sc = self.auto_panel.scope.value()
+        if sc == 'selection':
+            keys = [k for k in self.tree_panel.selected_keys() if self.s.tree.node(k) is not None]
+            return keys if len(self.s.auto_pairs('all', keys)) else None
+        if sc != 'group':
             return None
         return self._scope_group()
 
@@ -785,15 +790,22 @@ class MainWindow(QMainWindow):
         p = self.auto_panel
         m = p.method_value()
         gid = self._auto_gid()
-        if p.scope.value() == 'group':
+        p.set_selection_mode(p.scope.value() == 'selection')
+        if p.scope.value() == 'selection':
+            n = len({i for k in (gid or []) for i in self.s.tree.scans_in(k)})
+            p.scope.set_info(f'выделено в дереве: {n} скан. — все пары среди них' if gid else
+                             'выделите в дереве два скана или больше (Shift / Ctrl(⌘) + щелчок)')
+        elif p.scope.value() == 'group':
             g = self.s.tree.group(gid) if gid else None
             p.scope.set_info(f'группа «{g.name}»: {len(self.s.tree.scans_in(gid))} скан.' if g else
                              'выберите группу (или скан в ней) в дереве')
         else:
             p.scope.set_info(f'весь проект: {len(self.s.scans)} скан.')
-        if p.scope.value() == 'group' and gid is None:
+        if p.scope.value() in ('group', 'selection') and gid is None:
             p.set_estimate('')
             return
+        if p.scope.value() == 'selection':
+            m = 'all'
         if m == 'groups':
             parent = self.s.tree.group(gid) if gid else self.s.tree.root
             kids = [c for c in parent.children if hasattr(c, 'children') and self.s.tree.scans_in(c.id)]
@@ -805,7 +817,7 @@ class MainWindow(QMainWindow):
         todo = self.s.pending_pairs(combos, p.reuse.isChecked())
         sec = self._pair_sec or 4.0
         from scan_session import fmt_eta
-        eta = '' if not todo else f", ≈ {fmt_eta(todo * sec)}{'' if self._pair_sec else ' (оценка)'}"
+        eta = '' if not todo else f", {fmt_eta(todo * sec)}{'' if self._pair_sec else ' (оценка)'}"
         p.set_estimate(f'пар: {len(combos)}, считать заново: {todo}{eta}')
 
     def on_auto_tool(self):
@@ -815,6 +827,11 @@ class MainWindow(QMainWindow):
         if p.scope.value() == 'group' and gid is None:
             self.set_status('выберите группу в дереве или область «весь проект»')
             return
+        if p.scope.value() == 'selection':
+            if gid is None:
+                self.set_status('выделите в дереве два скана или больше')
+                return
+            return self._run_auto(self.s.auto_pairs('all', gid), p.reuse.isChecked(), 'выделенные')
         if m == 'groups':
             return self.on_auto_groups(gid)
         self._run_auto(self.s.auto_pairs(m, gid), p.reuse.isChecked(), {'all': 'все пары', 'tree': 'по дереву',
@@ -2199,6 +2216,11 @@ class MainWindow(QMainWindow):
                 self.set_points_visible(True)
                 self.refresh_surface()
                 self.tree_panel.rebuild()
+        elif name == 'auto_sel':
+            self.open_tool('auto')
+            self.auto_panel.scope.set_value('selection')
+            self.refresh_tool()
+            self.run_tool('auto')
         elif name in ('bake', 'unbake'):
             self.bake_group(key, name == 'bake')
         elif name in ('auto_group', 'auto_subgroups'):
