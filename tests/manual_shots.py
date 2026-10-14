@@ -73,7 +73,9 @@ def main():
         pump(0.15)
         img = (widget or w).grab()
         if rect is not None:
-            img = img.copy(rect)
+            k = img.devicePixelRatio()          # grab() на Retina — в физических пикселях
+            img = img.copy(QRect(round(rect.x() * k), round(rect.y() * k),
+                                 round(rect.width() * k), round(rect.height() * k)))
         img.save(str(out / f'{name}.png'))
         print('  ', name, flush=True)
 
@@ -96,8 +98,8 @@ def main():
     tab('project')
     # куб навигации
     c = w.vp.cube
-    r = c.geometry()
-    p0 = w.vp.mapTo(w, r.topLeft())
+    r = c.rect()
+    p0 = c.mapTo(w, r.topLeft())
     shot('cube', rect=QRect(p0.x() - 6, p0.y() - 6, r.width() + 12, r.height() + 12))
     # 2. импорт со сканера
     import bag_reconstruct as br

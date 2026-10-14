@@ -73,6 +73,20 @@ class TestPoseTree(unittest.TestCase):
         u = next(u for u in s.pose_tree()['unplaced'] if u['id'] == victim)
         self.assertIn('нет связей', u['reason'])
 
+    def test_edge_reason(self):
+        import scan_project as sp
+        ok = {'score': 0.6, 'margin': 0.8, 'violations': 0.005, 'close': 0.7}
+        self.assertTrue(sp.edge_reason(ok).startswith('принята'))
+        self.assertIn('отрыв', sp.edge_reason(dict(ok, margin=0.05)))
+        self.assertIn('оценка', sp.edge_reason(dict(ok, score=0.01)))
+        self.assertIn('противоречий', sp.edge_reason(dict(ok, violations=0.1)))
+        self.assertIn('сильная', sp.edge_reason(dict(ok, violations=0.03, close=0.9)))
+        self.assertIn('циклы', sp.edge_reason(dict(ok, loop_rejected=True)))
+        self.assertIn('малого перекрытия', sp.edge_reason(
+            {'score': 0.04, 'margin': 0.5, 'violations': 0.005, 'close': 0.083, 'thick': 0.02, 'thick_cells': 300}))
+        for r in (ok, dict(ok, margin=0.05), dict(ok, violations=0.1), dict(ok, violations=0.03, close=0.9)):
+            self.assertEqual(sp.edge_reason(r).startswith('принята'), sp.edge_ok(r))
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -97,6 +97,36 @@ def thin_ok(r):
             and r.get('score', -1) >= 0 and r.get('margin', 0) >= EDGE_MIN_MARGIN)
 
 
+def edge_reason(r):
+    """Почему автоматика приняла или отвергла пару — текст для подсказки (как в edge_ok)."""
+    if r.get('loop_rejected'):
+        return 'не принята: из-за неё не сходятся циклы графа (слабая пара)'
+    if thin_ok(r):
+        return (f"принята по правилу малого перекрытия: противоречий {r['violations'] * 100:.1f} % "
+                f"(≤ {EDGE_THIN_VIOL * 100:g} %), совпало {r['close'] * 100:.0f} % (≥ {EDGE_THIN_CLOSE * 100:g} %), "
+                f"толщина общих плоскостей {r['thick'] * 100:.1f} см на {r['thick_cells']} участках "
+                f"(≤ {EDGE_THIN_THICK * 100:g} см на ≥ {EDGE_THIN_CELLS})")
+    if 'score' not in r:
+        return ''
+    why = []
+    if r['score'] < EDGE_MIN_SCORE:
+        why.append(f"оценка {r['score']:+.2f} ниже {EDGE_MIN_SCORE:g}")
+    if r.get('margin', 0) < EDGE_MIN_MARGIN:
+        why.append(f"отрыв {r.get('margin', 0):.2f} ниже {EDGE_MIN_MARGIN:g} — есть почти такая же другая поза")
+    if why:
+        return 'не принята: ' + '; '.join(why)
+    if r['violations'] <= EDGE_MAX_VIOL:
+        return (f"принята: оценка ≥ {EDGE_MIN_SCORE:g}, отрыв ≥ {EDGE_MIN_MARGIN:g}, "
+                f"противоречий ≤ {EDGE_MAX_VIOL * 100:g} %")
+    if edge_ok(r):
+        return (f"принята как сильная пара: противоречий {r['violations'] * 100:.1f} % (больше обычных "
+                f"{EDGE_MAX_VIOL * 100:g} %, но ≤ {EDGE_STRONG_VIOL * 100:g} %) при оценке ≥ {EDGE_STRONG_SCORE:g}, "
+                f"отрыве ≥ {EDGE_STRONG_MARGIN:g} и совпадении ≥ {EDGE_STRONG_CLOSE * 100:g} % — "
+                f"вероятно, между съёмками что-то сдвинули")
+    return (f"не принята: противоречий {r['violations'] * 100:.1f} % — больше {EDGE_MAX_VIOL * 100:g} % "
+            f"(точки одного скана попали туда, где другой видел пустоту)")
+
+
 def weak_edge(e):
     """Автоматическая пара со слабым подтверждением — её принятие проверяется по циклам."""
     return (e.get('method') not in ('manual', 'group') and 'user' not in e and

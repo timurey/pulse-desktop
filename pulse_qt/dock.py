@@ -54,6 +54,31 @@ class Dock(QFrame):
     linkSelected = Signal(str)
     linkAction = Signal(str, object)
     TAB_LINKS = 5
+    PAIR_TIPS = [
+        'Два скана, взаимную позу которых нашла автостыковка или задали вы.',
+        '<b>Оценка</b> — насколько хорошо сканы совпадают в найденной позе: доля точек одного скана '
+        'ближе 5 см к другому минус 8 × доля нарушений.<br>'
+        '<b>&gt; 0,5</b> — уверенное совпадение; <b>0,05…0,5</b> — частичное перекрытие (мало общих стен); '
+        '<b>&lt; 0,05</b> — автоматически не принимается; отрицательная — поза противоречит сканам.',
+        '<b>Нарушения</b> — доля точек, попавших туда, где другой скан видел пустое пространство '
+        '(луч прошёл сквозь это место). При верной позе почти ноль.<br>'
+        '<b>≤ 0,02</b> (2 %) — норма; до 0,05 допускается у сильной пары (между съёмками что-то '
+        'сдвинули); больше — поза почти наверняка неверна.',
+        '<b>Отрыв</b> — насколько лучшая поза лучше второй по оценке (однозначность решения).<br>'
+        '<b>&gt; 0,5</b> — решение однозначное; <b>&lt; 0,1</b> — есть почти такая же другая поза '
+        '(симметричная комната, коридор), автоматически не принимается.',
+        '<b>RMSE</b> — средняя ошибка точек после точной подгонки (ICP) по совпавшим точкам.<br>'
+        '<b>1–4 см</b> — норма для сканера; больше — сканы совпали неплотно. Сам по себе не говорит, '
+        'что поза верна: смотрите оценку и нарушения.',
+        '<b>Метод</b> — как найдена поза:<br>'
+        '<b>плоскости+ICP</b> — автостыковка: гипотезы по стенам и полу, затем подгонка ICP;<br>'
+        '<b>группы</b> — стыковка групп между собой (по объединённым облакам);<br>'
+        '<b>ручная / автоподгонка / кандидат</b> — поза задана вами («Принять позу»).',
+        '<b>Состояние</b> — используется ли пара для поз сканов:<br>'
+        '<b>активно</b> — автоматика приняла; <b>неактивно</b> — не прошла проверку;<br>'
+        '<b>принято</b> / <b>отклонено</b> — ваше решение; <b>вручную</b> — ваша ручная связь.<br>'
+        'Наведите на ячейку, чтобы увидеть причину.',
+        '']
 
     def __init__(self):
         super().__init__()
@@ -86,6 +111,9 @@ class Dock(QFrame):
         # пары
         self.pairs = _table(['Пара', 'Оценка', 'Нарушения', 'Отрыв', 'RMSE', 'Метод', 'Состояние', ''],
                             numeric=(1, 2, 3, 4))
+        for c, tip in enumerate(self.PAIR_TIPS):
+            if tip:
+                self.pairs.horizontalHeaderItem(c).setToolTip(tip)
         self.pairs.horizontalHeader().setMinimumSectionSize(64)
         self.pairs.horizontalHeader().setSectionResizeMode(6, QHeaderView.Fixed)
         self.pairs.setColumnWidth(6, 120)
@@ -189,14 +217,25 @@ class Dock(QFrame):
 
     # ── пары ─────────────────────────────────────────────────────────────
     def set_pairs(self, rows):
-        """rows: [(пара, оценка, нарушения, отрыв, rmse, метод, (состояние, вид чипа))]."""
+        """
+        rows: [(пара, оценка, нарушения, отрыв, rmse, метод, (состояние, вид чипа)[, {колонка: подсказка}])].
+        """
         t = self.pairs
         sel = self.selected_pair()
         t.setRowCount(len(rows))
         for r, row in enumerate(rows):
+            tips = row[7] if len(row) > 7 else {}
             for c in range(6):
-                t.setItem(r, c, _cell(row[c], num=c in (1, 2, 3, 4), mono=c != 5))
-            t.setCellWidget(r, 6, W.hbox(W.chip(*row[6]), None, margins=(10, 0, 0, 0)))
+                it = _cell(row[c], num=c in (1, 2, 3, 4), mono=c != 5)
+                if tips.get(c):
+                    it.setToolTip(tips[c])
+                t.setItem(r, c, it)
+            st = W.hbox(W.chip(*row[6]), None, margins=(10, 0, 0, 0))
+            if tips.get(6):
+                st.setToolTip(tips[6])
+                for ch in st.findChildren(QLabel):
+                    ch.setToolTip(tips[6])
+            t.setCellWidget(r, 6, st)
             more = W.tool(W.THEME.icon('mdi6.dots-horizontal', 'ink3'), tip='Действия с парой',
                           cb=lambda r=r: self._pair_menu_at(r), icon_only=True)
             t.setCellWidget(r, 7, W.hbox(None, more, margins=(0, 0, 6, 0)))

@@ -2605,14 +2605,15 @@ class MainWindow(QMainWindow):
             else:
                 st = ('активно', 'ok') if active else ('неактивно', 'mut')
             ab = f"{short(e['A'])} – {short(e['B'])}"
+            tips = self._pair_tips(e, st[0])
             if e.get('method') == 'manual':
-                rows.append((ab, '—', '—', '—', '—', e.get('source', 'ручная'), st))
+                rows.append((ab, '—', '—', '—', '—', e.get('source', 'ручная'), st, tips))
             else:
                 rows.append((ab, f"{e.get('score', 0):+.2f}", f"{e.get('violations', 0):.3f}",
                              f"{e.get('margin', 0):.2f}",
                              f"{e['rmse'] * 100:.1f} см" if e.get('rmse') is not None else '—',
                              {'group': 'группы', 'planes+icp': 'плоскости+ICP'}.get(e.get('method'), e.get('method', '')),
-                             st))
+                             st, tips))
         self.dock.set_pairs(rows)
         loops = self.s.loops() if self.s.edges else []
         lrows = []
@@ -2781,6 +2782,49 @@ class MainWindow(QMainWindow):
         if name == 'ref':
             u = self.s.by_id(arg)
             return self.make_ref(u.root if isinstance(u, bk.BakedGroup) else arg)
+
+    @staticmethod
+    def _pair_tips(e, state):
+        """Подсказки к ячейкам строки пары: что значит именно это значение и почему такое состояние."""
+        import scan_project as sp
+        tips = {}
+        if e.get('method') == 'manual':
+            w = float(e.get('weight', 1.0)) * 10
+            tips[5] = (f"Ручная связь ({e.get('source', 'ручная')}): поза задана вами. В графе весит ×{w:g} "
+                       f"по сравнению с автоматическими парами.")
+            tips[6] = ('Ручная связь используется всегда, пока вы её не отклоните.' if state == 'вручную'
+                       and e.get('user') != 'reject' else 'Отклонена: в позах не участвует.')
+            return tips
+        sc, v, m = e.get('score', 0), e.get('violations', 0), e.get('margin', 0)
+        close = e.get('close')
+        tips[1] = (f"Оценка {sc:+.2f}" + (f" = совпало {close * 100:.0f} % точек − 8 × нарушения {v * 100:.1f} %"
+                                          if close is not None else '') + '. '
+                   + ('Уверенное совпадение.' if sc > 0.5 else
+                      'Частичное перекрытие: общих стен немного.' if sc >= sp.EDGE_MIN_SCORE else
+                      f'Ниже порога {sp.EDGE_MIN_SCORE:g}: мало общего или поза неверна.'))
+        tips[2] = (f"Нарушения {v * 100:.1f} % точек: попали туда, где другой скан видел пустоту. "
+                   + ('Норма.' if v <= sp.EDGE_MAX_VIOL else
+                      'Повышено: допустимо только у сильной пары (что-то сдвинули между съёмками).'
+                      if v <= sp.EDGE_STRONG_VIOL else 'Много: поза почти наверняка неверна.'))
+        tips[3] = (f"Отрыв {m:.2f}: настолько лучшая поза лучше второй. "
+                   + ('Решение однозначное.' if m > 0.5 else
+                      'Есть другие похожие позы, но лучшая заметно лучше.' if m >= sp.EDGE_MIN_MARGIN else
+                      'Неоднозначно: есть почти такая же другая поза.'))
+        if e.get('rmse') is not None:
+            tips[4] = (f"RMSE {e['rmse'] * 100:.1f} см — средняя ошибка совпавших точек после ICP. "
+                       + ('Норма.' if e['rmse'] <= 0.04 else 'Совпадение неплотное.'))
+        hyp = e.get('hypothesis')
+        tips[5] = ({'group': 'Стыковка групп между собой: позы групп по объединённым облакам.',
+                    'planes+icp': 'Автостыковка: гипотезы по стенам и полу, затем точная подгонка ICP.'}
+                   .get(e.get('method'), '') + (f' Лучшая гипотеза — «{hyp}».' if hyp else ''))
+        reason = sp.edge_reason(e)
+        if e.get('user') == 'accept':
+            tips[6] = 'Принята вами' + (f' (автоматика: {reason})' if reason else '') + '.'
+        elif e.get('user') == 'reject':
+            tips[6] = 'Отклонена вами' + (f' (автоматика: {reason})' if reason else '') + '.'
+        else:
+            tips[6] = reason[:1].upper() + reason[1:] + '.' if reason else ''
+        return tips
 
     def on_auto(self):
         """Автостыковка всего проекта (после импорта и из меню): способ и «посчитанные пары» — из панели."""
