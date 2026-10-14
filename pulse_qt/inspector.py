@@ -96,14 +96,15 @@ class DisplaySection(W.Section):
         self.color_btn.clicked.connect(self._pick_color)
         self._color = '#d97a3a'
         self.add(W.field('Цвет', W.hbox(self.mode, self.color_btn, spacing=6)))
-        self.size = self._spin(0, 0, 12, 1, 0, ' px', '—', 'Размер точек этого облака; «—» — общий ползунок')
-        self.add(W.hbox(W.label('размер точек'), None, self.size))
-        self.rmin = self._spin(0, 0, 200, 0.1, 2, ' м', '—', 'Не показывать точки ближе к своему сканеру')
-        self.rmax = self._spin(0, 0, 500, 0.5, 1, ' м', '—', 'Не показывать точки дальше от своего сканера')
-        self.add(W.hbox(W.label('дальность от'), self.rmin, W.label('до'), self.rmax, spacing=6))
-        self.zmin = self._spin(-50.01, -50.01, 50, 0.1, 2, ' м', '—', 'Высота от своего сканера, снизу')
-        self.zmax = self._spin(-50.01, -50.01, 50, 0.1, 2, ' м', '—', 'Высота от своего сканера, сверху')
-        self.add(W.hbox(W.label('высота от'), self.zmin, W.label('до'), self.zmax, spacing=6))
+        unit = lambda t: W.label(t, 'Hint')
+        self.size = self._num(1, 12, 1, 0, 'Размер точек этого облака, px; пусто — общий ползунок')
+        self.add(W.hbox(W.label('размер точек'), None, self.size, unit('px'), spacing=6))
+        self.rmin = self._num(0, 200, 0.1, 2, 'Не показывать точки ближе к своему сканеру, м; пусто — без ограничения')
+        self.rmax = self._num(0, 500, 0.5, 1, 'Не показывать точки дальше от своего сканера, м; пусто — без ограничения')
+        self.add(W.hbox(W.label('дальность от'), None, self.rmin, W.label('до'), self.rmax, unit('м'), spacing=6))
+        self.zmin = self._num(-50, 50, 0.1, 2, 'Высота от своего сканера, снизу, м; пусто — без ограничения')
+        self.zmax = self._num(-50, 50, 0.1, 2, 'Высота от своего сканера, сверху, м; пусто — без ограничения')
+        self.add(W.hbox(W.label('высота от'), None, self.zmin, W.label('до'), self.zmax, unit('м'), spacing=6))
         self.apply = QCheckBox('Применять в расчётах и экспорте')
         self.apply.setToolTip('Обрезанные точки не участвуют в стыковке, качестве, сетке и не попадают в экспорт. '
                               'Иначе обрезка только на экране')
@@ -114,19 +115,10 @@ class DisplaySection(W.Section):
         self.add(W.button('Сбросить', lambda: self.changed.emit(None), icon=W.THEME.icon('mdi6.restore'),
                           tip='Свои настройки сбросить: действуют настройки группы или общие'))
 
-    def _spin(self, v, lo, hi, step, dec, suffix, special, tip):
-        sb = QDoubleSpinBox()
-        sb.setRange(lo, hi)
-        sb.setDecimals(dec)
-        sb.setSingleStep(step)
-        sb.setSuffix(suffix)
-        sb.setSpecialValueText(special)
-        sb.setValue(v)
-        sb.setKeyboardTracking(False)
-        sb.setAlignment(Qt.AlignRight)
-        sb.setToolTip(tip)
-        sb.valueChanged.connect(lambda _: self._emit())
-        return sb
+    def _num(self, lo, hi, step, dec, tip):
+        f = W.OptNum(lo, hi, step, dec, tip)
+        f.changed.connect(lambda _: self._emit())
+        return f
 
     def _pick_color(self):
         from PySide6.QtGui import QColor
@@ -143,9 +135,9 @@ class DisplaySection(W.Section):
         self.color_btn.setStyleSheet(f'background:{self._color}; border-radius:5px; border:1px solid rgba(128,128,128,0.5);')
 
     def values(self):
-        lim = lambda sb: None if sb.value() <= sb.minimum() + 1e-9 else round(sb.value(), 3)
-        d = {'color_mode': self.mode.value(), 'size': lim(self.size), 'rmin': lim(self.rmin),
-             'rmax': lim(self.rmax), 'zmin': lim(self.zmin), 'zmax': lim(self.zmax),
+        rmin = self.rmin.value()
+        d = {'color_mode': self.mode.value(), 'size': self.size.value(), 'rmin': rmin or None,
+             'rmax': self.rmax.value(), 'zmin': self.zmin.value(), 'zmax': self.zmax.value(),
              'apply': self.apply.isChecked() or None}
         if d['color_mode'] == 'solid':
             d['color'] = self._color
@@ -162,11 +154,8 @@ class DisplaySection(W.Section):
         self.mode.set_value(d.get('color_mode', 'auto'))
         self._color = d.get('color') or base_color
         self._paint()
-        self.size.setValue(d.get('size') or 0)
-        self.rmin.setValue(d.get('rmin') or 0)
-        self.rmax.setValue(d.get('rmax') or 0)
-        self.zmin.setValue(d['zmin'] if d.get('zmin') is not None else self.zmin.minimum())
-        self.zmax.setValue(d['zmax'] if d.get('zmax') is not None else self.zmax.minimum())
+        for k in ('size', 'rmin', 'rmax', 'zmin', 'zmax'):
+            getattr(self, k).set_value(d.get(k) or None if k in ('size', 'rmin', 'rmax') else d.get(k))
         self.apply.setChecked(bool(d.get('apply')))
         self.note.setText(note)
         self.note.setVisible(bool(note))

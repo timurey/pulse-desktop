@@ -6,7 +6,7 @@ import numpy as np
 from PySide6.QtCore import Qt, Signal, QSize, QRectF, QTimer
 from PySide6.QtGui import QPainter, QColor, QImage, QPixmap
 from PySide6.QtWidgets import (QWidget, QLabel, QHBoxLayout, QVBoxLayout, QGridLayout, QPushButton,
-                               QToolButton, QFrame, QButtonGroup, QSizePolicy)
+                               QToolButton, QFrame, QButtonGroup, QSizePolicy, QLineEdit)
 
 from view_cube import ViewCube, look_from, FACES
 
@@ -259,6 +259,80 @@ def vbox(*ws, spacing=4, margins=(0, 0, 0, 0)):
         else:
             lay.addWidget(x)
     return w
+
+
+class OptNum(QLineEdit):
+    """Необязательное число: пустое поле — «не задано» (подсказка «—»), крестик внутри очищает.
+    Точка или запятая; стрелки вверх/вниз — шаг. changed(значение или None) — после ввода и очистки."""
+    changed = Signal(object)
+
+    def __init__(self, lo, hi, step=1.0, decimals=2, tip=None, width=72):
+        super().__init__()
+        self.lo, self.hi, self.step, self.dec = lo, hi, step, decimals
+        self._last = self._sent = None
+        self.setPlaceholderText('—')
+        self.setAlignment(Qt.AlignRight)
+        self.setFixedWidth(width)
+        if tip:
+            self.setToolTip(tip)
+        self._clr = QToolButton(self)                # крестик внутри поля справа, по центру
+        self._clr.setCursor(Qt.ArrowCursor)
+        self._clr.setFocusPolicy(Qt.NoFocus)
+        self._clr.setToolTip('Очистить')
+        self._clr.setStyleSheet('QToolButton { border: 0; background: transparent; padding: 0; }')
+        if THEME:
+            self._clr.setIcon(THEME.icon('mdi6.close-circle', 'ink3', 'ink'))
+        self._clr.setIconSize(QSize(13, 13))
+        self._clr.setFixedSize(16, 16)
+        self._clr.clicked.connect(self.clear_value)
+        self._clr.setVisible(False)
+        self.setTextMargins(0, 0, 14, 0)
+        self.textChanged.connect(lambda t: self._clr.setVisible(bool(t.strip())))
+        self.editingFinished.connect(self._commit)
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._clr.move(self.width() - self._clr.width() - 5, (self.height() - self._clr.height()) // 2)
+
+    def value(self):
+        t = self.text().strip().replace(',', '.').replace('−', '-')
+        if not t:
+            return None
+        try:
+            v = float(t)
+        except ValueError:
+            return self._last
+        return round(min(max(v, self.lo), self.hi), self.dec)
+
+    def set_value(self, v):
+        """Без сигнала."""
+        v = None if v is None else round(float(v), self.dec)
+        self._last = self._sent = v
+        if v is None:
+            self.setText('')
+        elif self.dec:
+            self.setText(f'{v:.{self.dec}f}'.rstrip('0').rstrip('.'))
+        else:
+            self.setText(str(int(v)))
+
+    def clear_value(self):
+        self.setText('')
+        self._commit()
+
+    def _commit(self):
+        v, sent = self.value(), self._sent
+        self.set_value(v)                          # нормализовать запись (границы, запятая, мусор)
+        if v != sent:
+            self.changed.emit(v)
+
+    def keyPressEvent(self, e):
+        if e.key() in (Qt.Key_Up, Qt.Key_Down):
+            v = self.value()
+            v = (self.lo if self.lo > 0 else 0.0) if v is None else v + (self.step if e.key() == Qt.Key_Up else -self.step)
+            self.setText(str(round(min(max(v, self.lo), self.hi), self.dec)))
+            self._commit()
+            return
+        super().keyPressEvent(e)
 
 
 def field(caption, w):
