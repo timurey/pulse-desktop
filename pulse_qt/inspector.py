@@ -11,6 +11,7 @@ from . import widgets as W
 class _Panel(QFrame):
     """Заголовок + прокручиваемое содержимое + (необязательно) закреплённый низ."""
     closed = Signal()
+    FOCUS = {}                                     # инструмент → разделы панели
 
     def __init__(self, title, closable=False):
         super().__init__()
@@ -46,10 +47,32 @@ class _Panel(QFrame):
         self.foot = QVBoxLayout()
         self.foot.setContentsMargins(0, 0, 0, 0)
         lay.addLayout(self.foot)
+        self.sections, self.foots, self.focused = {}, {}, None
 
-    def add(self, sec):
+    def add(self, sec, key=None):
         self.body.addWidget(sec)
+        if key is not None:
+            self.sections[key] = sec
         return sec
+
+    def add_foot(self, w, key=None):
+        self.foot.addWidget(w)
+        if key is not None:
+            self.foots[key] = w
+        return w
+
+    def focus(self, key=None, title=None):
+        """Показать разделы инструмента key (None — все); заголовок панели."""
+        keys = None if key is None else self.FOCUS.get(key, (key,))
+        for k, sec in self.sections.items():
+            sec.setVisible(keys is None or k in keys)
+            if getattr(sec, 'title', None) is not None:      # заголовок раздела = заголовок панели — не повторять
+                sec.title.setVisible(not (title and sec.title.text() == title.upper()))
+        for k, w in self.foots.items():
+            w.setVisible(key is not None and k == key)
+        if title:
+            self.title.setText(title.upper())
+        self.focused = key
 
     def finish(self):
         self.body.addStretch(1)
@@ -103,6 +126,7 @@ class Inspector(_Panel):
                                   W.tool(t.icon('mdi6.rotate-right'), tip='Повернуть план по часовой',
                                          cb=lambda: self.action.emit('rotate_plan-'), icon_only=True),
                                   self.plan_step))
+        self.sec_level.setVisible(False)            # команды горизонта и плана — на ленте
         # действия
         self.sec_act = self.add(W.Section())
         self.act_lay = QGridLayout()
@@ -433,9 +457,12 @@ class ManualPanel(_Panel):
 class CleanPanel(_Panel):
     action = Signal(str, object)
 
+    FOCUS = {'dyn': ('scan', 'dyn'), 'frame': ('scan', 'frame')}
+
     def __init__(self):
+        from .tools import RunBar, DoneBar
         super().__init__('Чистка', closable=True)
-        s1 = self.add(W.Section('Скан'))
+        s1 = self.add(W.Section('Скан'), 'scan')
         self.scan = QComboBox()
         self.scan.activated.connect(lambda i: self.action.emit('scan', self.scan.currentData()))
         s1.add(self.scan)
@@ -445,7 +472,7 @@ class CleanPanel(_Panel):
         self.report = W.KV()
         s1.add(self.report)
         # движущиеся объекты: неподтверждённые точки
-        sd = self.add(W.Section('Движущиеся объекты'))
+        sd = self.add(W.Section('Движущиеся объекты'), 'dyn')
         self.cb_cross = QCheckBox('между сканами (по текущим позам)')
         self.cb_cross.setChecked(True)
         self.cb_pass = QCheckBox('по полуоборотам (сканы из bag)')
@@ -465,18 +492,39 @@ class CleanPanel(_Panel):
         sd.add(W.hbox(QLabel('Все видимые сканы'), None, self.sw_dyn_all))
         self.dyn_label = W.label('', 'KV_v', wrap=True)
         sd.add(self.dyn_label)
-        sd.add(W.label('«Найти» и «Удалить найденное» — на ленте; найденное — пурпурным, удаление отменяется Ctrl+Z. Сравнение сканов пропускает '
+        self.b_dyn_del = W.button('Удалить найденное', lambda: self.action.emit('dyn_delete', None),
+                                  icon=W.THEME.icon('mdi6.delete-outline'), tip='Удалить найденные точки (Ctrl+Z — вернуть)')
+        self.b_dyn_del.setEnabled(False)
+        sd.add(self.b_dyn_del)
+        sd.add(W.label('Найденное — пурпурным, удаление отменяется Ctrl+Z. Сравнение сканов пропускает '
                        'большие плоскости (пол, стены): их расхождение — ошибка совмещения, см. слой '
                        '«Качество». «По полуоборотам» есть только у сканов, импортированных из bag этой '
                        'версией (иначе — переимпортируйте bag).', 'Hint', wrap=True))
-        s2 = self.add(W.Section('Выделение прямоугольником'))
+        s2 = self.add(W.Section('Выделение прямоугольником'), 'frame')
         self.sw_all = W.Switch(False)
         s2.add(W.hbox(QLabel('Все видимые сканы'), None, self.sw_all))
-        s2.add(W.label('«Рамка» на ленте (R). Левая кнопка — прямоугольник, Shift — добавить. Удаляется всё в прямоугольнике '
+        s2.add(W.label('Левая кнопка — прямоугольник, Shift — добавить. Удаляется всё в прямоугольнике '
                        'на всю глубину взгляда; вид — кубом навигации, масштаб — колесом.', 'Hint', wrap=True))
         self.sel_label = W.label('', 'KV_v')
         s2.add(self.sel_label)
+        t = W.THEME
+        g = QGridLayout()
+        g.setSpacing(6)
+        g.addWidget(W.button('Удалить (Del)', lambda: self.action.emit('erase', None),
+                             icon=t.icon('mdi6.delete-outline')), 0, 0)
+        g.addWidget(W.button('Снять выделение', lambda: self.action.emit('clear_sel', None),
+                             icon=t.icon('mdi6.selection-off')), 0, 1)
+        g.addWidget(W.button('Отменить (Ctrl+Z)', lambda: self.action.emit('undo', None),
+                             icon=t.icon('mdi6.undo')), 1, 0)
+        g.addWidget(W.button('Сбросить скан', lambda: self.action.emit('reset_scan', None),
+                             icon=t.icon('mdi6.restore')), 1, 1)
+        s2.add(g)
         self.finish()
+        self.dyn_run = self.add_foot(RunBar('Найти', 'mdi6.walk', 'Найти точки движущихся объектов'), 'dyn')
+        self.dyn_run.run.connect(lambda: self.action.emit('dyn_find', None))
+        self.frame_done = self.add_foot(DoneBar(), 'frame')
+        self.frame_done.done.connect(lambda: self.action.emit('frame_done', None))
+        self.focus(None)
 
     def dyn_threshold(self):
         return self.dyn_slider.value() / 100.0

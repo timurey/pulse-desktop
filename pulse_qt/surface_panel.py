@@ -77,7 +77,6 @@ class SurfacePanel(_Panel):
                             'для отдельного скана; больше 800 тыс. точек — точность загрубляется. После '
                             'построения точки сканов скрываются (слой «Точки сканов»).', 'Hint', wrap=True)
         s2.add(self.hint)
-        s2.add(W.label('«Построить» и «Экспорт сетки» — на ленте («Результат»).', 'Hint', wrap=True))
         s3 = self.add(W.Section('Построенные'))
         self.list = QVBoxLayout()
         self.list.setSpacing(6)
@@ -88,6 +87,10 @@ class SurfacePanel(_Panel):
         self.sw_points.toggled.connect(lambda v: self.action.emit('points', v))
         s3.add(W.hbox(QLabel('Показывать точки сканов'), None, self.sw_points))
         self.finish()
+        from .tools import RunBar
+        self.runbar = self.add_foot(RunBar('Построить', 'mdi6.vector-triangle', 'Построить сетку'))
+        self.runbar.run.connect(lambda: self.action.emit('build', None))
+        self.runbar.stop.connect(lambda: self.action.emit('stop', None))
 
     def params(self):
         return {'scope': self.scope.value(), 'method': self.method.value(), 'acc': self.acc.value() / 100.0,

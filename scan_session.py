@@ -684,7 +684,32 @@ class Session:
         self.recompute_poses()
         if progress:
             progress(1.0, "готово")
-        return {'pairs': n, 'done': len([e for e in edges if (e['A'], e['B']) in chosen]), 'cancelled': cancelled}
+        return {'pairs': n, 'done': len([e for e in edges if (e['A'], e['B']) in chosen]), 'cancelled': cancelled,
+                'computed': k, 'seconds': time.time() - t0}
+
+    def auto_pairs(self, method='tree', gid=None):
+        """
+        Пары для автостыковки: method 'all' — все пары, 'tree' — по дереву (как run_auto
+        by_tree; без групп — все пары), 'within' — внутри групп (within_group_pairs).
+        gid — только сканы этой ветки.
+        """
+        if method == 'within':
+            return self.within_group_pairs(gid)
+        ids = [s.id for s in self.scans]
+        if gid is not None and gid != 'root' and self.tree.group(gid) is not None:
+            inside = set(self.tree.scans_in(gid))
+            ids = [i for i in ids if i in inside]
+        if method == 'tree' and not self.tree.is_flat():
+            weight = {sc.id: sc.res.get('n_points', 0) if sc.analyzed else 0 for sc in self.scans}
+            return self.tree.registration_pairs(ids, weight)
+        return list(itertools.combinations(ids, 2))
+
+    def pending_pairs(self, combos, reuse=True):
+        """Сколько пар из combos придётся считать (остальные уже посчитаны)."""
+        if not reuse:
+            return len(combos)
+        done = {(e['A'], e['B']) for e in self.edges if 'T_canon' in e and e.get('method') not in ('manual', 'group')}
+        return sum(1 for a, b in combos if (a, b) not in done and (b, a) not in done)
 
     # ── стыковка групп ───────────────────────────────────────────────────
     def within_group_pairs(self, gid=None):

@@ -119,13 +119,13 @@ def main():
         QTimer.singleShot(400, lambda: (shot('03b_quality'), step_quality_local()))
 
     def step_quality_local():
-        w.tree_panel.q_method.group.button(1).click()
+        w.quality_panel.method.group.button(1).click()
         wait(lambda: w.qual['res'] is not None and w.qual['res'].method == 'local' and not w.qual['busy'],
              lambda: QTimer.singleShot(400, lambda: (shot('03c_quality_local'), step_quality_off())), 60)
 
     def step_quality_off():
         w.tree_panel.switches['quality'].setChecked(False, emit=True)
-        w.tree_panel.q_method.group.button(0).click()
+        w.quality_panel.method.group.button(0).click()
         step_manual_start()
 
     def step_manual_start():

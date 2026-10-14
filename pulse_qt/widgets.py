@@ -205,6 +205,12 @@ class Segmented(QFrame):
     def value(self):
         return self.values[max(0, self.group.checkedId())]
 
+    def set_value(self, v, emit=False):
+        if v in self.values:
+            self.group.button(self.values.index(v)).setChecked(True)
+            if emit:
+                self.changed.emit(v)
+
 
 class Swatch(QWidget):
     def __init__(self, color=None, size=10):

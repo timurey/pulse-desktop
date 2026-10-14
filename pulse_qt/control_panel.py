@@ -36,10 +36,13 @@ class _MeasureRow(QFrame):
 
 class ControlPanel(_Panel):
     action = Signal(str, object)
+    MEASURES = [('расстояние', 'dist'), ('отметка', 'height'), ('до плоскости', 'plane'), ('ломаная', 'poly')]
 
     def __init__(self):
-        super().__init__('Контроль')
-        s0 = self.add(W.Section('Нулевой уровень'))
+        from .tools import DoneBar
+        super().__init__('Контроль', closable=True)
+        t = W.THEME
+        s0 = self.add(W.Section('Нулевой уровень'), 'zero')
         self.zero_src = W.label('', 'Hint', wrap=True)
         s0.add(self.zero_src)
         self.zero_z = QDoubleSpinBox()
@@ -55,9 +58,14 @@ class ControlPanel(_Panel):
         self.sw_zero = W.Switch(True)
         self.sw_zero.toggled.connect(lambda v: self.action.emit('zero_show', v))
         s0.add(W.hbox(QLabel('Показывать уровень и сетку на нём'), None, self.sw_zero))
-        s0.add(W.label('«По полу», «Кликом», «Числом» — на ленте. Отметки замеров считаются от этого уровня.',
+        s0.add(W.hbox(W.button('По полу', lambda: self.action.emit('zero_floor', None),
+                               icon=t.icon('mdi6.floor-plan'), tip='Пол опорного скана (по умолчанию)'),
+                      W.button('Кликом', lambda: self.action.emit('zero_click', None),
+                               icon=t.icon('mdi6.cursor-default-click-outline'),
+                               tip='Щелчок по точке облака — её высота станет ±0.000'), spacing=6))
+        s0.add(W.label('Высоту можно ввести числом в поле выше. Отметки замеров считаются от этого уровня.',
                        'Hint', wrap=True))
-        ss = self.add(W.Section('Сечение'))
+        ss = self.add(W.Section('Сечение'), 'section')
         self.sec_mode = W.Segmented([('выкл.', 'off'), ('срез', 'slice'), ('отсечение', 'clip')], 'off')
         self.sec_mode.changed.connect(lambda v: self.action.emit('sec', {'mode': v}))
         ss.add(self.sec_mode)
@@ -109,16 +117,24 @@ class ControlPanel(_Panel):
         ss.add(W.button('Сбросить поворот', lambda: self.action.emit('sec', {'a': 0.0, 'b': 0.0})))
         self.sec_desc = W.label('', 'Hint', wrap=True)
         ss.add(self.sec_desc)
-        s1 = self.add(W.Section('Замеры'))
+        s1 = self.add(W.Section('Замеры'), 'measure')
+        self.m_type = W.Segmented(self.MEASURES, 'dist')
+        self.m_type.changed.connect(lambda v: self.action.emit('measure_type', v))
+        s1.add(self.m_type)
         self.mode_hint = W.label('', 'KV_v', wrap=True)
         s1.add(self.mode_hint)
         self.list = QVBoxLayout()
         self.list.setSpacing(6)
         s1.add(self.list)
-        self.empty = W.label('замеров нет — выберите инструмент на ленте («Расстояние», «Отметка», «До плоскости», '
-                             '«Ломаная»), затем щёлкайте по облаку', 'Hint', wrap=True)
+        self.empty = W.label('замеров нет — выберите тип замера и щёлкайте по облаку', 'Hint', wrap=True)
         s1.add(self.empty)
+        s1.add(W.button('Очистить замеры', lambda: self.action.emit('measure_clear', None),
+                        icon=t.icon('mdi6.delete-sweep-outline')))
         self.finish()
+        for k in ('zero', 'section', 'measure'):
+            b = self.add_foot(DoneBar(), k)
+            b.done.connect(lambda k=k: self.action.emit('done', k))
+        self.focus(None)
 
     def set_zero(self, z, source, show):
         self.zero_z.blockSignals(True)

@@ -348,15 +348,14 @@ def main():
     w.on_manual_cancel()
     pump()
 
-    # лента: вкладка открывает свою панель, режим переключает вкладку
+    # лента: вкладка — только команды; инструмент открывает свою панель и свою вкладку
     tp = w.tree_panel
     rb = w.ribbon
     rb.group.button(rb.keys.index('clean')).click()
-    check('лента: «Чистка» открывает панель чистки', w.mode == 'clean')
-    rb.group.button(rb.keys.index('result')).click()
-    check('лента: «Результат» открывает поверхность', w.mode == 'surface')
-    rb.group.button(rb.keys.index('control')).click()
-    check('лента: «Контроль» — панель контроля', w.mode == 'control' and rb.current() == 'control')
+    check('лента: вкладка не меняет правую панель', w.mode == 'inspect' and rb.current() == 'clean')
+    rb.group.button(rb.keys.index('project')).click()
+    w.open_tool('section')
+    check('лента: инструмент открывает свою вкладку', w.mode == 'control' and rb.current() == 'control')
     w.set_measure_mode('dist')
     Pm = pr.transform(sess.ref._display[::300], sess.Tc(sess.ref))
     sm, _, fm = v.project(Pm)
@@ -393,7 +392,7 @@ def main():
     res0 = w.qual['res']
     n0 = len(v.items['qual'].P) if v.has('qual') else 0
     t = time.time()
-    tp.q_slider.setValue(15)
+    w.quality_panel.slider.setValue(15)
     dt = time.time() - t
     n1 = len(v.items['qual'].P) if v.has('qual') else 0
     check('качество: ползунок перекрашивает без пересчёта', w.qual['res'] is res0 and n1 > n0,
@@ -402,11 +401,11 @@ def main():
     check('качество: список мест', w.dock.qual.rowCount() > 0, f'{w.dock.qual.rowCount()} мест')
     w.on_quality_selected(0)
     check('качество: клик по месту подводит камеру', True)
-    tp.q_method.group.button(1).click()
+    w.quality_panel.method.group.button(1).click()
     wait(lambda: w.qual['res'] is not None and w.qual['res'].method == 'local' and not w.qual['busy'], 60)
     check('качество: переключение способа пересчитывает', w.qual['res'].method == 'local')
-    tp.q_method.group.button(0).click()
-    tp.q_slider.setValue(30)
+    w.quality_panel.method.group.button(0).click()
+    w.quality_panel.slider.setValue(30)
     tp.switches['quality'].setChecked(False, emit=True)
     check('качество: слой выключается', not v.has('qual'))
 
@@ -452,6 +451,25 @@ def main():
           and not v.parallel and not w.vp.b_proj.isChecked())
     w.on_escape()
     check('Esc выходит из полёта', not v.fly)
+
+    # панели инструментов: у каждого инструмента ленты — своя панель, вкладка её не закрывает
+    for key in w.TOOLS:
+        w.open_tool(key)
+        pump(0.1)
+        check(f'инструмент «{key}»: своя панель', w.tool == key and w.right.currentWidget() is w.tool_panel(key))
+    w.close_tool()
+    w.open_tool('frame')
+    check('«Рамка» включает выделение', w.select_mode)
+    w.open_tool('quality')
+    check('смена инструмента выключает выделение', not w.select_mode)
+    w.ribbon.set_tab('project', emit=True)
+    check('вкладка не закрывает инструмент', w.tool == 'quality')
+    w.on_escape()
+    check('Esc закрывает инструмент', w.tool is None and w.right.currentWidget() is w.inspector)
+    w.open_tool('auto', run=True)                        # как Shift + щелчок: сразу с прошлыми настройками
+    wait(lambda: not w.busy, 600)
+    check('Shift-запуск автостыковки', 'размещено' in w.auto_panel.result.text(), w.auto_panel.result.text())
+    w.close_tool()
     w.settings.setValue('parallel', False)               # настройки пользователя не трогаем
     w.settings.setValue('point_px', 2)
 

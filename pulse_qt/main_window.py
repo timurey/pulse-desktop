@@ -42,7 +42,8 @@ from .surface_panel import SurfacePanel
 from .ribbon import Ribbon
 from .control_panel import ControlPanel
 from .dock import Dock
-from .dialogs import ScannerImportDialog, BagImportDialog, ExportDialog, AskDialog, PackDialog
+from .dialogs import ScannerImportDialog, BagImportDialog, AskDialog
+from .tools import AutoPanel, CandPanel, QualityPanel, ExportPanel, PackPanel
 
 KIND_HUE = {'floor': (0.30, 0.75, 0.40), 'ceiling': (0.35, 0.55, 1.0), 'wall': (1.0, 0.62, 0.20),
             'other': (0.6, 0.6, 0.6)}
@@ -292,6 +293,8 @@ class MainWindow(QMainWindow):
         self.scanner_ok = None
         self._dl_cancel = False
         self._bg_cancel = False
+        self._bg_runbar = None
+        self._mesh_cancel = False
         self.downloading = False
         self._saved_sig = None
         self._closing_ok = False
@@ -318,7 +321,10 @@ class MainWindow(QMainWindow):
         self.candidates = []
         self.cand_scan = None
         # чистка
-        self.mode = 'inspect'                    # inspect | manual | clean
+        self.mode = 'inspect'                    # inspect | manual | clean | control | surface | tool
+        self.tool = None                         # открытый инструмент (MainWindow.TOOLS) или None
+        self._tool_restored = set()
+        self._pair_sec = None                    # время стыковки одной пары на этом компьютере, с
         self.select_mode = False
         self._rect = None
         self.selection = {}
@@ -376,7 +382,6 @@ class MainWindow(QMainWindow):
         self.tree_panel.action.connect(self.on_tree_action)
         self.tree_panel.layerToggled.connect(self.on_layer)
         self.tree_panel.layerToggled.connect(lambda k, v: self._sync_ribbon())
-        self.tree_panel.qualityChanged.connect(lambda thr, m: self.quality_refresh())
         self.tree_panel.setMinimumWidth(220)
         self.split.addWidget(self.tree_panel)
         self.vsplit = QSplitter(Qt.Vertical)
@@ -411,13 +416,24 @@ class MainWindow(QMainWindow):
         self.manual.closed.connect(self.on_manual_cancel)
         self.clean = CleanPanel()
         self.clean.action.connect(self.on_clean_action)
-        self.clean.closed.connect(lambda: self.set_mode('inspect'))
+        self.clean.closed.connect(self.close_tool)
         self.surface_panel = SurfacePanel()
         self.surface_panel.action.connect(self.on_surface_action)
-        self.surface_panel.closed.connect(lambda: self.set_mode('inspect'))
+        self.surface_panel.closed.connect(self.close_tool)
         self.control = ControlPanel()
         self.control.action.connect(self.on_control_action)
-        for w in (self.inspector, self.manual, self.clean, self.surface_panel, self.control):
+        self.control.closed.connect(self.close_tool)
+        self.auto_panel = AutoPanel()
+        self.cand_panel = CandPanel()
+        self.quality_panel = QualityPanel()
+        self.export_panel = ExportPanel()
+        self.pack_panel = PackPanel()
+        for key, w in (('auto', self.auto_panel), ('cand', self.cand_panel), ('quality', self.quality_panel),
+                       ('export', self.export_panel), ('pack', self.pack_panel)):
+            w.action.connect(lambda name, arg, key=key: self.on_tool_action(key, name, arg))
+            w.closed.connect(self.close_tool)
+        for w in (self.inspector, self.manual, self.clean, self.surface_panel, self.control, self.auto_panel,
+                  self.cand_panel, self.quality_panel, self.export_panel, self.pack_panel):
             self.right.addWidget(w)
         rw = QFrame()
         rw.setObjectName('PanelRight')
@@ -454,6 +470,8 @@ class MainWindow(QMainWindow):
         rb.brand.addWidget(self.dirty_dot)
         sel = lambda: self.tree_sel
         rb_ = {}
+        tool = self._tb
+        SH = ' · Shift — выполнить с прошлыми настройками'
 
         # ── Проект ──
         pg = rb.add_tab('project', 'Проект')
@@ -462,8 +480,8 @@ class MainWindow(QMainWindow):
         g.big('mdi6.folder-outline', 'Открыть', self.on_open, 'Открыть проект (Ctrl+O)')
         g.big('mdi6.content-save-outline', 'Сохранить', self.on_save, 'Сохранить (Ctrl+S)')
         g.small('mdi6.content-save-edit-outline', 'Сохранить как…', self.on_save_as)
-        g.small('mdi6.package-variant-closed', 'Упаковать для передачи…', self.on_pack,
-                'Проект, все сканы и кеш анализа — одной папкой или zip-файлом для другого человека')
+        g.small('mdi6.package-variant-closed', 'Упаковать для передачи', tool('pack'),
+                'Проект, все сканы и кеш анализа — одной папкой или zip-файлом для другого человека' + SH)
         g = rb.add_group(pg, 'Импорт')
         g.big('mdi6.access-point', 'Со\nсканера', self.on_import_scanner, 'Скачать записи со сканера и импортировать')
         g.big('mdi6.folder-open-outline', 'Bag', self.on_import_bags, 'Импорт bag из папки')
@@ -483,23 +501,14 @@ class MainWindow(QMainWindow):
         # ── Стыковка ──
         pg = rb.add_tab('reg', 'Стыковка')
         g = rb.add_group(pg, 'Автоматически')
-        am = QMenu(self)
-        self.a_reuse = am.addAction('Использовать уже посчитанные пары')
-        self.a_reuse.setCheckable(True)
-        self.a_reuse.setChecked(True)
-        self.a_bytree = am.addAction('По дереву: пары внутри групп и соседних (быстрее)')
-        self.a_bytree.setCheckable(True)
-        self.a_bytree.setChecked(True)
-        self.b_auto = g.big('mdi6.graph-outline', 'Авто-\nстыковка', self.on_auto, 'Подобрать пары и позы всех сканов',
-                            menu=am)
-        g.small('mdi6.folder-network-outline', 'Внутри групп', self.on_auto_within,
-                'Выделена группа в дереве — пары только внутри неё (с подгруппами); ничего не выделено — '
-                'внутри каждой группы. Связи между группами не трогаются. Также: правая кнопка на группе')
-        g.small('mdi6.vector-arrange-above', 'Группы между собой', self.on_auto_groups,
-                'Каждая группа — жёсткое целое (облако по внутренним связям); стыкуются дочерние группы '
-                'выбранной ветки (или верхние группы)')
-        g.small('mdi6.target', 'Кандидаты позы', lambda: self.on_cand_search(
-            sel() or next((x.id for x in self.s.scans if x.pose is None), None)))
+        self.b_auto = g.big('mdi6.graph-outline', 'Авто-\nстыковка', tool('auto'),
+                            'Подобрать пары и позы сканов: параметры и запуск — в правой панели' + SH)
+        g.small('mdi6.folder-network-outline', 'Внутри групп', tool('auto', method='within'),
+                'Автостыковка только внутри групп: связи между группами не трогаются' + SH)
+        g.small('mdi6.vector-arrange-above', 'Группы между собой', tool('auto', method='groups'),
+                'Каждая группа — жёсткое целое (облако по внутренним связям); стыкуются группы между собой' + SH)
+        g.small('mdi6.target', 'Кандидаты позы', tool('cand'),
+                'Гипотезы позы скана относительно размещённых' + SH)
         g = rb.add_group(pg, 'Вручную')
         self.b_manual = g.big('mdi6.vector-combine', 'Ручная', lambda: self.start_manual(),
                               'Ручная стыковка выбранного скана', checkable=True)
@@ -528,9 +537,9 @@ class MainWindow(QMainWindow):
         # ── Контроль ──
         pg = rb.add_tab('control', 'Контроль')
         g = rb.add_group(pg, 'Совмещение')
-        rb_['quality'] = g.big('mdi6.texture-box', 'Качество\nсовмещения',
-                               lambda: self._toggle_layer('quality'),
-                               'Подсветить места, где поверхность из разных сканов толще порога', checkable=True)
+        rb_['quality'] = g.big('mdi6.texture-box', 'Качество\nсовмещения', tool('quality'),
+                               'Подсветить места, где поверхность из разных сканов толще порога' + SH,
+                               checkable=True)
         g.small('mdi6.sync', 'Циклы графа', lambda: self.dock.tabs.setCurrentIndex(1))
         g.small('mdi6.format-list-bulleted', 'Список мест', lambda: self.dock.tabs.setCurrentIndex(4))
         g = rb.add_group(pg, 'Объекты')
@@ -544,22 +553,14 @@ class MainWindow(QMainWindow):
                              'Показать только полосу облака у плоскости (план этажа, разрез)', checkable=True)
         self.b_clip = g.big('mdi6.flip-to-back', 'Отсечение', lambda: self.section_toggle('clip'),
                             'Скрыть всё по одну сторону плоскости (например, выше 2.5 м)', checkable=True)
-        g.small('mdi6.arrow-expand-vertical', 'Горизонтально', lambda: self.on_control_action('sec_base', 'z'))
-        g.small('mdi6.alpha-x-box-outline', 'По X', lambda: self.on_control_action('sec_base', 'x'))
-        g.small('mdi6.alpha-y-box-outline', 'По Y', lambda: self.on_control_action('sec_base', 'y'))
-        g.small('mdi6.wall', 'По стене / полу', lambda: self.on_control_action('sec_base', 'plane'),
-                'Щелчок по найденной стене или полу — плоскость сечения параллельна ей')
-        g.small('mdi6.swap-vertical', 'Перевернуть', lambda: self.on_control_action('sec_flip', None),
-                'Отсечение: показать другую сторону')
         g = rb.add_group(pg, 'Нулевой уровень')
-        self.b_zero = g.big('mdi6.format-vertical-align-bottom', 'Нулевой\nуровень',
-                            lambda: self.on_control_action('zero_show', not self.zero_show),
-                            'Показать нулевой уровень (сетка 1 м на нём); отметки считаются от него', checkable=True)
+        self.b_zero = g.big('mdi6.format-vertical-align-bottom', 'Нулевой\nуровень', tool('zero'),
+                            'Нулевой уровень: показ, по полу, кликом, числом; отметки считаются от него',
+                            checkable=True)
         g.small('mdi6.floor-plan', 'По полу', lambda: self.on_control_action('zero_floor', None),
                 'Пол опорного скана (по умолчанию)')
         g.small('mdi6.cursor-default-click-outline', 'Кликом', lambda: self.set_measure_mode('zero'),
                 'Щелчок по точке облака — её высота станет ±0.000')
-        g.small('mdi6.numeric', 'Числом…', lambda: self.on_control_action('zero_number', None))
         g = rb.add_group(pg, 'Замеры')
         rm = {}
         rm['dist'] = g.big('mdi6.ruler', 'Расстояние', lambda: self.set_measure_mode('dist'),
@@ -578,7 +579,7 @@ class MainWindow(QMainWindow):
         # ── Чистка ──
         pg = rb.add_tab('clean', 'Чистка')
         g = rb.add_group(pg, 'Движущиеся объекты')
-        g.big('mdi6.walk', 'Найти', self.on_dyn_find, 'Найти точки движущихся объектов')
+        g.big('mdi6.walk', 'Найти', tool('dyn'), 'Найти точки движущихся объектов' + SH)
         g.small('mdi6.delete-outline', 'Удалить найденное', self.on_dyn_delete)
         g = rb.add_group(pg, 'Отражения')
         g.small('mdi6.blur', 'Показать красным', lambda: self.on_clean_action('ghosts', None))
@@ -593,12 +594,12 @@ class MainWindow(QMainWindow):
         # ── Результат ──
         pg = rb.add_tab('result', 'Результат')
         g = rb.add_group(pg, 'Облако')
-        g.big('mdi6.export-variant', 'Экспорт\nсклейки', self.on_export, 'Экспорт склейки (E57 / PLY / PCD)')
+        g.big('mdi6.export-variant', 'Экспорт\nсклейки', tool('export'), 'Экспорт склейки (E57 / PLY / PCD)' + SH)
         g.small('mdi6.file-tree-outline', 'Экспорт ветки', lambda: self.on_export(sel()) if sel()
                 else self.set_status('выберите ветку или скан в дереве'))
         g = rb.add_group(pg, 'Поверхность β')
-        self.b_build = g.big('mdi6.vector-triangle', 'Построить', lambda: self.on_surface_action('build', None),
-                             'Экспериментально: сетка (полигоны) по сканам; параметры — в правой панели')
+        self.b_build = g.big('mdi6.vector-triangle', 'Поверх-\nность', tool('surface'),
+                             'Экспериментально: сетка (полигоны) по сканам; параметры и запуск — в правой панели' + SH)
         g.small('mdi6.export', 'Экспорт сетки', self._export_last_mesh)
         g = rb.add_group(pg, 'Документы')
         g.big('mdi6.camera-outline', 'Скриншот', self.save_screenshot, 'Скриншот окна и 3D-вида (F12)')
@@ -622,17 +623,196 @@ class MainWindow(QMainWindow):
         return rb
 
     # ── лента: вкладки ↔ правая панель ───────────────────────────────────
-    TAB_OF_MODE = {'manual': 'reg', 'clean': 'clean', 'surface': 'result', 'control': 'control'}
+    # ── инструменты: ключ → (вкладка, режим окна, панель, заголовок раздела) ──
+    TOOLS = {'auto': ('reg', 'tool', 'auto_panel', None),
+             'cand': ('reg', 'tool', 'cand_panel', None),
+             'quality': ('control', 'tool', 'quality_panel', None),
+             'section': ('control', 'control', 'control', 'Сечение'),
+             'zero': ('control', 'control', 'control', 'Нулевой уровень'),
+             'measure': ('control', 'control', 'control', 'Замеры'),
+             'dyn': ('clean', 'clean', 'clean', 'Движущиеся объекты'),
+             'frame': ('clean', 'clean', 'clean', 'Рамка'),
+             'surface': ('result', 'surface', 'surface_panel', None),
+             'export': ('result', 'tool', 'export_panel', None),
+             'pack': ('project', 'tool', 'pack_panel', None)}
+    RUNNABLE = ('auto', 'cand', 'quality', 'dyn', 'surface', 'export', 'pack')
+
+    def _tb(self, key, **preset):
+        """Обработчик кнопки ленты: открыть панель инструмента; Shift — выполнить сразу."""
+        return lambda: self.open_tool(key, run=bool(QApplication.keyboardModifiers() & Qt.ShiftModifier),
+                                      **preset)
+
+    def tool_panel(self, key=None):
+        key = key or self.tool
+        return getattr(self, self.TOOLS[key][2]) if key in self.TOOLS else None
+
+    def open_tool(self, key, run=False, **preset):
+        """Открыть панель инструмента (и режим окна); run — сразу выполнить с текущими настройками."""
+        tab, mode, _, title = self.TOOLS[key]
+        if self.mode == 'manual' and self.moving is not None and mode != 'manual':
+            if not self.on_manual_cancel():
+                return
+        prev = self.tool
+        if prev and prev != key:
+            self._leave_tool(prev)
+        panel = self.tool_panel(key)
+        if key not in self._tool_restored:
+            self._tool_restored.add(key)
+            try:
+                d = json.loads(self.settings.value(f'tool/{key}', '{}') or '{}')
+                if hasattr(panel, 'restore') and d:
+                    panel.restore(d)
+            except (ValueError, TypeError):
+                pass
+        self.tool = key
+        self.set_mode(mode, force=True)
+        if self.ribbon.current() != tab:
+            self.ribbon.set_tab(tab)
+        if key == 'auto' and preset.get('method'):
+            panel.set_method(preset['method'])
+            if preset['method'] in ('within', 'groups') and self._scope_group():
+                panel.scope.set_value('group')
+        if key == 'frame' and not self.select_mode:
+            self.toggle_select(keep=True)
+        self.refresh_tool()
+        if run and key in self.RUNNABLE:
+            self.run_tool(key)
+        self._sync_ribbon()
+
+    def _leave_tool(self, key):
+        if key == 'measure' or (key in ('zero', 'section') and self.measure_mode in ('zero', 'secplane')):
+            if self.measure_mode:
+                self.set_measure_mode(None, keep=True)
+        if key == 'frame' and self.select_mode:
+            self.toggle_select(keep=True)
+
+    def close_tool(self):
+        if self.tool:
+            self._leave_tool(self.tool)
+        if self.mode == 'manual' and self.moving is not None:
+            return self.on_manual_cancel()
+        self.tool = None
+        self.set_mode('inspect', force=True)
+
+    def _save_tool(self, key):
+        panel = self.tool_panel(key)
+        if hasattr(panel, 'state'):
+            self.settings.setValue(f'tool/{key}', json.dumps(panel.state()))
+
+    def run_tool(self, key=None):
+        key = key or self.tool
+        if key not in self.RUNNABLE:
+            return
+        self._save_tool(key)
+        {'auto': self.on_auto_tool, 'cand': lambda: self.on_cand_search(self.cand_panel.scan_id()),
+         'quality': self.quality_show, 'dyn': self.on_dyn_find,
+         'surface': lambda: self.on_surface_action('build', None),
+         'export': self.do_export, 'pack': self.do_pack}[key]()
+
+    def on_tool_action(self, key, name, arg):
+        if name == 'run':
+            self.run_tool(key)
+        elif name == 'stop':
+            self.stop_bg()
+        elif name in ('scope', 'params'):
+            self.refresh_tool()
+            if key == 'quality':
+                self._save_tool(key)
+                self.quality_refresh()
+        elif name == 'show' and key == 'pack':
+            r = getattr(self, '_pack_result', None)
+            if r:
+                from PySide6.QtCore import QUrl
+                from PySide6.QtGui import QDesktopServices
+                QDesktopServices.openUrl(QUrl.fromLocalFile(str(Path(r['path']).parent)))
+
+    def refresh_tool(self):
+        """Область, оценка и списки открытой панели по текущему проекту и выделению."""
+        key = self.tool
+        if key == 'auto':
+            self._auto_estimate()
+        elif key == 'cand':
+            un = [x.id for x in self.s.scans if x.pose is None]
+            cur = self.tree_sel if self.s.by_id(self.tree_sel or '') is not None else (un[0] if un else None)
+            self.cand_panel.set_scans([(x.id, short(x.id) + ('' if x.pose is not None else ' · не размещён'))
+                                       for x in self.s.scans if x.id != self.s.frame], cur)
+        elif key == 'export':
+            p = self.export_panel
+            scopes = [('все размещённые сканы', None)]
+            k = self.tree_sel
+            if k and (self.s.tree.group(k) is not None and k != 'root' or self.s.by_id(k) is not None):
+                ids = self.s.tree.scans_in(k) if self.s.tree.group(k) is not None else [k]
+                name = self.s.tree.group(k).name if self.s.tree.group(k) is not None else short(k)
+                scopes.append((f'ветка «{name}» ({len(ids)} скан.)', ids))
+            base = (Path(self.s.project_path).resolve().with_suffix('') if self.s.project_path
+                    else Path.home() / 'merged')
+            cur = 1 if getattr(self, '_export_branch', False) and len(scopes) > 1 else 0
+            p.set_scopes(scopes, cur, None if p.path.text() else str(base) + '_merged')
+            if cur and p.path.text():
+                p.path.setText(str(Path(str(base) + '_' + short(k)).with_suffix('.' + p.fmt.value())))
+            n = len(self.s.placed())
+            p.set_estimate(f'размещённых сканов: {n} из {len(self.s.scans)}')
+        elif key == 'pack':
+            name = Path(self.s.project_path).stem if self.s.project_path else 'проект'
+            base = Path(self.s.project_path).resolve().parent if self.s.project_path else Path.home() / 'Desktop'
+            missing = [short(sc.id) for sc in self.s.scans if not Path(sc.path).exists()]
+            mb = sum(Path(sc.path).stat().st_size for sc in self.s.scans if Path(sc.path).exists()) / 1e6
+            self.pack_panel.set_project(name, base, len(self.s.scans) - len(missing), mb, missing)
+        elif key == 'surface':
+            self.refresh_surface()
+        elif key in ('section', 'zero', 'measure'):
+            self.refresh_control()
+        elif key in ('dyn', 'frame'):
+            self.refresh_clean()
+
+    # ── автостыковка: панель ─────────────────────────────────────────────
+    def _auto_gid(self):
+        if self.auto_panel.scope.value() != 'group':
+            return None
+        return self._scope_group()
+
+    def _auto_estimate(self):
+        p = self.auto_panel
+        m = p.method_value()
+        gid = self._auto_gid()
+        if p.scope.value() == 'group':
+            g = self.s.tree.group(gid) if gid else None
+            p.scope.set_info(f'группа «{g.name}»: {len(self.s.tree.scans_in(gid))} скан.' if g else
+                             'выберите группу (или скан в ней) в дереве')
+        else:
+            p.scope.set_info(f'весь проект: {len(self.s.scans)} скан.')
+        if p.scope.value() == 'group' and gid is None:
+            p.set_estimate('')
+            return
+        if m == 'groups':
+            parent = self.s.tree.group(gid) if gid else self.s.tree.root
+            kids = [c for c in parent.children if hasattr(c, 'children') and self.s.tree.scans_in(c.id)]
+            n = len(kids) * (len(kids) - 1) // 2
+            p.set_estimate(f'групп: {len(kids)}, пар групп: {n}' if len(kids) > 1 else
+                           'нужно хотя бы две группы на этом уровне дерева')
+            return
+        combos = self.s.auto_pairs(m, gid)
+        todo = self.s.pending_pairs(combos, p.reuse.isChecked())
+        sec = self._pair_sec or 4.0
+        from scan_session import fmt_eta
+        eta = '' if not todo else f", ≈ {fmt_eta(todo * sec)}{'' if self._pair_sec else ' (оценка)'}"
+        p.set_estimate(f'пар: {len(combos)}, считать заново: {todo}{eta}')
+
+    def on_auto_tool(self):
+        p = self.auto_panel
+        m = p.method_value()
+        gid = self._auto_gid()
+        if p.scope.value() == 'group' and gid is None:
+            self.set_status('выберите группу в дереве или область «весь проект»')
+            return
+        if m == 'groups':
+            return self.on_auto_groups(gid)
+        self._run_auto(self.s.auto_pairs(m, gid), p.reuse.isChecked(), {'all': 'все пары', 'tree': 'по дереву',
+                                                                          'within': 'внутри групп'}[m])
 
     def on_tab(self, key):
+        """Вкладка показывает только команды; правая панель — инструмент или инспектор."""
         self.settings.setValue('ribbon_collapsed', self.ribbon.collapsed)
-        if key in ('project', 'reg', 'control'):
-            self._free_tab = key
-        want = {'clean': 'clean', 'result': 'surface', 'control': 'control'}.get(key)
-        if want is None:
-            want = 'manual' if (key == 'reg' and self.moving is not None) else 'inspect'
-        if want != self.mode:
-            self.set_mode(want)
         self._sync_ribbon()
 
     def _sync_ribbon(self):
@@ -640,11 +820,6 @@ class MainWindow(QMainWindow):
         rb = getattr(self, 'ribbon', None)
         if rb is None:
             return
-        tab = self.TAB_OF_MODE.get(self.mode)
-        if tab is None and rb.current() in ('clean', 'result', 'control'):
-            tab = getattr(self, '_free_tab', 'project')
-        if tab is not None and rb.current() != tab:
-            rb.set_tab(tab)
         self.b_manual.setChecked(self.mode == 'manual')
         self.b_select.setChecked(self.select_mode)
         self.b_pivot.setChecked(self.pivot is not None or self.pivot_pick)
@@ -697,11 +872,14 @@ class MainWindow(QMainWindow):
                      'zero': 'Нулевой уровень: щёлкните точку облака — её высота станет ±0.000',
                      'secplane': 'Сечение: щёлкните по стене или полу — плоскость встанет параллельно ей'}
 
-    def set_measure_mode(self, mode):
+    def set_measure_mode(self, mode, keep=False):
         if mode is not None and mode == self.measure_mode:
             mode = None
-        if mode is not None and self.mode != 'control':
-            self.set_mode('control')
+        want = {'zero': 'zero', 'secplane': 'section'}.get(mode, 'measure')
+        if mode is not None and self.tool != want:
+            self.open_tool(want)
+        if mode in self.control.m_type.values:
+            self.control.m_type.set_value(mode)
         self.measure_mode = mode
         self._mpts, self._mplane = [], None
         self.view.remove_prefix('mplane')
@@ -741,8 +919,8 @@ class MainWindow(QMainWindow):
 
     def section_toggle(self, mode):
         st = self._section_state()
-        if self.mode != 'control':
-            self.set_mode('control')
+        if self.tool != 'section':
+            self.open_tool('section')
         self.set_section(mode='off' if st['mode'] == mode else mode)
 
     def set_section(self, **kw):
@@ -787,7 +965,7 @@ class MainWindow(QMainWindow):
         C = section.outline(st, lo, hi)
         col = (0.36, 0.61, 1.0)
         self.view.set_lines('sect:frame', C, [[0, 1], [1, 2], [2, 3], [3, 0]], None, None, 1.5, col, 0.9)
-        if self.mode == 'control':
+        if self.tool == 'section':
             self._sec_c = section.center(st, lo, hi)
             self._sec_r = float(np.clip(0.18 * np.linalg.norm(hi - lo), 0.5, 10.0))
             spec = self._protractor()
@@ -852,6 +1030,12 @@ class MainWindow(QMainWindow):
                 self.s.measures.pop(arg)
                 self._draw_measures()
                 self.refresh_control()
+        elif name == 'zero_click':
+            self.set_measure_mode('zero')
+        elif name == 'measure_type':
+            self.set_measure_mode(arg)
+        elif name == 'done':
+            self.close_tool()
         elif name == 'measure_clear':
             self.s.measures = []
             self._mpts, self._mplane = [], None
@@ -1094,7 +1278,8 @@ class MainWindow(QMainWindow):
         status = self.st_text.text()
         sizes = (self.split.sizes(), self.vsplit.sizes())
         layers = {k: sw.isChecked() for k, sw in self.tree_panel.switches.items()}
-        q_thr, q_method = self.tree_panel.q_slider.value(), self.tree_panel.q_method.value()
+        q_state = self.quality_panel.state()
+        tool, tool_states = self.tool, {k: self.tool_panel(k).state() for k in ('auto', 'export', 'pack', 'quality')}
         self.theme.set(not self.theme.dark)
         self.settings.setValue('dark', self.theme.dark)
         QApplication.instance().setStyleSheet(self.theme.qss())
@@ -1110,10 +1295,13 @@ class MainWindow(QMainWindow):
             self.toggle_projection(True)
         if fly:
             self.toggle_fly()
+        for k, st in tool_states.items():
+            self.tool_panel(k).restore(st)
+            self._tool_restored.add(k)
+        self.quality_panel.restore(q_state)
+        self.tool = tool
         self.set_mode(self.mode, force=True)
         tp = self.tree_panel
-        tp.q_slider.setValue(q_thr)
-        tp.q_method.group.button(tp.q_method.values.index(q_method)).setChecked(True)
         for k, on in layers.items():
             tp.switches[k].setChecked(on, emit=on != (k == 'grid'))
         self.quality_refresh()
@@ -1130,6 +1318,16 @@ class MainWindow(QMainWindow):
         self.progress.show()
         self.progress.setValue(int(1000 * max(0.0, min(1.0, frac))))
         self.set_status(msg, log=False)
+        rb = getattr(self, '_bg_runbar', None)
+        if rb is not None:
+            rb.set_progress(frac, msg)
+
+    def _runbar(self):
+        """Нижняя панель запуска открытого инструмента (прогресс там же), если есть."""
+        panel = self.tool_panel() if self.tool else None
+        if panel is self.clean:
+            return self.clean.dyn_run if self.tool == 'dyn' else None
+        return getattr(panel, 'runbar', None)
 
     def run_bg(self, title, fn, done=None, cancellable=False):
         """
@@ -1146,21 +1344,28 @@ class MainWindow(QMainWindow):
         self.progress.show()
         self.b_stop.setEnabled(True)
         self.b_stop.setVisible(cancellable)
+        self._bg_runbar = self._runbar()
+        if self._bg_runbar is not None:
+            self._bg_runbar.set_running(True, cancellable)
 
         def progress(frac, msg):
             bg.post(lambda: self._set_progress(frac, msg))
 
-        def ok(r):
+        def finish():
             self.busy = False
             self.progress.hide()
             self.b_stop.hide()
+            if self._bg_runbar is not None:
+                self._bg_runbar.set_running(False)
+                self._bg_runbar = None
+
+        def ok(r):
+            finish()
             if done:
                 done(r)
 
         def fail(e):
-            self.busy = False
-            self.progress.hide()
-            self.b_stop.hide()
+            finish()
             self.set_status(f'Ошибка: {e}')
         bg.run(lambda: fn(progress), ok, fail)
         return True
@@ -1171,8 +1376,12 @@ class MainWindow(QMainWindow):
     def stop_bg(self):
         if self.busy and self.b_stop.isVisible() and not self._bg_cancel:
             self._bg_cancel = True
+            self._mesh_cancel = True
             self.b_stop.setEnabled(False)
-            self.set_status('останавливается после текущей пары…')
+            if self._bg_runbar is not None:
+                self._bg_runbar.b_stop.setEnabled(False)
+            self.set_status('останавливается…' if getattr(self, '_mesh_building', False) else
+                            'останавливается после текущей пары…')
             return True
         return False
 
@@ -1502,44 +1711,29 @@ class MainWindow(QMainWindow):
         return True
 
     def on_pack(self):
+        self.open_tool('pack')
+
+    def do_pack(self):
         """Упаковать проект для передачи другому человеку (Session.pack)."""
         if not self.s.scans:
             self.set_status('в проекте нет сканов')
             return
-        name = Path(self.s.project_path).stem if self.s.project_path else 'проект'
-        base = Path(self.s.project_path).resolve().parent if self.s.project_path else Path.home() / 'Desktop'
-        missing = [short(sc.id) for sc in self.s.scans if not Path(sc.path).exists()]
-        mb = sum(Path(sc.path).stat().st_size for sc in self.s.scans if Path(sc.path).exists()) / 1e6
-        d = PackDialog(self, name, base, len(self.s.scans) - len(missing), mb, missing)
-        if not d.exec():
-            return
-        v = d.values()
+        v = self.pack_panel.values()
         if not v['zip'] and v['path'].exists() and any(v['path'].iterdir()):
             QMessageBox.warning(self, 'Упаковать', f'Папка не пуста:\n{v["path"]}\nВыберите новую папку.')
             return
         sess = self.s
 
         def done(r):
+            self._pack_result = r
             msg = (f"упаковано: {r['path']} — сканов {r['scans']}, {r['size'] / 1e6:.0f} МБ"
                    + (f"; не найдены: {', '.join(short(x) for x in r['missing'])}" if r['missing'] else ''))
             self.set_status(msg)
-            box = QMessageBox(self)
-            box.setWindowTitle('Проект упакован')
-            box.setText(f"{'Zip-файл' if v['zip'] else 'Папка'} готов{'' if v['zip'] else 'а'}: "
-                        f"{Path(r['path']).name if v['zip'] else Path(r['path']).parent.name}")
-            box.setInformativeText(f"Сканов: {r['scans']}, {r['size'] / 1e6:.0f} МБ. Передайте "
-                                   f"{'файл' if v['zip'] else 'папку целиком'}; получатель открывает "
-                                   f"{r['project']} в Pulse Scan.")
-            b_show = box.addButton('Показать в папке', QMessageBox.ActionRole)
-            box.addButton('OK', QMessageBox.AcceptRole)
-            box.exec()
-            if box.clickedButton() is b_show:
-                from PySide6.QtCore import QUrl
-                from PySide6.QtGui import QDesktopServices
-                target = Path(r['path']).parent
-                QDesktopServices.openUrl(QUrl.fromLocalFile(str(target)))
+            self.pack_panel.set_result(
+                f"{'Zip-файл' if v['zip'] else 'Папка'}: {r['path']}\nСканов: {r['scans']}, {r['size'] / 1e6:.0f} МБ. "
+                f"Передайте {'файл' if v['zip'] else 'папку целиком'}; получатель открывает {r['project']} "
+                f"в Pulse Scan.")
         self.run_bg('упаковка проекта…', lambda p: sess.pack(v['path'], v['zip'], p), done)
-
     def on_add_scan(self):
         paths, _ = QFileDialog.getOpenFileNames(self, 'Добавить облако или bag', self._start_dir(),
                                                 'Облака и bag (*.e57 *.pcd *.ply *.las *.laz *.mcap *.zstd)')
@@ -1707,7 +1901,9 @@ class MainWindow(QMainWindow):
         if sc is not None and self.mode == 'clean':
             self.clean_scan = sc
             self.refresh_clean()
-        if self.mode == 'surface':
+        if self.tool:
+            self.refresh_tool()
+        elif self.mode == 'surface':
             self.refresh_surface()
 
     def on_tree_visible(self, key, vis):
@@ -2139,8 +2335,14 @@ class MainWindow(QMainWindow):
             self._sync_ribbon()
             return
         self.mode = mode
-        self.right.setCurrentWidget({'inspect': self.inspector, 'manual': self.manual, 'clean': self.clean,
-                                     'surface': self.surface_panel, 'control': self.control}[mode])
+        if mode == 'inspect' or (self.tool and self.TOOLS.get(self.tool, (None, None))[1] != mode):
+            self.tool = None
+        panel = self.tool_panel() if self.tool else {
+            'inspect': self.inspector, 'manual': self.manual, 'clean': self.clean, 'surface': self.surface_panel,
+            'control': self.control, 'tool': self.inspector}[mode]
+        if panel in (self.clean, self.control):
+            panel.focus(self.tool, self.TOOLS[self.tool][3] if self.tool else None)
+        self.right.setCurrentWidget(panel)
         if mode != 'control' and self.measure_mode:
             self.set_measure_mode(None)
         if mode != 'control':
@@ -2217,6 +2419,7 @@ class MainWindow(QMainWindow):
         self.dock.set_loops(lrows, chip)
 
     def on_auto(self):
+        """Автостыковка всего проекта (после импорта и из меню): способ и «посчитанные пары» — из панели."""
         if not self.s.scans:
             self.set_status('нет сканов для стыковки')
             return
@@ -2224,18 +2427,34 @@ class MainWindow(QMainWindow):
             self._after_analysis = self.on_auto
             self.set_status('автостыковка начнётся после фонового анализа')
             return
-        reuse = self.a_reuse.isChecked()
-        by_tree = self.a_bytree.isChecked() and not self.s.tree.is_flat()
+        p = self.auto_panel
+        m = p.method_value() if p.method_value() in ('all', 'tree') else 'tree'
+        self._run_auto(self.s.auto_pairs(m, None), p.reuse.isChecked(), 'весь проект')
+
+    def _run_auto(self, combos, reuse, what):
+        if not combos:
+            self.set_status('нет пар для стыковки')
+            return
+        if self.analyzing:
+            self._after_analysis = lambda: self._run_auto(combos, reuse, what)
+            self.set_status('стыковка начнётся после фонового анализа')
+            return
 
         def work(progress):
-            return self.s.run_auto(progress, reuse=reuse, by_tree=by_tree, cancel=self.bg_cancelled)
+            return self.s.run_auto(progress, reuse=reuse, combos=combos, cancel=self.bg_cancelled)
 
         def done(r):
+            if r and r.get('computed'):
+                self._pair_sec = r['seconds'] / r['computed']
             self.redraw_all()
             self.refresh_all()
-            self.set_status(f'Автостыковка{self._auto_note(r)}: размещено {len(self.s.placed())} из {len(self.s.scans)}')
-        self.run_bg('автостыковка…', work, done, cancellable=True)
-
+            msg = (f'Автостыковка ({what}, пар {len(combos)}){self._auto_note(r)}: размещено '
+                   f'{len(self.s.placed())} из {len(self.s.scans)}')
+            self.set_status(msg)
+            self.auto_panel.set_result(msg)
+            if self.tool == 'auto':
+                self._auto_estimate()
+        self.run_bg(f'автостыковка ({what}, пар {len(combos)})…', work, done, cancellable=True)
     @staticmethod
     def _auto_note(r):
         if r and r.get('cancelled'):
@@ -2253,31 +2472,18 @@ class MainWindow(QMainWindow):
         return None if p is None or p is self.s.tree.root else p.id
 
     def on_auto_within(self):
+        """Стыковка внутри выбранной группы (или внутри каждой группы) — правая кнопка в дереве."""
         gid = self._scope_group()
         pairs = self.s.within_group_pairs(gid)
         if not pairs:
             self.set_status('нет пар внутри групп: сгруппируйте сканы в дереве')
             return
-        if self.analyzing:
-            self._after_analysis = self.on_auto_within
-            self.set_status('стыковка начнётся после фонового анализа')
-            return
-        reuse = self.a_reuse.isChecked()
         name = self.s.tree.group(gid).name if gid else 'все группы'
-
-        def done(r):
-            self.redraw_all()
-            self.refresh_all()
-            self.set_status(f'стыковка внутри групп ({name}, пар {len(pairs)}){self._auto_note(r)}: размещено '
-                            f'{len(self.s.placed())} из {len(self.s.scans)}')
-        self.run_bg(f'стыковка внутри групп ({name}, пар {len(pairs)})…',
-                    lambda p: self.s.run_auto(p, reuse=reuse, combos=pairs, cancel=self.bg_cancelled), done,
-                    cancellable=True)
-
-    def on_auto_groups(self):
-        gid = self._scope_group()
+        self._run_auto(pairs, self.auto_panel.reuse.isChecked(), f'внутри групп: {name}')
+    def on_auto_groups(self, gid=None):
+        gid = gid if gid is not None else self._scope_group()
         if self.analyzing:
-            self._after_analysis = self.on_auto_groups
+            self._after_analysis = lambda: self.on_auto_groups(gid)
             self.set_status('стыковка начнётся после фонового анализа')
             return
 
@@ -2285,8 +2491,10 @@ class MainWindow(QMainWindow):
             self.redraw_all()
             self.refresh_all()
             ok = [f"«{a}» ← «{b}» {e['score']:+.2f}" + ('' if e['auto_ok'] else ' (не принято)') for a, b, e in out]
-            self.set_status('группы между собой: ' + '; '.join(ok) + f'; размещено {len(self.s.placed())} из '
-                            f'{len(self.s.scans)}')
+            msg = ('группы между собой: ' + '; '.join(ok) + f'; размещено {len(self.s.placed())} из '
+                   f'{len(self.s.scans)}')
+            self.set_status(msg)
+            self.auto_panel.set_result(msg)
 
         def work(p):
             return self.s.register_groups(gid, p)
@@ -2363,7 +2571,10 @@ class MainWindow(QMainWindow):
         self.manual.fit_label.setText('')
         self._fit_timer.start(50)
         self.mode = 'inspect'
+        self.tool = None
         self.set_mode('manual')
+        if self.ribbon.current() != 'reg':
+            self.ribbon.set_tab('reg')
         self.manual.set_scans(self.manual_items(), fixed.id, moving.id)
         self.only_show({fixed.id, moving.id})
         self.redraw_all()
@@ -2728,7 +2939,7 @@ class MainWindow(QMainWindow):
             return {'owner': 'pivot', 'c': self.pivot['c'], 'r': self.pivot['r'], 'axes': self.PIVOT_AXES,
                     'ang': self.pivot['ang'], 'set': lambda k, v: self._set_pivot_angles(**{k: v})}
         st = self.s.section
-        if self.mode == 'control' and st and st.get('mode', 'off') != 'off' and getattr(self, '_sec_c', None) is not None:
+        if self.tool == 'section' and st and st.get('mode', 'off') != 'off' and getattr(self, '_sec_c', None) is not None:
             n0 = np.asarray(st['n0'], float)
             n0 /= np.linalg.norm(n0)
             u, v = section.axes(n0)
@@ -3091,8 +3302,17 @@ class MainWindow(QMainWindow):
 
     # ── качество совмещения ──────────────────────────────────────────────
     def _quality_key(self):
-        _, method = self.tree_panel.quality_params()
+        _, method = self.quality_panel.params()
         return (method, self.s.state_signature(), tuple((sc.id, sc.visible, sc.analyzed) for sc in self.s.scans))
+
+    def quality_show(self):
+        """«Показать» в панели качества: включить слой и посчитать (или перекрасить)."""
+        if not self.tree_panel.layer('quality'):
+            self.tree_panel.switches['quality'].setChecked(True, emit=True)
+        else:
+            self.quality_refresh()
+        self.dock.tabs.setCurrentIndex(4)
+        self._sync_ribbon()
 
     def quality_refresh(self):
         """
@@ -3111,11 +3331,11 @@ class MainWindow(QMainWindow):
             return                                       # по окончании расчёта проверим ключ снова
         if len([sc for sc in self.s.placed() if sc.visible]) < 2:
             self.view.remove('qual')
-            self.tree_panel.q_info.setText('нужны хотя бы два видимых размещённых скана')
+            self.quality_panel.info.setText('нужны хотя бы два видимых размещённых скана')
             self.dock.set_quality([])
             return
         self.qual['busy'] = True
-        self.tree_panel.q_info.setText('пересчёт…')
+        self.quality_panel.info.setText('пересчёт…')
         method = key[0]
         sess = self.s
         t0 = time.time()
@@ -3125,18 +3345,18 @@ class MainWindow(QMainWindow):
             if sess is not self.s:
                 return
             self.qual['res'], self.qual['key'] = res, key
-            self.tree_panel.q_info.setText(
+            self.quality_panel.info.setText(
                 f"{'по плоскостям' if method == 'planes' else 'локально'}: ячеек {len(res):,}, "
                 f'{time.time() - t0:.1f} c'.replace(',', ' '))
             self.quality_refresh()                       # ключ мог измениться за время расчёта
 
         def fail(e):
             self.qual['busy'] = False
-            self.tree_panel.q_info.setText(f'ошибка: {e}')
+            self.quality_panel.info.setText(f'ошибка: {e}')
         bg.run(lambda: quality.compute(sess, method), done, fail)
 
     def _quality_draw(self):
-        thr, _ = self.tree_panel.quality_params()
+        thr, _ = self.quality_panel.params()
         P, C = quality.colors(self.qual['res'], thr)
         self.view.set_cloud('qual', P, (1, 0.8, 0.2), colors=C, size=self.view.point_px + 1, on_top=True)
         self._qual_timer.start(150)                      # список мест — после остановки ползунка
@@ -3145,7 +3365,7 @@ class MainWindow(QMainWindow):
         res = self.qual['res']
         if res is None or not self.tree_panel.layer('quality'):
             return
-        thr, _ = self.tree_panel.quality_params()
+        thr, _ = self.quality_panel.params()
         areas = quality.problem_areas(res, thr)
         self.qual['areas'] = areas
         kind_ru = {'wall': 'стена', 'floor': 'пол', 'ceiling': 'потолок', 'local': 'участок'}
@@ -3197,7 +3417,6 @@ class MainWindow(QMainWindow):
 
     def _mesh_finished(self):
         self._mesh_building = False
-        self.b_build.setText('Построить')
 
     def _draw_meshes(self, force=False):
         show = self.tree_panel.layer('mesh')
@@ -3271,9 +3490,8 @@ class MainWindow(QMainWindow):
                 if it is not None:
                     self.tree_panel.tree.scrollToItem(it)
             if self.run_bg(f"поверхность ({'Пуассон' if prm['method'] == 'poisson' else 'ball pivoting'}, "
-                           f"{prm['acc'] * 100:.0f} см)…", work, done):
+                           f"{prm['acc'] * 100:.0f} см)…", work, done, cancellable=True):
                 self._mesh_building = True
-                self.b_build.setText('Остановить')
         elif name == 'mesh_visible':
             key, vis = arg
             self._mesh_tree_visible('mesh:' + key, vis)
@@ -3299,8 +3517,7 @@ class MainWindow(QMainWindow):
         elif name == 'points':
             self.set_points_visible(arg)
         elif name == 'stop':
-            self._mesh_cancel = True
-            self.set_status('построение сетки останавливается…')
+            self.stop_bg()
 
     # ── найденные объекты ────────────────────────────────────────────────
     def set_points_visible(self, on):
@@ -3453,6 +3670,10 @@ class MainWindow(QMainWindow):
             self._dyn_apply_threshold(arg)
         elif name == 'dyn_delete':
             self.on_dyn_delete()
+        elif name == 'clear_sel':
+            self.clear_selection()
+        elif name == 'frame_done':
+            self.close_tool()
 
     # ── движущиеся объекты ───────────────────────────────────────────────
     def _dyn_targets(self):
@@ -3490,6 +3711,7 @@ class MainWindow(QMainWindow):
             if no_pass:
                 msg += f"; нет данных полуоборотов: {', '.join(no_pass[:6])}{' …' if len(no_pass) > 6 else ''}"
             self.clean.dyn_label.setText(msg)
+            self.clean.b_dyn_del.setEnabled(n > 0)
             self.set_status(msg + ' — «Удалить найденное» уберёт их (Ctrl+Z — вернуть)')
         self.run_bg('поиск движущихся объектов…', work, done)
 
@@ -3523,6 +3745,7 @@ class MainWindow(QMainWindow):
         self.view.remove_prefix('dyn:')
         self._refresh_scans([sc.id for sc, _ in items])
         self.clean.dyn_label.setText('')
+        self.clean.b_dyn_del.setEnabled(False)
         self.set_status(f"удалено вокселей 5 см: {n} из {', '.join(short(sc.id) for sc, _ in items)} "
                         f"(Ctrl+Z — вернуть)")
 
@@ -3536,9 +3759,10 @@ class MainWindow(QMainWindow):
             return
         self.view.set_cloud(name, sc.res['down'][sc.ghost_mask()], self.theme.rgb('bad'), T)
 
-    def toggle_select(self):
-        if self.mode != 'clean':
-            self.set_mode('clean')
+    def toggle_select(self, keep=False):
+        if not keep and self.tool != 'frame':
+            self.open_tool('frame')                      # инструмент сам включает выделение
+            return
         self.select_mode = not self.select_mode
         if not self.select_mode:
             self._rect = None
@@ -3622,6 +3846,7 @@ class MainWindow(QMainWindow):
     def on_cand_search(self, sid):
         sc = self.s.by_id(sid) if sid else None
         if sc is None:
+            self.set_status('выберите скан, для которого искать позу')
             return
         self.dock.tabs.setCurrentIndex(2)
         self.dock.set_cand_scans([(x.id, short(x.id)) for x in self.s.scans], sc.id)
@@ -3631,6 +3856,8 @@ class MainWindow(QMainWindow):
             self.dock.set_candidates([(str(i + 1), f"{x['score']:+.3f}", f"{x['n_close']:,}".replace(',', ' '),
                                        f"{x['violations']:.3f}", x['method']) for i, x in enumerate(c)])
             self.set_status(f'кандидатов: {len(c)} — выберите строку, чтобы посмотреть')
+            self.cand_panel.set_result(f'{short(sc.id)}: кандидатов {len(c)} — список в нижней панели '
+                                       f'«Кандидаты»' if c else f'{short(sc.id)}: кандидатов нет')
         self.run_bg(f'поиск кандидатов для {short(sc.id)}…', lambda p: self.s.candidates(sc, p), done)
 
     def on_cand_selected(self, i):
@@ -3659,24 +3886,25 @@ class MainWindow(QMainWindow):
 
     # ── экспорт ──────────────────────────────────────────────────────────
     def on_export(self, key=None):
+        """Открыть панель экспорта; key — ветка дерева (экспорт ветки)."""
+        if key:
+            self.tree_sel = key
+        self._export_branch = bool(key)
+        self.open_tool('export')
+        self._export_branch = False
+
+    def do_export(self):
         if not self.s.placed():
             self.set_status('нет размещённых сканов для экспорта')
             return
-        scopes = [('все размещённые сканы', None)]
-        if key:
-            ids = self.s.tree.scans_in(key) if self.s.tree.group(key) is not None else [key]
-            name = self.s.tree.group(key).name if self.s.tree.group(key) is not None else short(key)
-            scopes.insert(0, (f'ветка «{name}» ({len(ids)} скан.)', ids))
-        base = Path(self.s.project_path).with_suffix('') if self.s.project_path else Path.home() / 'merged'
-        dlg = ExportDialog(self, scopes, str(base) + ('_' + short(key) if key else '_merged') + '.e57')
-        if not dlg.exec():
-            return
-        v = dlg.values()
-        self.run_bg('экспорт…', lambda p: self.s.export(str(v['path']), v['voxel'], p, v['frame'],
-                                                        scan_ids=v['scan_ids']),
-                    lambda n: self.set_status(f"Экспорт: {v['path']} ({n:,} точек)".replace(',', ' ')))
+        v = self.export_panel.values()
 
-    # ── прочее ───────────────────────────────────────────────────────────
+        def done(n):
+            msg = f"Экспорт: {v['path']} ({n:,} точек)".replace(',', ' ')
+            self.set_status(msg)
+            self.export_panel.set_result(msg)
+        self.run_bg('экспорт…', lambda p: self.s.export(str(v['path']), v['voxel'], p, v['frame'],
+                                                        scan_ids=v['scan_ids']), done)
     def on_escape(self):
         if self.measure_mode:
             if self._mpts or self._mplane is not None:
@@ -3706,8 +3934,8 @@ class MainWindow(QMainWindow):
             self.view.remove(f'pick:{len(self.pairs)}:A')
             self.refresh_manual()
             self.set_status('незаконченная пара отменена')
-        elif self.mode == 'clean':
-            self.set_mode('inspect')
+        elif self.tool:
+            self.close_tool()
         elif self._vis_backup is not None and self.mode != 'manual':
             self.restore_visibility()
             self.set_status('видимость восстановлена', log=False)
