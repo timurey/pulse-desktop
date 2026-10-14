@@ -30,6 +30,7 @@ import surface
 import measure
 import section
 import baked as bk
+import display as dsp
 from scan_session import Session
 from scan_tree import KINDS
 
@@ -376,7 +377,7 @@ class MainWindow(QMainWindow):
         self.tree_panel = TreePanel()
         self.tree_panel.session = self.s
         self.tree_panel.status_of = self.status_chip
-        self.tree_panel.color_of = lambda sid: self.scan_color(sid)[1]
+        self.tree_panel.color_of = self._tree_color
         self.tree_panel.selected.connect(self.on_tree_select)
         self.tree_panel.visibilityToggled.connect(self.on_tree_visible)
         self.tree_panel.moved.connect(self.on_tree_move_drop)
@@ -412,6 +413,7 @@ class MainWindow(QMainWindow):
         self.right.setMinimumWidth(330)
         self.inspector = Inspector()
         self.inspector.action.connect(self.on_inspector_action)
+        self.inspector.display_changed.connect(self.on_display_changed)
         self.manual = ManualPanel()
         self.manual.action.connect(self.on_manual_action)
         self.manual.closed.connect(self.on_manual_cancel)
@@ -1416,6 +1418,14 @@ class MainWindow(QMainWindow):
             sid = g.baked['root']
         return scan_rgb(self.scan_index(sid), self.theme.dark)
 
+    def _tree_color(self, sid):
+        """Цвет метки скана в дереве: свой цвет из настроек отображения или цвет скана."""
+        d = self.s.effective_display(sid)
+        if d.get('color_mode') == 'solid' and d.get('color'):
+            from PySide6.QtGui import QColor
+            return QColor(d['color'])
+        return self.scan_color(sid)[1]
+
     def _names(self, obj):
         """Имена облаков 3D-вида объекта (скан или запечённая группа)."""
         return {f'scan:{i}' for i in self.s.members(obj)}
@@ -1483,7 +1493,18 @@ class MainWindow(QMainWindow):
         if T is None or getattr(sc, '_display', None) is None:
             self.view.remove(name)
             return
-        self.view.set_cloud(name, sc._display, self.scan_color(sc.id)[0], T, sc.visible and not self.points_hidden)
+        d = self.s.effective_display(sc.id)
+        P = sc._display
+        if dsp.has_limits(d):
+            P = P[dsp.mask(P, d)]
+        color = dsp.hex_rgb(d['color']) if d.get('color_mode') == 'solid' and d.get('color') else \
+            self.scan_color(sc.id)[0]
+        colors = None
+        if d.get('color_mode') in ('height', 'range') and len(P):
+            colors = dsp.colors(P, pr.transform(P, T)[:, 2], d, self.s.zero_z() if self.s.scans else 0.0)
+        self.view.remove(name)                           # размер и раскраска — заново
+        self.view.set_cloud(name, P, color, T, sc.visible and not self.points_hidden, size=d.get('size'),
+                            colors=colors)
         if sc.id in self.selection:
             self.selection.pop(sc.id)
             self._draw_selection()
@@ -2330,11 +2351,15 @@ class MainWindow(QMainWindow):
                 links.append(('положение', f'{T[0, 3]:.2f}, {T[1, 3]:.2f}, {T[2, 3]:.2f}'))
             self.inspector.show_scan(sc.id, col, self.status_chip(sc.id), path, src, ana, links,
                                      sc.pose is not None, sc.id == s.frame)
+            self._inspector_display(sc.id)
         elif g is not None and g is not s.tree.root:
             ids = s.tree.scans_in(g.id)
             placed = sum(1 for i in ids if s.by_id(i) and s.by_id(i).pose is not None)
-            self.inspector.show_group(g.name, g.kind, len(ids), [('размещено', f'{placed} из {len(ids)}'),
-                                                                  ('путь', s.tree.path(g.id) or g.name)])
+            rows = [('размещено', f'{placed} из {len(ids)}'), ('путь', s.tree.path(g.id) or g.name)]
+            if g.baked:
+                rows.append(('запечена', f"главный скан {short(g.baked['root'])}; при стыковке — одно облако"))
+            self.inspector.show_group(g.name, g.kind, len(ids), rows)
+            self._inspector_display(g.id)
         else:
             loops = s.loops() if s.edges else []
             bad = [l for l in loops if not l['ok']]
@@ -2345,6 +2370,43 @@ class MainWindow(QMainWindow):
                     ('горизонт', f'поправка {np.degrees(np.arccos(np.clip(s.level[2, 2], -1, 1))):.2f}°'),
                     ('файл', s.project_path or 'не сохранён')]
             self.inspector.show_project(rows, bool(s.scans))
+
+    def _inspector_display(self, key):
+        s = self.s
+        par = s.tree.parent(key)
+        inherited = s.effective_display(par.id) if par is not None and par is not s.tree.root else {}
+        own = s.own_display(key)
+        ids = s.tree.scans_in(key)
+        base = dsp.rgb_hex(self.scan_color(ids[0])[0]) if ids else '#d97a3a'
+        note = (f'Действуют настройки группы «{par.name}»; изменение здесь задаст свои.'
+                if inherited and not own else '')
+        if s.tree.group(key) is not None:
+            note = (note + ' ' if note else '') + 'Настройки группы действуют на все её сканы (у скана можно задать свои).'
+        self.inspector.sec_display.set_values(own, inherited, base, note)
+        self.inspector.sec_display.setVisible(True)
+
+    def on_display_changed(self, d):
+        key = self.tree_sel
+        if not key or (self.s.by_id(key) is None and self.s.tree.group(key) is None):
+            return
+        before = {sc.id: sc.calc_filter for sc in self.s.scans}
+        ids = self.s.set_display(key, d)
+        recalc = [i for i in ids if self.s.by_id(i) is not None and self.s.by_id(i).calc_filter != before.get(i)]
+        for sid in ids:
+            sc = self.s.by_id(sid)
+            if sc is None:
+                continue
+            if sid in recalc and sc.analyzed:
+                sc._display = self.s.display_points(sc)
+            self._show_scan(sc)
+        if recalc:
+            self.quality_refresh()
+            self.set_status(f'обрезка в расчётах изменена у {len(recalc)} скан. — стыковку, качество и сетку '
+                            f'стоит пересчитать', log=False)
+        self.tree_panel.rebuild()
+        if d is None:
+            self.refresh_inspector()
+        self._update_title()
 
     def on_inspector_action(self, name):
         key = self.tree_sel

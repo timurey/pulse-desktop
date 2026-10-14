@@ -98,7 +98,7 @@ class BakedGroup:
         return all(sc.analyzed for sc in self.scans())
 
     def _key(self):
-        return tuple((sid, sc.clean, len(sc.erase), len(sc.drop)) for sid, sc in
+        return tuple((sid, sc.clean, len(sc.erase), len(sc.drop), str(sc.calc_filter)) for sid, sc in
                      ((i, self.s.by_id(i)) for i in sorted(self.members)) if sc is not None)
 
     @property
@@ -124,7 +124,7 @@ class BakedGroup:
                 q = project_store.quick_hash(sc.path)
             except OSError:
                 q = sid
-            h.update(f'{sid}|{q}|{sc.clean}|{len(sc.erase)}|{len(sc.drop)}|'.encode('utf-8'))
+            h.update(f'{sid}|{q}|{sc.clean}|{len(sc.erase)}|{len(sc.drop)}|{sc.calc_filter}|'.encode('utf-8'))
             h.update(np.round(self.members[sid], 4).tobytes())
         return h.hexdigest()
 

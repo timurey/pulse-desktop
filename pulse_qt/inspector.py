@@ -78,9 +78,105 @@ class _Panel(QFrame):
         self.body.addStretch(1)
 
 
+# ── настройки отображения облака ───────────────────────────────────────────
+class DisplaySection(W.Section):
+    """Цвет, размер точек, обрезка по дальности и высоте скана или группы (display.py)."""
+    changed = Signal(object)                       # dict настроек (свои, без наследования)
+
+    def __init__(self):
+        super().__init__('Отображение')
+        from PySide6.QtWidgets import QPushButton
+        self._busy = False
+        self.mode = W.Segmented([('авто', 'auto'), ('свой', 'solid'), ('высота', 'height'), ('дальность', 'range')],
+                                'auto')
+        self.mode.changed.connect(lambda _: self._emit())
+        self.color_btn = QPushButton()
+        self.color_btn.setFixedSize(34, 24)
+        self.color_btn.setToolTip('Цвет облака')
+        self.color_btn.clicked.connect(self._pick_color)
+        self._color = '#d97a3a'
+        self.add(W.field('Цвет', W.hbox(self.mode, self.color_btn, spacing=6)))
+        self.size = self._spin(0, 0, 12, 1, 0, ' px', '—', 'Размер точек этого облака; «—» — общий ползунок')
+        self.add(W.hbox(W.label('размер точек'), None, self.size))
+        self.rmin = self._spin(0, 0, 200, 0.1, 2, ' м', '—', 'Не показывать точки ближе к своему сканеру')
+        self.rmax = self._spin(0, 0, 500, 0.5, 1, ' м', '—', 'Не показывать точки дальше от своего сканера')
+        self.add(W.hbox(W.label('дальность от'), self.rmin, W.label('до'), self.rmax, spacing=6))
+        self.zmin = self._spin(-50.01, -50.01, 50, 0.1, 2, ' м', '—', 'Высота от своего сканера, снизу')
+        self.zmax = self._spin(-50.01, -50.01, 50, 0.1, 2, ' м', '—', 'Высота от своего сканера, сверху')
+        self.add(W.hbox(W.label('высота от'), self.zmin, W.label('до'), self.zmax, spacing=6))
+        self.apply = QCheckBox('Применять в расчётах и экспорте')
+        self.apply.setToolTip('Обрезанные точки не участвуют в стыковке, качестве, сетке и не попадают в экспорт. '
+                              'Иначе обрезка только на экране')
+        self.apply.toggled.connect(lambda _: self._emit())
+        self.add(self.apply)
+        self.note = W.label('', 'Hint', wrap=True)
+        self.add(self.note)
+        self.add(W.button('Сбросить', lambda: self.changed.emit(None), icon=W.THEME.icon('mdi6.restore'),
+                          tip='Свои настройки сбросить: действуют настройки группы или общие'))
+
+    def _spin(self, v, lo, hi, step, dec, suffix, special, tip):
+        sb = QDoubleSpinBox()
+        sb.setRange(lo, hi)
+        sb.setDecimals(dec)
+        sb.setSingleStep(step)
+        sb.setSuffix(suffix)
+        sb.setSpecialValueText(special)
+        sb.setValue(v)
+        sb.setKeyboardTracking(False)
+        sb.setAlignment(Qt.AlignRight)
+        sb.setToolTip(tip)
+        sb.valueChanged.connect(lambda _: self._emit())
+        return sb
+
+    def _pick_color(self):
+        from PySide6.QtGui import QColor
+        from PySide6.QtWidgets import QColorDialog
+        c = QColorDialog.getColor(QColor(self._color), self, 'Цвет облака')
+        if c.isValid():
+            self._color = c.name()
+            self._paint()
+            if self.mode.value() != 'solid':
+                self.mode.set_value('solid')
+            self._emit()
+
+    def _paint(self):
+        self.color_btn.setStyleSheet(f'background:{self._color}; border-radius:5px; border:1px solid rgba(128,128,128,0.5);')
+
+    def values(self):
+        lim = lambda sb: None if sb.value() <= sb.minimum() + 1e-9 else round(sb.value(), 3)
+        d = {'color_mode': self.mode.value(), 'size': lim(self.size), 'rmin': lim(self.rmin),
+             'rmax': lim(self.rmax), 'zmin': lim(self.zmin), 'zmax': lim(self.zmax),
+             'apply': self.apply.isChecked() or None}
+        if d['color_mode'] == 'solid':
+            d['color'] = self._color
+        return d
+
+    def _emit(self):
+        if not self._busy:
+            self.changed.emit(self.values())
+
+    def set_values(self, own, inherited, base_color, note=''):
+        """own — свои настройки, inherited — действующие от групп (показываются, если своих нет)."""
+        self._busy = True
+        d = dict(inherited or {}, **(own or {}))
+        self.mode.set_value(d.get('color_mode', 'auto'))
+        self._color = d.get('color') or base_color
+        self._paint()
+        self.size.setValue(d.get('size') or 0)
+        self.rmin.setValue(d.get('rmin') or 0)
+        self.rmax.setValue(d.get('rmax') or 0)
+        self.zmin.setValue(d['zmin'] if d.get('zmin') is not None else self.zmin.minimum())
+        self.zmax.setValue(d['zmax'] if d.get('zmax') is not None else self.zmax.minimum())
+        self.apply.setChecked(bool(d.get('apply')))
+        self.note.setText(note)
+        self.note.setVisible(bool(note))
+        self._busy = False
+
+
 # ── инспектор ──────────────────────────────────────────────────────────────
 class Inspector(_Panel):
     action = Signal(str)
+    display_changed = Signal(object)
 
     def __init__(self):
         super().__init__('Проект')
@@ -127,6 +223,9 @@ class Inspector(_Panel):
                                          cb=lambda: self.action.emit('rotate_plan-'), icon_only=True),
                                   self.plan_step))
         self.sec_level.setVisible(False)            # команды горизонта и плана — на ленте
+        self.sec_display = self.add(DisplaySection())
+        self.sec_display.changed.connect(self.display_changed.emit)
+        self.sec_display.setVisible(False)
         # действия
         self.sec_act = self.add(W.Section())
         self.act_lay = QGridLayout()
@@ -149,6 +248,7 @@ class Inspector(_Panel):
     def show_project(self, rows, has_scans):
         self.title.setText('ПРОЕКТ')
         self.sec_head.setVisible(False)
+        self.sec_display.setVisible(False)
         self._kv('project', rows)
         for k in ('source', 'analysis', 'links'):
             self._kv(k, [])

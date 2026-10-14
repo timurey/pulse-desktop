@@ -43,7 +43,7 @@ def scan_points(session, sc, acc, progress=None):
     else:
         pts = planes.load_points(sc.path)
     P = np.asarray(pts, float) @ np.asarray(sc.R_up).T        # канон. система: сканер в начале
-    if sc.erase or len(getattr(sc, 'drop', ())):
+    if sc.erase or len(getattr(sc, 'drop', ())) or getattr(sc, 'calc_filter', None):
         P = P[sc.keep_mask(P)]
     pc = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(P))
     pc = pc.voxel_down_sample(acc / 2)

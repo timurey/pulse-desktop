@@ -57,7 +57,8 @@ def _clean_plane_mask(sc):
     if sc.erase:
         drop = drop | manual_clean.inside_regions(down, sc.erase)
     keep_fn = getattr(sc, 'keep_mask', None)
-    if keep_fn is not None and getattr(sc, 'drop', None) is not None and len(sc.drop):
+    if keep_fn is not None and ((getattr(sc, 'drop', None) is not None and len(sc.drop))
+                                or getattr(sc, 'calc_filter', None)):
         drop = drop | ~keep_fn(down)
     return ~drop
 

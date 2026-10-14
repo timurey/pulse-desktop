@@ -29,6 +29,7 @@ import plane_register as pr
 import scan_project as sp
 import openings as op_mod
 import baked as bk
+import display as dsp
 import reflections
 import manual_clean
 import project_store
@@ -59,6 +60,8 @@ class Scan:
         self.erase = []              # ручная чистка: области (4 плоскости) в канон. системе
         self.drop = np.zeros(0, np.int64)   # удалённые воксели DROP_VOXEL (канон. система)
         self.dyn = None              # оценка «движущийся объект» по точкам res['down'] (кеш)
+        self.display = None          # настройки отображения (display.py)
+        self.calc_filter = None      # обрезка для расчётов (display.calc_filter, ставит сеанс)
         self._down_cache = None
         self.color = PALETTE[0]
         self._res = None
@@ -108,14 +111,14 @@ class Scan:
                 self._quick_R = planes.up_rotation(label)
         pc = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pts @ self.R_up.T))
         P = np.asarray(pc.voxel_down_sample(voxel).points)
-        if self.erase or len(self.drop):
+        if self.erase or len(self.drop) or self.calc_filter:
             P = P[self.keep_mask(P)]
         return P
 
     @property
     def down(self):
         """Даунсемпл в канонической системе с учётом чистки отражений и ручной чистки."""
-        key = (self.clean, len(self.erase), len(self.drop))
+        key = (self.clean, len(self.erase), len(self.drop), dsp.signature(self.calc_filter))
         if self._down_cache is None or self._down_cache[0] != key:
             d = self.res['down']
             drop = self.ghost_mask() if self.clean else np.zeros(len(d), bool)
@@ -123,6 +126,8 @@ class Scan:
                 drop = drop | manual_clean.inside_regions(d, self.erase)
             if len(self.drop):
                 drop = drop | np.isin(voxel_keys(d), self.drop)
+            if self.calc_filter:
+                drop = drop | ~dsp.mask(d, self.calc_filter)
             self._down_cache = (key, d[~drop])
         return self._down_cache[1]
 
@@ -133,6 +138,8 @@ class Scan:
             keep &= ~manual_clean.inside_regions(P_canon, self.erase)
         if len(self.drop):
             keep &= ~np.isin(voxel_keys(P_canon), self.drop)
+        if self.calc_filter:
+            keep &= dsp.mask(P_canon, self.calc_filter)
         return keep
 
     def ghost_mask(self):
@@ -214,7 +221,7 @@ class Scan:
                 'clean': self.clean,
                 'erase': [np.asarray(r).tolist() for r in self.erase],
                 'drop': np.asarray(self.drop).tolist(),
-                'source': self.source}
+                'source': self.source, **({'display': self.display} if self.display else {})}
 
 
 # ── сеанс ──────────────────────────────────────────────────────────────────
@@ -246,6 +253,7 @@ class Session:
             sc.erase = [np.asarray(r, float) for r in e.get('erase', [])]
             sc.drop = np.asarray(e.get('drop', []), np.int64)
             sc.source = e.get('source')
+            sc.display = e.get('display')
             s.scans.append(sc)
         s.frame = proj.get('frame') or s.scans[0].id
         s.level = np.asarray(proj.get('level', np.eye(3).tolist()), float)
@@ -255,6 +263,7 @@ class Session:
         s.measures = proj.get('measures', [])
         s.section = proj.get('section')
         s.apply_visibility()
+        s.sync_filters()
         s.project_path = str(path)
         s._recolor()
         return s
@@ -516,6 +525,47 @@ class Session:
             return self.baked_unit(gid)
         return next((s for s in self.scans if s.id == sid), None)
 
+    # ── отображение (display.py) ─────────────────────────────────────────
+    def own_display(self, key):
+        """Свои настройки отображения скана или группы (без наследования)."""
+        g = self.tree.group(key)
+        if g is not None:
+            return g.display or {}
+        sc = self.by_id(key)
+        return (sc.display or {}) if sc is not None and not isinstance(sc, bk.BakedGroup) else {}
+
+    def effective_display(self, scan_or_key):
+        """Настройки скана поверх настроек его групп (от корня к скану)."""
+        key = scan_or_key if isinstance(scan_or_key, str) else scan_or_key.id
+        chain = [g.display for g in reversed(self.tree.ancestors(key))]
+        g = self.tree.group(key)
+        if g is not None:
+            chain.append(g.display)
+        else:
+            chain.append(self.own_display(key))
+        return dsp.merge(*chain)
+
+    def set_display(self, key, d):
+        """Задать свои настройки скана или группы (None — сбросить). → id затронутых сканов."""
+        d = dsp.clean(d)
+        g = self.tree.group(key)
+        if g is not None:
+            g.display = d
+            ids = self.tree.scans_in(key)
+        else:
+            sc = self.by_id(key)
+            if sc is None:
+                return []
+            sc.display = d
+            ids = [key]
+        self.sync_filters()
+        return ids
+
+    def sync_filters(self):
+        """Обрезка для расчётов у каждого скана — по действующим настройкам."""
+        for sc in self.scans:
+            sc.calc_filter = dsp.calc_filter(self.effective_display(sc.id))
+
     # ── запечённые группы (baked.py) ─────────────────────────────────────
     def baked_unit(self, gid):
         """BakedGroup запечённой группы gid (или None)."""
@@ -751,7 +801,8 @@ class Session:
         parts = [self.frame, np.round(self.level, 6).tobytes()]
         for sc in self.scans:
             parts += [sc.id, sc.clean, len(sc.erase), len(sc.drop),
-                      None if sc.pose is None else np.round(sc.pose, 6).tobytes()]
+                      None if sc.pose is None else np.round(sc.pose, 6).tobytes(),
+                      json.dumps(sc.display, sort_keys=True) if sc.display else None]
         for e in self.edges:
             parts += [e['A'], e['B'], e.get('user'), e.get('method')]
         parts += [None if self.zero is None else round(self.zero['z'], 6), len(self.measures)]
@@ -1444,7 +1495,7 @@ class Session:
                 pts, _ = reflections.clean_scan(s.path, s.up)
             else:
                 pts = planes.load_points(s.path)
-            if s.erase or len(s.drop):                         # ручная чистка (канон. система)
+            if s.erase or len(s.drop) or s.calc_filter:        # ручная чистка, обрезка (канон. система)
                 pts = pts[s.keep_mask(pts @ s.R_up.T)]
             pc = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pts))
             if voxel > 0:
