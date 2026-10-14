@@ -42,6 +42,9 @@ PALETTE = np.array([[31, 119, 180], [255, 127, 14], [44, 160, 44], [214, 39, 40]
 DISPLAY_VOXEL = 0.04
 DROP_VOXEL = 0.05          # удалённые точки (движущиеся объекты) — воксели этого размера
 MANUAL_INFO = 1e3          # «жёсткость» ручных рёбер в оптимизации графа
+MANUAL_GAIN = 10.0         # ручная связь весомее автоматических: информация по точкам × MANUAL_GAIN
+CONFLICT_T = 0.10          # м — связь противоречит принятой вручную позе, если расходится больше
+CONFLICT_DEG = 1.5         # (или на столько градусов); такие связи «Принять позу» отключает
 
 
 def homog(R):
@@ -240,6 +243,7 @@ class Session:
         self.measures = []           # замеры (measure.py), точки в общей системе
         self.section = None          # сечение (section.py), общая система
         self._units = {}             # запечённые группы: gid → BakedGroup (по полю baked в дереве)
+        self.last_conflicts = []     # связи, отключённые последним «Принять позу» (reject_conflicts)
         self.lock = threading.RLock()
 
     # ── загрузка / сохранение ─────────────────────────────────────────────
@@ -1230,7 +1234,7 @@ class Session:
                 A, B = self.by_id(e['A']), self.by_id(e['B'])
                 info = sp.information(e, _clean_res(A), _clean_res(B))
                 if e.get('method') == 'manual':
-                    info = info + MANUAL_INFO * np.eye(6)
+                    info = info * MANUAL_GAIN + MANUAL_INFO * np.eye(6)
                 infos.append(info * float(e.get('weight', 1.0)))
             poses = sp.optimize(names, edges, poses, infos, fu.id)
         # граф — в канон. системе опорного узла; опорный скан остаётся в единичной позе
@@ -1450,6 +1454,7 @@ class Session:
         T_canon = np.linalg.inv(TA) @ np.asarray(Tc)          # канон. moving -> канон. anchor
         self.edges = [e for e in self.edges if not (e.get('method') == 'manual' and
                                                      {e['A'], e['B']} == {anchor.id, moving.id})]
+        self.last_conflicts = self.reject_conflicts(moving, Tc)
         e = {'A': anchor.id, 'B': moving.id, 'T_canon': T_canon.tolist(), 'method': 'manual',
              'source': method, 'score': 1.0, 'violations': 0.0, 'margin': 1.0}
         if info:
@@ -1459,6 +1464,45 @@ class Session:
         self.edges.append(e)
         self.recompute_poses()
         return e
+
+    def manual_conflict(self, idx):
+        """Насколько связь idx расходится с ручной связью той же пары: (м, °) или None."""
+        e = self.edges[idx]
+        for m in self.edges:
+            if m is e or m.get('method') != 'manual' or {m['A'], m['B']} != {e['A'], e['B']} or 'T_canon' not in e:
+                continue
+            T = np.asarray(e['T_canon'])
+            Tm = np.asarray(m['T_canon']) if m['A'] == e['A'] else np.linalg.inv(np.asarray(m['T_canon']))
+            dt, da = pr.pose_delta(T, Tm)
+            if dt > CONFLICT_T or da > CONFLICT_DEG:
+                return float(dt), float(da)
+        return None
+
+    def reject_conflicts(self, moving, Tc):
+        """
+        Отключить (user='reject') активные связи узла moving, которые противоречат его позе
+        Tc больше CONFLICT_T / CONFLICT_DEG при текущих позах соседей: вручную поставленная
+        поза — решение пользователя, иначе граф сведёт её с ошибочными парами и скан уедет.
+        → [(ребро, сдвиг м, угол °)].
+        """
+        Tc = np.asarray(Tc)
+        out = []
+        for e in self.active_edges():
+            ue = self._unit_edges([e])
+            if not ue or moving.id not in (ue[0]['A'], ue[0]['B']):
+                continue
+            u = ue[0]
+            other = self.by_id(u['B'] if u['A'] == moving.id else u['A'])
+            if other is None or other.pose is None:
+                continue
+            T = np.asarray(u['T_canon'])                   # канон. B -> канон. A
+            implied = self.Tc(other) @ (T if u['B'] == moving.id else np.linalg.inv(T))
+            dt, da = pr.pose_delta(implied, Tc)
+            if dt > CONFLICT_T or da > CONFLICT_DEG:
+                e['user'] = 'reject'
+                e['rejected_by'] = 'ручная поза'
+                out.append((e, float(dt), float(da)))
+        return out
 
     # ── кандидаты ────────────────────────────────────────────────────────
     def candidates(self, moving, progress=None, top=8):

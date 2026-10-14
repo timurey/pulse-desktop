@@ -2706,6 +2706,14 @@ class MainWindow(QMainWindow):
             a, b = self.s.by_id(e['A']), self.s.by_id(e['B'])
             fixed, moving = (a, b) if a.id == self.s.frame or b.pose is None else (a, b)
             return self.start_manual(fixed.id, moving.id)
+        if name == 'accept' and e.get('method') != 'manual':
+            c = self.s.manual_conflict(i)
+            if c is not None and QMessageBox.question(
+                    self, 'Принять пару',
+                    f"Пара {short(e['A'])} – {short(e['B'])} расходится с вашей ручной связью этих сканов на "
+                    f"{c[0] * 100:.0f} см / {c[1]:.1f}°. Если принять её, граф сведёт обе связи и скан сместится.\n\n"
+                    f"Всё равно принять?", QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+                return
         self.s.set_edge_user(i, {'accept': 'accept', 'reject': 'reject', 'auto': None}[name])
         self.redraw_all()
         self.refresh_all()
@@ -2993,7 +3001,7 @@ class MainWindow(QMainWindow):
         def done(_):
             self.on_manual_cancel(ask=False)
             self.set_status(f'{short(moving.id)}: поза принята ({method}, связь с {short(fixed.id)}'
-                            f"{', вес ×' + str(int(weight)) if weight != 1 else ''})")
+                            f"{', вес ×' + str(int(weight)) if weight != 1 else ''})" + self._conflicts_note())
         self.run_bg('пересчёт графа…', lambda p: self.s.accept_pose(moving, T, anchor=fixed, method=method,
                                                                     weight=weight), done)
 
@@ -3268,8 +3276,17 @@ class MainWindow(QMainWindow):
         finally:
             QApplication.restoreOverrideCursor()
         self._manual_T0 = T.copy()
-        self.set_status(f'{short(moving.id)}: поза принята (ручное ребро к {short(fixed.id)})')
+        self.set_status(f'{short(moving.id)}: поза принята (ручное ребро к {short(fixed.id)})' + self._conflicts_note())
         return True
+
+    def _conflicts_note(self):
+        """Какие связи «Принять позу» отключило как противоречащие (Session.reject_conflicts)."""
+        c = self.s.last_conflicts
+        if not c:
+            return ''
+        items = ', '.join(f"{short(e['A'])}–{short(e['B'])} ({dt * 100:.0f} см / {da:.1f}°)" for e, dt, da in c[:4])
+        return (f'; отключены противоречащие связи: {items}{" …" if len(c) > 4 else ""} — вернуть можно во вкладке '
+                f'«Пары»')
 
     def on_manual_cancel(self, ask=True):
         """Выйти из ручной стыковки. → False, если пользователь решил остаться."""
