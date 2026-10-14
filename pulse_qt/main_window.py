@@ -482,7 +482,8 @@ class MainWindow(QMainWindow):
         pg = rb.add_tab('project', 'Проект')
         g = rb.add_group(pg, 'Файл')
         g.big('mdi6.file-plus-outline', 'Новый', self.on_new_project, 'Новый проект (Ctrl+N)')
-        g.big('mdi6.folder-outline', 'Открыть', self.on_open, 'Открыть проект (Ctrl+O)')
+        g.big('mdi6.folder-outline', 'Открыть', self.on_open,
+              'Открыть проект (Ctrl+O); стрелка — недавние проекты', menu=self._recent_menu())
         g.big('mdi6.content-save-outline', 'Сохранить', self.on_save, 'Сохранить (Ctrl+S)')
         g.small('mdi6.content-save-edit-outline', 'Сохранить как…', self.on_save_as)
         g.small('mdi6.package-variant-closed', 'Упаковать для передачи', tool('pack'),
@@ -1204,6 +1205,7 @@ class MainWindow(QMainWindow):
         for item in (
                 ('Новый проект', self.on_new_project, 'mdi6.file-plus-outline', 'Ctrl+N'),
                 ('Открыть проект…', self.on_open, 'mdi6.folder-outline', 'Ctrl+O'),
+                'recent',
                 ('Сохранить', self.on_save, 'mdi6.content-save-outline', 'Ctrl+S'),
                 ('Сохранить как…', self.on_save_as, 'mdi6.content-save-edit-outline', 'Ctrl+Shift+S'),
                 ('Упаковать для передачи…', self.on_pack, 'mdi6.package-variant-closed', None),
@@ -1219,6 +1221,9 @@ class MainWindow(QMainWindow):
                 ('О программе', self.show_about, 'mdi6.information-outline', None)):
             if item is None:
                 m.addSeparator()
+                continue
+            if item == 'recent':
+                self._recent_menu(m.addMenu(t.icon('mdi6.history'), 'Открыть недавние'))
                 continue
             text, cb, ic, key = item
             # клавиши — отдельными QShortcut (_shortcuts); здесь только подпись справа
@@ -1751,8 +1756,79 @@ class MainWindow(QMainWindow):
         self._reset_state()
         self.s = Session.from_project(path)
         self.settings.setValue('last_dir', str(Path(path).resolve().parent))
+        self.remember_recent(path)
         self.refresh_all()
         self.load_all()
+
+    # ── недавние проекты ─────────────────────────────────────────────────
+    RECENT_MAX = 10
+
+    def recent(self):
+        v = self.settings.value('recent', [])
+        if isinstance(v, str):                 # QSettings отдаёт один элемент строкой
+            v = [v]
+        return [str(x) for x in (v or []) if x]
+
+    def remember_recent(self, path):
+        if not path:
+            return
+        p = str(Path(path).resolve())
+        self.settings.setValue('recent', ([p] + [x for x in self.recent() if x != p])[:self.RECENT_MAX])
+
+    def forget_recent(self, path=None):
+        self.settings.setValue('recent', [] if path is None else [x for x in self.recent() if x != path])
+
+    def _recent_menu(self, m=None):
+        """Меню недавних проектов; пункты строятся при каждом показе (список меняется)."""
+        m = m or QMenu(self)
+        m.aboutToShow.connect(lambda m=m: self._fill_recent(m))
+        self._fill_recent(m)
+        return m
+
+    def _fill_recent(self, m):
+        t = W.THEME
+        m.clear()
+        items = self.recent()
+        cur = str(Path(self.s.project_path).resolve()) if self.s.project_path else None
+        home = str(Path.home())
+        for i, p in enumerate(items):
+            path = Path(p)
+            where = str(path.parent)
+            if where.startswith(home):
+                where = '~' + where[len(home):]
+            ok = path.exists()
+            text = f'{path.name}  —  {where}' + ('' if ok else '  (файл не найден)')
+            a = m.addAction(t.icon('mdi6.file-outline' if ok else 'mdi6.file-alert-outline', 'ink3' if not ok else 'ink2'),
+                            (f'&{i + 1}  ' if i < 9 else '    ') + text.replace('&', '&&'))
+            a.setToolTip(p)
+            if p == cur:
+                a.setCheckable(True)
+                a.setChecked(True)
+            a.triggered.connect(lambda _=False, p=p: self.open_recent(p))
+        if not items:
+            a = m.addAction('недавних проектов нет')
+            a.setEnabled(False)
+        else:
+            m.addSeparator()
+            m.addAction(t.icon('mdi6.broom'), 'Убрать отсутствующие',
+                        lambda: self.settings.setValue('recent', [x for x in self.recent() if Path(x).exists()]))
+            m.addAction(t.icon('mdi6.delete-sweep-outline'), 'Очистить список', lambda: self.forget_recent())
+
+    def open_recent(self, path):
+        if not Path(path).exists():
+            if QMessageBox.question(self, 'Открыть недавний', f'Файл не найден:\n{path}\n\nУбрать его из списка?',
+                                    QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes) == QMessageBox.Yes:
+                self.forget_recent(path)
+            return
+        if self.s.project_path and str(Path(self.s.project_path).resolve()) == path:
+            self.set_status('этот проект уже открыт')
+            return
+        if not self.confirm_discard('Открыть другой проект'):
+            return
+        try:
+            self.open_project(path)
+        except Exception as e:                  # повреждённый или чужой файл
+            QMessageBox.warning(self, 'Открыть недавний', f'Не удалось открыть проект:\n{path}\n\n{e}')
 
     def on_save(self):
         if not self.s.project_path:
@@ -1771,6 +1847,7 @@ class MainWindow(QMainWindow):
         if Path(p).suffix.lower() not in ('.pulse', '.json'):
             p += '.pulse'
         self.s.save(p)
+        self.remember_recent(p)
         self._saved_sig = self.s.state_signature()
         self._update_title()
         self.set_status(f'Сохранено: {p}')

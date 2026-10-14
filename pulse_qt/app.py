@@ -86,6 +86,8 @@ def main(argv=None):
     app, theme = make_app()
     from .main_window import MainWindow
     win = MainWindow(session_from_args(args), theme)
+    if win.s.project_path:
+        win.remember_recent(win.s.project_path)
     prefs = QSettings('Pulse', 'PulseScan')
     if prefs.value('point_px'):
         win.set_point_size(int(float(prefs.value('point_px'))))
