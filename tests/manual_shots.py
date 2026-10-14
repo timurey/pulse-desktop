@@ -38,7 +38,8 @@ def main():
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
     prefs = QSettings('Pulse', 'PulseScan')
-    keep = {k: prefs.value(k) for k in ('dark', 'parallel', 'point_px', 'ribbon_collapsed', 'geometry')}
+    tool_keys = [f'tool/{k}' for k in ('auto', 'cand', 'quality', 'dyn', 'surface', 'export', 'pack')]
+    keep = {k: prefs.value(k) for k in ('dark', 'parallel', 'point_px', 'ribbon_collapsed', 'geometry', *tool_keys)}
     prefs.setValue('dark', a.dark)
     prefs.setValue('parallel', False)
     prefs.setValue('ribbon_collapsed', False)
@@ -121,6 +122,9 @@ def main():
     # 5. стыковка: пары, циклы
     tab('reg')
     w.dock.tabs.setCurrentIndex(0)
+    w.open_tool('auto')
+    shot('05a_auto_panel')
+    w.close_tool()
     shot('05_pairs')
     w.dock.tabs.setCurrentIndex(1)
     shot('05b_loops')
@@ -154,13 +158,13 @@ def main():
     shot('07_pivot')
     w.on_manual_cancel(ask=False)
     # 8. качество совмещения
-    tab('control')
-    tp.switches['quality'].setChecked(True, emit=True)
+    w.open_tool('quality', run=True)
     wait(lambda: w.qual['res'] is not None and not w.qual['busy'], 60)
     w.dock.tabs.setCurrentIndex(4)
     w.view_top()
     shot('08_quality')
     tp.switches['quality'].setChecked(False, emit=True)
+    w.close_tool()
     # 9. сечения
     fac = [g for g in s.tree.root.children if getattr(g, 'name', '') == 'фасад']
     if fac:
@@ -178,6 +182,7 @@ def main():
     w.view_3d()
     shot('10_section_clip')
     w.section_toggle('clip')
+    w.close_tool()
     # 10. замеры
     ref = s.ref
     w.only_show({ref.id})
@@ -200,12 +205,13 @@ def main():
     w.set_measure_mode(None)
     shot('11_measures')
     w.on_control_action('measure_clear', None)
+    w.close_tool()
     w.restore_visibility()
     if fac:
         s.set_visible(fac[0].id, True)
         w.apply_visibility()
     # 11. чистка
-    tab('clean')
+    w.open_tool('dyn')
     w.clean.sw_dyn_all.setChecked(True)
     w.on_dyn_find()
     wait(lambda: not w.busy, 120)
@@ -214,9 +220,10 @@ def main():
     w.dyn_masks = {}
     w.view.remove_prefix('dyn:')
     w.clean.sw_dyn_all.setChecked(False)
+    w.close_tool()
     # 12. поверхность
-    tab('result')
     tp.select(s.frame)
+    w.open_tool('surface')
     w.on_surface_action('build', None)
     wait(lambda: not w.busy and s.meshes, 300)
     w.focus_node(s.frame)
@@ -227,15 +234,30 @@ def main():
     s.meshes.clear()
     w._draw_meshes()
     tp.rebuild()
-    # 13. экспорт и передача
-    d = dialogs.ExportDialog(w, [('все размещённые сканы', None)], str(Path.home() / 'Pulse' / 'объект_merged.e57'))
-    d.show()
-    shot('14_export', widget=d)
-    d.reject()
-    d = dialogs.PackDialog(w, 'объект', Path.home() / 'Desktop', len(s.scans), 237, [])
-    d.show()
-    shot('15_pack', widget=d)
-    d.reject()
+    w.close_tool()
+    # 13. экспорт и передача — панели инструментов
+    w.open_tool('export')
+    w.export_panel.path.setText(str(Path.home() / 'Pulse' / 'объект_merged.e57'))
+    shot('14_export', widget=w.right)
+    w.open_tool('pack')
+    shot('15_pack', widget=w.right)
+    w.close_tool()
+    # 14. запечённая группа и настройки отображения
+    room = next((g for g in s.tree.root.children if getattr(g, 'name', '') == 'Электрощитовая'), None)
+    if room is not None:
+        w.bake_group(room.id, True)
+        wait(lambda: not w.busy, 300)
+        tp.select(room.id)
+        w.on_tree_select(room.id)
+        w.inspector.sec_display.mode.set_value('height', emit=True)
+        w.only_show({room.id})
+        w.focus_node(room.id)
+        w.view.set_view_dir((-0.5, -0.7, 0.6))
+        pump(0.5)
+        shot('16_baked_display')
+        s.set_display(room.id, None)
+        w.bake_group(room.id, False)
+        w.restore_visibility()
     for k, val in keep.items():
         if val is None:
             prefs.remove(k)
