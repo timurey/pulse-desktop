@@ -16,7 +16,7 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (QFrame, QVBoxLayout, QProgressBar, QComboBox, QCheckBox, QSlider,
-                               QLineEdit, QFileDialog, QDoubleSpinBox)
+                               QLineEdit, QFileDialog, QDoubleSpinBox, QHBoxLayout, QLabel)
 
 from . import widgets as W
 from .inspector import _Panel
@@ -347,6 +347,246 @@ class ExportPanel(ToolPanel):
         i = self.frame.findData(d.get('frame'))
         if i >= 0:
             self.frame.setCurrentIndex(i)
+
+
+# ── элементы (fits.py) ──────────────────────────────────────────────────────
+def element_stats(el):
+    """Сводка элемента для списка: размер, σ, отклонение формы, точек."""
+    k = el['kind']
+    if k == 'plane':
+        size = f"площадь {el.get('area', 0):.1f} м²"
+    elif k == 'cylinder':
+        size = f"Ø {2 * el['params']['r']:.3f} м · длина {2 * el['params']['half']:.2f} м"
+    else:
+        size = f"Ø {2 * el['params']['r']:.3f} м"
+    form = (el['span'][1] - el['span'][0]) * 1000
+    return f"{size} · σ {el['sigma'] * 1000:.0f} мм · форма {form:.0f} мм · {el['n']} т."
+
+
+class _ElementRow(QFrame):
+    """Строка списка элементов: имя, сводка, переименовать / удалить."""
+
+    def __init__(self, el, scan_name, panel):
+        super().__init__()
+        self.setObjectName('PairRow')
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(8, 6, 4, 6)
+        lay.setSpacing(6)
+        info = QVBoxLayout()
+        info.setSpacing(1)
+        name = QLabel(el.get('name', el['id']))
+        name.setStyleSheet('font-size:12px; font-weight:600;')
+        info.addWidget(name)
+        a = QLabel(f'{scan_name} · {element_stats(el)}')
+        a.setStyleSheet('font-size:11px;')
+        a.setWordWrap(True)
+        info.addWidget(a)
+        lay.addLayout(info, 1)
+        lay.addWidget(W.tool(W.THEME.icon('mdi6.pencil-outline', 'ink3'), tip='Переименовать',
+                             icon_only=True, cb=lambda: panel.action.emit('rename', el['id'])))
+        lay.addWidget(W.tool(W.THEME.icon('mdi6.close', 'ink3'), tip='Удалить элемент',
+                             icon_only=True, cb=lambda: panel.action.emit('delete', el['id'])))
+
+
+class FitPanel(_Panel):
+    """Инструмент «Элемент»: подгонка плоскости / сферы / цилиндра / окружности
+    по щелчку по облаку, список подогнанных элементов."""
+
+    action = Signal(str, object)
+    KINDS = [('авто', 'auto'), ('плоскость', 'plane'), ('сфера', 'sphere'),
+             ('цилиндр', 'cylinder'), ('окружность', 'circle')]
+
+    def __init__(self):
+        super().__init__('Элемент', closable=True)
+        from .tools import DoneBar                          # определён в этом же файле
+        s = self.add(W.Section('Подгонка по щелчку'))
+        self.kind = QComboBox()
+        for text, v in self.KINDS:
+            self.kind.addItem(text, v)
+        self.kind.setToolTip('«авто» — плоская поверхность или изогнутая (сфера, '
+                             'затем цилиндр) по виду поверхности под щелчком')
+        self.kind.activated.connect(lambda _: self.action.emit('kind', self.kind.currentData()))
+        s.add(W.field('Тип', self.kind))
+        self.d_known = QCheckBox('известный диаметр — держать радиус')
+        self.d_known.toggled.connect(lambda v: self._d_changed())
+        s.add(self.d_known)
+        self.d_val = QDoubleSpinBox()
+        self.d_val.setRange(0.02, 100.0)
+        self.d_val.setDecimals(3)
+        self.d_val.setSingleStep(0.01)
+        self.d_val.setValue(0.100)
+        self.d_val.setSuffix(' м')
+        self.d_val.setKeyboardTracking(False)
+        self.d_val.setAlignment(Qt.AlignRight)
+        self.d_val.setEnabled(False)
+        self.d_val.valueChanged.connect(lambda _: self._d_changed())
+        s.add(W.hbox(W.label('Ø'), None, self.d_val))
+        self.hint = W.label('Щёлкните по поверхности облака — подгонится элемент; '
+                            'σ и отклонение формы покажут, насколько поверхность ему соответствует. '
+                            'Клик с перетаскиванием по-прежнему вращает вид.', 'Hint', wrap=True)
+        s.add(self.hint)
+        s1 = self.add(W.Section('Элементы'))
+        self.list = QVBoxLayout()
+        self.list.setSpacing(6)
+        s1.add(self.list)
+        self.empty = W.label('элементов нет', 'Hint', wrap=True)
+        s1.add(self.empty)
+        self.finish()
+        b = self.add_foot(DoneBar(), 'done')
+        b.done.connect(lambda: self.action.emit('done', None))
+        self.focus(None)
+
+    def _d_changed(self):
+        self.d_val.setEnabled(self.d_known.isChecked())
+        self.action.emit('diam', self.d_value())
+
+    def d_value(self):
+        """Известный диаметр (м) или None."""
+        return self.d_val.value() if self.d_known.isChecked() else None
+
+    def set_kind(self, v):
+        i = self.kind.findData(v)
+        if i >= 0:
+            self.kind.setCurrentIndex(i)
+
+    def set_elements(self, els, scan_names):
+        while self.list.count():
+            w = self.list.takeAt(0).widget()
+            if w is not None:
+                w.hide()
+                w.deleteLater()
+        for el in els:
+            self.list.addWidget(_ElementRow(el, scan_names.get(el.get('scan'), '?'), self))
+        self.empty.setVisible(not els)
+
+    def state(self):
+        return {'kind': self.kind.currentData(), 'd_known': self.d_known.isChecked(),
+                'd': self.d_val.value()}
+
+    def restore(self, d):
+        if d.get('kind'):
+            self.set_kind(d['kind'])
+        if 'd_known' in d:
+            self.d_known.setChecked(bool(d['d_known']))
+        if 'd' in d:
+            self.d_val.setValue(float(d['d']))
+
+
+# ── чертёж сечения (drawing.py) ────────────────────────────────────────────
+class DrawingPanel(ToolPanel):
+    """Чертёж по срезу или проекцией выбранных элементов; SVG / DXF / PNG."""
+
+    def __init__(self):
+        super().__init__('Чертёж сечения', 'Построить', 'mdi6.file-document-outline')
+        p = self.params_sec
+        self.source = W.Segmented([('по срезу', 'slice'), ('проекция элементов', 'proj')], 'slice')
+        self.source.changed.connect(lambda v: self.action.emit('source', v))
+        p.add(W.field('Источник', self.source))
+        # проекция: плоскость листа
+        self.paper_box = W.Section('Плоскость листа (проекция)')
+        self.paper = W.Segmented([('горизонт.', 'z'), ('по элементу', 'elem')], 'z')
+        self.paper.changed.connect(lambda v: self.action.emit('paper', v))
+        self.paper_box.add(W.field('Какая', self.paper))
+        self.paper_el = QComboBox()
+        self.paper_el.setToolTip('Плоскость листа встанет на выбранный элемент: '
+                                 'фасад, линия забора — развёртка вдоль неё')
+        self.paper_el.activated.connect(lambda _: self.action.emit('paper_el', None))
+        self.paper_box.add(W.field('Элемент', self.paper_el))
+        self.paper_note = W.label('', 'Hint', wrap=True)
+        self.paper_box.add(self.paper_note)
+        p.add(self.paper_box)
+        self.paper_box.setVisible(False)
+        # общий допуск
+        self.tol = _spin(3.0, 2.0, 20.0, 1.0, 0)
+        self.tol.setSuffix(' см')
+        self.tol.setToolTip('Ячейка сетки занятости (допуск чертежа); не мельче шага точек')
+        p.add(W.hbox(W.label('допуск'), None, self.tol))
+        self.with_openings = QCheckBox('отмечать проёмы, которые пересекает срез')
+        self.with_openings.setChecked(True)
+        p.add(self.with_openings)
+        self.with_grid = QCheckBox('сетка 1 м')
+        self.with_grid.setChecked(True)
+        p.add(self.with_grid)
+        self.hint = W.label('', 'Hint', wrap=True)
+        p.add(self.hint)
+        self.finish_params()
+        self.b_preview = W.button('Предпросмотр', lambda: self.action.emit('preview', None),
+                                  icon=W.THEME.icon('mdi6.eye-outline'))
+        self.b_svg = W.button('Сохранить SVG…', lambda: self.action.emit('svg', None),
+                              icon=W.THEME.icon('mdi6.content-save-outline'))
+        self.b_dxf = W.button('Сохранить DXF…', lambda: self.action.emit('dxf', None),
+                              icon=W.THEME.icon('mdi6.content-save-outline'))
+        self.b_png = W.button('Сохранить PNG…', lambda: self.action.emit('png', None),
+                              icon=W.THEME.icon('mdi6.content-save-outline'))
+        for b in (self.b_preview, self.b_svg, self.b_dxf, self.b_png):
+            b.setEnabled(False)
+            self.result_sec.add(b)
+        self.result_sec.setVisible(True)
+
+    def set_paper_elements(self, els):
+        cur = self.paper_el.currentData()
+        self.paper_el.blockSignals(True)
+        self.paper_el.clear()
+        for e in els:
+            self.paper_el.addItem(f"{e.get('name', e['id'])}", e['id'])
+        i = self.paper_el.findData(cur)
+        self.paper_el.setCurrentIndex(max(0, i))
+        self.paper_el.blockSignals(False)
+
+    def paper_element_id(self):
+        return self.paper_el.currentData() if self.paper.value() == 'elem' else None
+
+    def values(self):
+        return {'source': self.source.value(), 'paper': self.paper.value(),
+                'paper_el': self.paper_element_id(),
+                'tol': self.tol.value() / 100.0, 'openings': self.with_openings.isChecked(),
+                'grid': self.with_grid.isChecked()}
+
+    def set_source(self, src):
+        self.paper_box.setVisible(src == 'proj')
+        self.hint.setText(
+            'Проекция: точки видимых элементов переносятся на плоскость листа ортогонально '
+            '(не срезом) — участок с уклоном одной плоскостью сечения не ловится. Плоскости, '
+            'параллельные листу (пол на плане), пропускаются: проектируются пятном.'
+            if src == 'proj' else
+            'Строится по режиму «Срез» (вкладка «Контроль»): горизонтальный — план этажа, '
+            'вертикальный — разрез, по плоскости стены — развёртка фасада. Осевые линии, '
+            'линии и дуги в истинном масштабе 1:1.')
+
+    def set_sheet(self, sheet):
+        """Результат построения: сводка и доступные кнопки."""
+        if sheet is None:
+            self.set_result('точек нет: для среза — подвинуите плоскость или увеличьте толщину; '
+                            'для проекции — включите глаз у элементов в дереве')
+            for b in (self.b_preview, self.b_svg, self.b_dxf, self.b_png):
+                b.setEnabled(False)
+            return
+        n_ch, L, n_op = sheet['stats']
+        extra = ''
+        if sheet.get('skipped'):
+            extra = f' · пропущены ({len(sheet["skipped"])}): {", ".join(sheet["skipped"][:3])}{"…" if len(sheet["skipped"]) > 3 else ""}'
+        self.set_result(f'контуров {n_ch} · длина {L:.1f} м · проёмов {n_op} · '
+                        f'допуск {sheet["cell"] * 100:.0f} см · {sheet["n_points"]} т.{extra}')
+        for b in (self.b_preview, self.b_svg, self.b_dxf, self.b_png):
+            b.setEnabled(True)
+
+    def state(self):
+        return {'source': self.source.value(), 'paper': self.paper.value(),
+                'tol': self.tol.value(), 'openings': self.with_openings.isChecked(),
+                'grid': self.with_grid.isChecked()}
+
+    def restore(self, d):
+        if d.get('source'):
+            self.source.set_value(d['source'])
+            self.paper_box.setVisible(d['source'] == 'proj')
+        if d.get('paper'):
+            self.paper.set_value(d['paper'])
+        if 'tol' in d:
+            self.tol.setValue(float(d['tol']))
+        if 'openings' in d:
+            self.with_openings.setChecked(bool(d['openings']))
+        if 'grid' in d:
+            self.with_grid.setChecked(bool(d['grid']))
 
 
 # ── упаковка ───────────────────────────────────────────────────────────────

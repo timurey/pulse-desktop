@@ -542,3 +542,19 @@ class AskDialog(_Modal):
 
     def values(self):
         return [e.text() if k == 'text' else e.currentText() for k, e in self.ws]
+
+
+class SheetPreview(_Modal):
+    """Предпросмотр чертежа сечения: SVG в QSvgWidget, растянут по окну."""
+
+    def __init__(self, parent, svg, title='Чертёж сечения'):
+        super().__init__(parent, title, 'mdi6.file-document-outline')
+        try:
+            from PySide6.QtSvgWidgets import QSvgWidget
+        except ImportError:                               # старые версии PySide6
+            from PySide6.QtSvg import QSvgWidget
+        self.svg = QSvgWidget()
+        self.svg.load(svg.encode('utf-8'))
+        self.body.addWidget(self.svg, 1)
+        self.b_ok.setText('Закрыть')
+        self.resize(900, 720)

@@ -44,8 +44,8 @@ from .surface_panel import SurfacePanel
 from .ribbon import Ribbon
 from .control_panel import ControlPanel
 from .dock import Dock
-from .dialogs import ScannerImportDialog, BagImportDialog, AskDialog
-from .tools import AutoPanel, CandPanel, QualityPanel, ExportPanel, PackPanel
+from .dialogs import ScannerImportDialog, BagImportDialog, AskDialog, SheetPreview
+from .tools import AutoPanel, CandPanel, QualityPanel, ExportPanel, PackPanel, FitPanel, DrawingPanel
 
 KIND_HUE = {'floor': (0.30, 0.75, 0.40), 'ceiling': (0.35, 0.55, 1.0), 'wall': (1.0, 0.62, 0.20),
             'other': (0.6, 0.6, 0.6)}
@@ -334,8 +334,10 @@ class MainWindow(QMainWindow):
         self.ghost_shown = set()
         self.clean_scan = None
         self.dyn_masks = {}                      # найденные движущиеся объекты: id скана → маска res['down']
-        self.measure_mode = None                 # замер: dist | height | plane | poly | zero
+        self.measure_mode = None                 # замер: dist | height | plane | poly | zero | fit
         self._mpts, self._mplane, self._mclick = [], None, None
+        self.fit_kind = 'auto'                   # тип подгонки элемента (fits.py)
+        self._el_labels = []                     # подписи элементов (рисуются с замерами)
         self.zero_show = True
         self.z0 = None
         self.points_hidden = False               # «Поверхность»: показывать только сетки
@@ -428,17 +430,23 @@ class MainWindow(QMainWindow):
         self.control = ControlPanel()
         self.control.action.connect(self.on_control_action)
         self.control.closed.connect(self.close_tool)
+        self.fit_panel = FitPanel()
+        self.fit_panel.action.connect(self.on_fit_action)
+        self.fit_panel.closed.connect(self.close_tool)
         self.auto_panel = AutoPanel()
         self.cand_panel = CandPanel()
         self.quality_panel = QualityPanel()
         self.export_panel = ExportPanel()
         self.pack_panel = PackPanel()
+        self.drawing_panel = DrawingPanel()
         for key, w in (('auto', self.auto_panel), ('cand', self.cand_panel), ('quality', self.quality_panel),
-                       ('export', self.export_panel), ('pack', self.pack_panel)):
+                       ('export', self.export_panel), ('pack', self.pack_panel),
+                       ('drawing', self.drawing_panel)):
             w.action.connect(lambda name, arg, key=key: self.on_tool_action(key, name, arg))
             w.closed.connect(self.close_tool)
-        for w in (self.inspector, self.manual, self.clean, self.surface_panel, self.control, self.auto_panel,
-                  self.cand_panel, self.quality_panel, self.export_panel, self.pack_panel):
+        for w in (self.inspector, self.manual, self.clean, self.surface_panel, self.control, self.fit_panel,
+                  self.auto_panel, self.cand_panel, self.quality_panel, self.export_panel, self.drawing_panel,
+                  self.pack_panel):
             self.right.addWidget(w)
         rw = QFrame()
         rw.setObjectName('PanelRight')
@@ -556,6 +564,9 @@ class MainWindow(QMainWindow):
         g.small('mdi6.sync', 'Циклы графа', lambda: self.dock.tabs.setCurrentIndex(1))
         g.small('mdi6.format-list-bulleted', 'Список мест', lambda: self.dock.tabs.setCurrentIndex(4))
         g = rb.add_group(pg, 'Объекты')
+        self.b_fit = g.big('mdi6.shape-outline', 'Элемент', tool('fit'),
+                           'Подгонка плоскости / сферы / цилиндра / окружности по щелчку по облаку '
+                           '(размер, σ, отклонение формы)', checkable=True)
         rb_['planes'] = g.small('mdi6.layers-outline', 'Поверхности', lambda: self._toggle_layer('planes'),
                                 checkable=True)
         rb_['openings'] = g.small('mdi6.window-closed-variant', 'Проёмы', lambda: self._toggle_layer('openings'),
@@ -615,6 +626,8 @@ class MainWindow(QMainWindow):
                              'Экспериментально: сетка (полигоны) по сканам; параметры и запуск — в правой панели' + SH)
         g.small('mdi6.export', 'Экспорт сетки', self._export_last_mesh)
         g = rb.add_group(pg, 'Документы')
+        g.big('mdi6.file-document-outline', 'Чертёж\nсечения', tool('drawing'),
+              'Чертёж по срезу: план / разрез / развёртка, осевые линии, проёмы; SVG, DXF, PNG' + SH)
         g.big('mdi6.camera-outline', 'Скриншот', self.save_screenshot, 'Скриншот окна и 3D-вида (F12)')
         rb.finish()
         self._rb_toggles = rb_
@@ -643,12 +656,14 @@ class MainWindow(QMainWindow):
              'section': ('control', 'control', 'control', 'Сечение'),
              'zero': ('control', 'control', 'control', 'Нулевой уровень'),
              'measure': ('control', 'control', 'control', 'Замеры'),
+             'fit': ('control', 'fit', 'fit_panel', None),
              'dyn': ('clean', 'clean', 'clean', 'Движущиеся объекты'),
              'frame': ('clean', 'clean', 'clean', 'Рамка'),
              'surface': ('result', 'surface', 'surface_panel', None),
              'export': ('result', 'tool', 'export_panel', None),
+             'drawing': ('result', 'tool', 'drawing_panel', None),
              'pack': ('project', 'tool', 'pack_panel', None)}
-    RUNNABLE = ('auto', 'cand', 'quality', 'dyn', 'surface', 'export', 'pack')
+    RUNNABLE = ('auto', 'cand', 'quality', 'dyn', 'surface', 'export', 'drawing', 'pack')
 
     def _tb(self, key, **preset):
         """Обработчик кнопки ленты: открыть панель инструмента; Shift — выполнить сразу."""
@@ -687,13 +702,17 @@ class MainWindow(QMainWindow):
                 panel.scope.set_value('group')
         if key == 'frame' and not self.select_mode:
             self.toggle_select(keep=True)
+        # «Элемент»: панель — это ещё не режим щелчка; кнопка (повторно) включает его,
+        # Esc его снимает, оставляя панель открытой
+        if key == 'fit' and not self.measure_mode:
+            self.set_measure_mode('fit')
         self.refresh_tool()
         if run and key in self.RUNNABLE:
             self.run_tool(key)
         self._sync_ribbon()
 
     def _leave_tool(self, key):
-        if key == 'measure' or (key in ('zero', 'section') and self.measure_mode in ('zero', 'secplane')):
+        if key in ('measure', 'fit') or (key in ('zero', 'section') and self.measure_mode in ('zero', 'secplane')):
             if self.measure_mode:
                 self.set_measure_mode(None, keep=True)
         if key == 'frame' and self.select_mode:
@@ -720,7 +739,7 @@ class MainWindow(QMainWindow):
         {'auto': self.on_auto_tool, 'cand': lambda: self.on_cand_search(self.cand_panel.scan_id()),
          'quality': self.quality_show, 'dyn': self.on_dyn_find,
          'surface': lambda: self.on_surface_action('build', None),
-         'export': self.do_export, 'pack': self.do_pack}[key]()
+         'export': self.do_export, 'drawing': self.on_drawing_build, 'pack': self.do_pack}[key]()
 
     def on_tool_action(self, key, name, arg):
         if name == 'run':
@@ -738,12 +757,112 @@ class MainWindow(QMainWindow):
                 from PySide6.QtCore import QUrl
                 from PySide6.QtGui import QDesktopServices
                 QDesktopServices.openUrl(QUrl.fromLocalFile(str(Path(r['path']).parent)))
+        elif key == 'drawing' and name == 'source':
+            self.drawing_panel.set_source(arg)
+            self.refresh_tool()
+        elif key == 'drawing' and name in ('paper', 'paper_el'):
+            self.refresh_tool()
+        elif key == 'drawing' and name in ('preview', 'svg', 'dxf', 'png'):
+            self.on_drawing_save(name)
+
+    # ── чертёж сечения (drawing.py) ──────────────────────────────────────
+    def _drawing_sheet(self):
+        """Текущий лист чертежа (перестроить, если состояние менялось)."""
+        import drawing
+        v = self.drawing_panel.values()
+        key = self._drawing_key()
+        if getattr(self, '_sheet_key', None) != key or getattr(self, '_sheet', None) is None:
+            if v['source'] == 'proj':
+                els = [e for e in self.s.elements if self.s.element_visible(e)]
+                paper_el = self.s.element_by_id(v['paper_el']) if v['paper_el'] else None
+                if v['paper'] == 'elem' and (paper_el is None or paper_el['kind'] != 'plane'):
+                    self.set_status('плоскость листа «по элементу»: выберите плоскость в списке')
+                    return None
+                self._sheet = drawing.build_projection(self.s, els, paper=v['paper'],
+                                                       paper_el=paper_el, tol=v['tol'])
+            else:
+                st = self.s.section
+                if st is None or st.get('mode') != 'slice':
+                    self.set_status('чертёж по срезу: включите «Срез» на вкладке «Контроль», '
+                                    'или переключитесь на «проекция элементов»')
+                    return None
+                self._sheet = drawing.build(self.s, st, tol=v['tol'],
+                                            with_openings=v['openings'])
+            self._sheet_key = key
+        return self._sheet
+
+    def _drawing_key(self):
+        v = self.drawing_panel.values()
+        els = tuple((e['id'], e.get('visible', True)) for e in self.s.elements)
+        return ('proj' if v['source'] == 'proj' else 'slice', v['paper'], v['paper_el'],
+                round(v['tol'], 3), els,
+                json.dumps(self.s.section, sort_keys=True) if v['source'] == 'slice' else None,
+                tuple(sc.id for sc in self.s.placed()),
+                tuple((sc.id, sc.clean, len(sc.erase), len(sc.drop)) for sc in self.s.placed()))
+
+    def on_drawing_build(self):
+        self._save_tool('drawing')
+        sheet = self._drawing_sheet()
+        self.drawing_panel.set_sheet(sheet)
+        if sheet is not None:
+            n_ch, L, n_op = sheet['stats']
+            self.set_status(f'чертёж: контуров {n_ch}, длина {L:.1f} м, проёмов {n_op}')
+
+    def on_drawing_save(self, what):
+        import drawing as dr
+        sheet = self._drawing_sheet()
+        if sheet is None:
+            self.drawing_panel.set_sheet(None)
+            return
+        if what == 'preview':
+            d = SheetPreview(self, dr.svg_text(sheet, project=short(self.s.frame)),
+                             title=f'Чертёж сечения — {short(self.s.frame)}')
+            d.exec()
+            return
+        ext = {'svg': 'SVG (*.svg)', 'dxf': 'DXF (*.dxf)', 'png': 'PNG (*.png)'}[what]
+        st = self.s.section
+        horiz = st is not None and abs(section.normal(st)[2]) > 0.9
+        kind = 'план' if self.drawing_panel.source.value() == 'proj' or horiz else 'разрез'
+        default = f'{short(self.s.frame)}_{kind}.{what}'
+        p = QFileDialog.getSaveFileName(self, 'Сохранить чертёж', default, ext)[0]
+        if not p:
+            return
+        project = short(self.s.frame)
+        try:
+            if what == 'svg':
+                dr.write_svg(p, sheet, project)
+            elif what == 'dxf':
+                dr.write_dxf(p, sheet, project)
+            else:
+                dr.write_png(p, sheet, project)
+        except Exception as e:                                # noqa: BLE001
+            self.set_status(f'не сохранилось: {e}')
+            return
+        self.set_status(f'чертёж сохранён: {p}')
 
     def refresh_tool(self):
         """Область, оценка и списки открытой панели по текущему проекту и выделению."""
         key = self.tool
         if key == 'auto':
             self._auto_estimate()
+        elif key == 'fit':
+            self.refresh_fit_panel()
+        elif key == 'drawing':
+            v = self.drawing_panel.values()
+            if v['source'] == 'proj':
+                n_vis = sum(1 for e in self.s.elements if self.s.element_visible(e))
+                paper = 'горизонтальная' if v['paper'] == 'z' else 'по элементу'
+                self.drawing_panel.set_estimate(
+                    f'элементов на чертёж: {n_vis} (глаз в ветви «Элементы») · '
+                    f'плоскость листа: {paper}'
+                    + ('' if v['paper'] == 'z' or v['paper_el'] else ' — выберите элемент'))
+            else:
+                st = self.s.section
+                ok = st is not None and st.get('mode') == 'slice'
+                self.drawing_panel.set_estimate(
+                    'срез включён — можно строить' if ok else
+                    'включите «Срез» на вкладке «Контроль» (горизонтальный — план, '
+                    'вертикальный — разрез), или переключитесь на «проекция элементов»')
         elif key == 'cand':
             un = [x.id for x in self.s.scans if x.pose is None]
             cur = self.tree_sel if self.s.by_id(self.tree_sel or '') is not None else (un[0] if un else None)
@@ -857,6 +976,7 @@ class MainWindow(QMainWindow):
             b.setChecked(self.tree_panel.layer(k))
         for k, b in self._rb_measure.items():
             b.setChecked(self.measure_mode == k)
+        self.b_fit.setChecked(self.tool == 'fit' or self.measure_mode == 'fit')
         self.b_zero.setChecked(self.zero_show)
         st = self.s.section or {}
         self.b_slice.setChecked(st.get('mode') == 'slice')
@@ -900,12 +1020,14 @@ class MainWindow(QMainWindow):
                      'plane': 'До плоскости: щёлкните по стене или полу, затем по точке',
                      'poly': 'Ломаная: щёлкайте точки; по первой — замкнуть, двойной щелчок / Enter — закончить',
                      'zero': 'Нулевой уровень: щёлкните точку облака — её высота станет ±0.000',
-                     'secplane': 'Сечение: щёлкните по стене или полу — плоскость встанет параллельно ей'}
+                     'secplane': 'Сечение: щёлкните по стене или полу — плоскость встанет параллельно ей',
+                     'fit': 'Элемент: щёлкните по поверхности облака — подгонится плоскость, сфера, '
+                            'цилиндр или окружность'}
 
     def set_measure_mode(self, mode, keep=False):
         if mode is not None and mode == self.measure_mode:
             mode = None
-        want = {'zero': 'zero', 'secplane': 'section'}.get(mode, 'measure')
+        want = {'zero': 'zero', 'secplane': 'section', 'fit': 'fit'}.get(mode, 'measure')
         if mode is not None and self.tool != want:
             self.open_tool(want)
         if mode in self.control.m_type.values:
@@ -1080,6 +1202,8 @@ class MainWindow(QMainWindow):
             return None
         name, p = hit
         p = np.asarray(p, float)
+        if self.measure_mode == 'fit':
+            return self.fit_click_at(name, p)
         return self.measure_point(p, name)
 
     def measure_point(self, p, cloud=None):
@@ -1187,7 +1311,96 @@ class MainWindow(QMainWindow):
         if self.zero_show and self.s.scans and self.tree_panel.layer('grid'):
             lo, hi = self._visible_bbox()
             labels.append(([lo[0] - 1.5, lo[1] - 1.5, z0], '±0.000'))
-        self.vp.set_labels(labels)
+        self.vp.set_labels(labels + getattr(self, '_el_labels', []))
+
+    # ── элементы (fits.py) ───────────────────────────────────────────────
+    EL_COLORS = {'plane': (0.40, 0.76, 0.98), 'sphere': (0.56, 0.86, 0.54),
+                 'cylinder': (0.98, 0.68, 0.32), 'circle': (0.83, 0.63, 0.99)}
+
+    def on_fit_action(self, name, arg):
+        if name == 'kind':
+            self.fit_kind = arg
+        elif name == 'delete':
+            if self.s.remove_element(arg):
+                self.draw_elements()
+                self.refresh_fit_panel()
+        elif name == 'rename':
+            el = next((e for e in self.s.elements if e.get('id') == arg), None)
+            if el is not None:
+                d = AskDialog(self, 'Переименовать элемент', [('Имя', 'text', el.get('name', ''), None)],
+                              'mdi6.pencil-outline', 'Переименовать')
+                if d.exec() and d.values()[0].strip():
+                    self.s.rename_element(arg, d.values()[0].strip())
+                    self.refresh_fit_panel()
+                    self.draw_elements()
+        elif name == 'done':
+            self.close_tool()
+
+    def fit_click_at(self, cloud, p_world):
+        """Щелчок в режиме «Элемент»: подгонка в фоне, результат — в список."""
+        sc = self._scan_of(cloud)
+        if sc is None or not sc.analyzed:
+            self.set_status('скан ещё анализируется — элемент можно будет подогнать, когда анализ закончится')
+            return None
+        T = self.s.Tc(sc)
+        p_canon = pr.transform(np.asarray(p_world, float)[None], np.linalg.inv(T))[0]
+        kind, d = self.fit_kind, self.fit_panel.d_value()
+        self.set_status('подгоняю элемент…', log=False)
+        bg.run(lambda: self.s.add_element(sc, p_canon, kind=kind, d_fixed=d),
+               done=self._fit_done, error=self._bg_error)
+        return p_world
+
+    def _fit_done(self, el):
+        from .tools import element_stats
+        if el is None:
+            self.set_status('не подогналось — попробуйте другой тип или точку ближе к середине поверхности')
+            return
+        self.draw_elements()
+        self.refresh_fit_panel()
+        self.set_status(f"{el.get('name', el['id'])}: {element_stats(el)}")
+
+    def _bg_error(self, e):
+        self.set_status(f'ошибка: {e}')
+
+    def _scan_names(self):
+        return {sc.id: short(sc.id) for sc in self.s.scans}
+
+    def refresh_fit_panel(self):
+        self.fit_panel.set_elements(self.s.elements, self._scan_names())
+        if getattr(self, 'drawing_panel', None) is not None:
+            self.drawing_panel.set_paper_elements(
+                [e for e in self.s.elements if e['kind'] == 'plane' and self.s.element_visible(e)])
+        if hasattr(self, 'tree_panel') and getattr(self.tree_panel, 'session', None) is self.s:
+            self.tree_panel.rebuild()
+
+    def draw_elements(self):
+        """Каркасы элементов (линии), точки-инлайнеры плоскостей и подписи."""
+        import fits as fits_mod
+        self.view.remove_prefix('el:')
+        self._el_labels = []
+        on = self.tree_panel.layer('elements') if self.s.scans else False
+        for el in self.s.elements:
+            if not self.s.element_visible(el):
+                continue
+            sc = self.s.by_id(el.get('scan'))
+            T = self.pose_of(sc) if sc is not None else None
+            if not on or T is None or not sc.visible or not sc.analyzed:
+                continue
+            pts, segs = fits_mod.element_wire(el)
+            col = self.EL_COLORS.get(el['kind'], (1.0, 1.0, 1.0))
+            self.view.set_lines(f"el:{el['id']}", pts, segs, None, T, 2.5, col, on_top=True)
+            if el['kind'] == 'plane':
+                idx = self.s.element_inliers(sc, el)
+                if len(idx):
+                    self.view.set_cloud(f"el:pts:{el['id']}", sc.down[idx], col, T, size=3, on_top=True)
+            c_world = T[:3, :3] @ np.asarray(el['center'], float) + T[:3, 3]
+            txt = el.get('name', el['id'])
+            if el['kind'] == 'plane':
+                txt += f" · {el.get('area', 0):.1f} м²"
+            elif 'r' in el['params']:
+                txt += f" · Ø {2 * el['params']['r']:.3f} м"
+            self._el_labels.append((c_world, txt))
+        self._draw_measures()
 
     def _set_plan_step(self, v):
         self.plan_step = v
@@ -1548,6 +1761,7 @@ class MainWindow(QMainWindow):
             self._draw_ghosts(self.s.by_id(sid))
         self._draw_selection()
         self.draw_features()
+        self.draw_elements()
         self.update_grid()
         self.refresh_stats()
         self.quality_refresh()
@@ -1560,6 +1774,7 @@ class MainWindow(QMainWindow):
         for sc in self.s.scans:
             self.view.set_visible(f'scan:{sc.id}', sc.visible and not self.points_hidden)
         self.draw_features()
+        self.draw_elements()
         for sid in list(self.ghost_shown):
             self._draw_ghosts(self.s.by_id(sid))
         self.quality_refresh()
@@ -1672,7 +1887,8 @@ class MainWindow(QMainWindow):
                     i / len(todo), f'анализ сканов в фоне: {i + 1}/{len(todo)} ({short(sc.id)})…'))
                 sc.analyze()
                 sc._display = sess.display_points(sc)
-                bg.post(lambda sc=sc: (self._show_scan(sc), self.draw_features(), self.refresh_stats()))
+                bg.post(lambda sc=sc: (self._show_scan(sc), self.draw_features(), self.draw_elements(),
+                                       self.refresh_stats()))
             return sess.flush_cache()
 
         def done(n):
@@ -2096,6 +2312,8 @@ class MainWindow(QMainWindow):
     def on_tree_visible(self, key, vis):
         if key.startswith('mesh:'):
             return self._mesh_tree_visible(key, vis)
+        if key.startswith('elem:'):
+            return self._element_tree_visible(key, vis)
         self._vis_backup = None
         self.s.set_visible(key, vis)
         if vis and self.points_hidden:                   # включили скан — показать точки
@@ -2103,6 +2321,19 @@ class MainWindow(QMainWindow):
             self.set_status('точки сканов снова показаны', log=False)
         self.apply_visibility()
         self.tree_panel.rebuild()
+
+    def _element_tree_visible(self, key, vis):
+        """Глаз в ветви «Элементы»: вся ветвь (слой «Элементы») или один элемент."""
+        tp = self.tree_panel
+        if key == tp.ELEMENTS:
+            tp.switches['elements'].setChecked(vis)
+            return
+        el_id = key[5:]
+        self.s.set_element_visible(el_id, vis)
+        self.draw_elements()
+        self.refresh_fit_panel()
+        if vis and not tp.layer('elements'):
+            tp.switches['elements'].setChecked(True, emit=True)
 
     def _mesh_tree_visible(self, key, vis):
         """Глаз в ветви «Поверхности»: точки сканов, все сетки, одна сетка."""
@@ -2279,6 +2510,19 @@ class MainWindow(QMainWindow):
             self.group_selected()
         elif name in ('points_on', 'points_off'):
             self.set_points_visible(name == 'points_on')
+        elif name == 'el_toggle':
+            el = self.s.element_by_id(key[5:])
+            if el is not None:
+                self._element_tree_visible(key, not self.s.element_visible(el))
+        elif name == 'el_rename':
+            self.on_fit_action('rename', key[5:])
+        elif name == 'el_delete':
+            self.on_fit_action('delete', key[5:])
+        elif name in ('el_show_all', 'el_hide_all'):
+            for e in self.s.elements:
+                e['visible'] = name == 'el_show_all'
+            self.draw_elements()
+            self.refresh_fit_panel()
         elif name == 'mesh_toggle':
             m = self.s.meshes.get(key[5:])
             if m is not None:
@@ -2628,7 +2872,7 @@ class MainWindow(QMainWindow):
             self.tool = None
         panel = self.tool_panel() if self.tool else {
             'inspect': self.inspector, 'manual': self.manual, 'clean': self.clean, 'surface': self.surface_panel,
-            'control': self.control, 'tool': self.inspector}[mode]
+            'control': self.control, 'fit': self.fit_panel, 'tool': self.inspector}[mode]
         if panel in (self.clean, self.control):
             panel.focus(self.tool, self.TOOLS[self.tool][3] if self.tool else None)
         self.right.setCurrentWidget(panel)
@@ -4071,6 +4315,8 @@ class MainWindow(QMainWindow):
             self.view.remove_prefix('ghost:')
             for sid in self.ghost_shown:
                 self._draw_ghosts(self.s.by_id(sid))
+        elif key == 'elements':
+            self.draw_elements()
         else:
             self.draw_features()
             if on and any(not s.analyzed for s in self.s.scans if s.visible):
@@ -4165,6 +4411,7 @@ class MainWindow(QMainWindow):
                 sc._display = self.s.display_points(sc)
             self._show_scan(sc)
             self.draw_features()
+            self.draw_elements()
         elif name == 'ghosts' and sc is not None and sc.analyzed:
             if sc.id in self.ghost_shown:
                 self.ghost_shown.discard(sc.id)

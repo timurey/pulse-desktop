@@ -111,6 +111,7 @@ class TreePanel(QFrame):
 
     LAYERS = [('planes', 'Поверхности', 'mdi6.layers-outline', False),
               ('openings', 'Проёмы', 'mdi6.window-closed-variant', False),
+              ('elements', 'Элементы', 'mdi6.shape-outline', False),
               ('ghosts', 'Отражения', 'mdi6.blur', False),
               ('grid', 'Сетка 1 м', 'mdi6.grid', True),
               ('points', 'Точки сканов', 'mdi6.dots-grid', True),
@@ -199,9 +200,10 @@ class TreePanel(QFrame):
         return it.data(0, ROLE) if it is not None and it.isSelected() else None
 
     def selected_keys(self):
-        """Выделенные узлы дерева проекта (без строк сеток) в порядке дерева."""
+        """Выделенные узлы дерева проекта (без строк сеток и элементов) в порядке дерева."""
         sel = {it.data(0, ROLE) for it in self.tree.selectedItems()}
-        return [k for k in self._items if k in sel and not k.startswith('mesh:')]
+        return [k for k in self._items if k in sel
+                and not k.startswith('mesh:') and not k.startswith('elem:')]
 
     def select_keys(self, keys):
         self.tree.clearSelection()
@@ -283,6 +285,7 @@ class TreePanel(QFrame):
         for ch in t.root.children:
             add(root, ch)
         self._add_meshes(root, expanded, first)
+        self._add_elements(root, expanded, first)
         if cur in self._items:
             tree.setCurrentItem(self._items[cur])
         for k in sel:
@@ -333,6 +336,46 @@ class TreePanel(QFrame):
             self.tree.setItemWidget(it, 0, r)
         g.setExpanded(True)
 
+    ELEMENTS = 'elem:*'                                 # ключ ветви элементов
+    KIND_RU = {'plane': 'плоскость', 'sphere': 'сфера', 'cylinder': 'цилиндр',
+               'circle': 'окружность'}
+
+    def _add_elements(self, root, expanded, first):
+        """Ветвь «Элементы»: подогнанные плоскости / сферы / цилиндры; глаз —
+        видимость элемента (и его попадание в чертёж проекцией)."""
+        els = getattr(self.session, 'elements', []) or []
+        if not els:
+            return
+        fixed = (Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+        g = QTreeWidgetItem(root)
+        g.setData(0, ROLE, self.ELEMENTS)
+        g.setData(0, ROLE + 1, False)
+        g.setFlags(fixed)
+        g.setSizeHint(0, QSize(10, 30))
+        self._items[self.ELEMENTS] = g
+        any_vis = self.layer('elements') and any(
+            self.session.element_visible(e) for e in els)
+        row = _Row(self, self.ELEMENTS, 'Элементы', any_vis, group=True, count=len(els))
+        row.setToolTip('Подогнанные по щелчку элементы (Контроль → Элемент). Глаз — видимость; '
+                       'видимые плоскости попадают в чертёж проекцией')
+        self.tree.setItemWidget(g, 0, row)
+        for e in els:
+            key = 'elem:' + e['id']
+            it = QTreeWidgetItem(g)
+            it.setData(0, ROLE, key)
+            it.setFlags(fixed)
+            it.setSizeHint(0, QSize(10, 30))
+            self._items[key] = it
+            vis = self.session.element_visible(e)
+            chip = self.KIND_RU.get(e.get('kind'), '')
+            if e.get('kind') == 'plane' and e.get('area'):
+                chip += f' {e["area"]:.0f} м²'
+            r = _Row(self, key, e.get('name', e['id']), vis, chip=(chip, 'mut'))
+            r.setToolTip('Глаз — показывать элемент; видимые плоскости попадают '
+                         'в чертёж проекцией (Результат → Чертёж сечения)')
+            self.tree.setItemWidget(it, 0, r)
+        g.setExpanded(True)
+
     def _menu(self, pos):
         it = self.tree.itemAt(pos)
         key = it.data(0, ROLE) if it is not None else None
@@ -344,6 +387,17 @@ class TreePanel(QFrame):
             a = m.addAction(t.icon(icon) if icon else QIcon(), text)
             a.setEnabled(enabled)
             a.triggered.connect(lambda: self.action.emit(name, key))
+        if key is not None and key.startswith('elem:'):
+            if key == self.ELEMENTS:
+                act('Показать все', 'el_show_all', 'mdi6.eye-outline')
+                act('Скрыть все', 'el_hide_all', 'mdi6.eye-off-outline')
+            else:
+                act('Показать / скрыть', 'el_toggle', 'mdi6.eye-outline')
+                act('Переименовать', 'el_rename', 'mdi6.pencil-outline')
+                m.addSeparator()
+                act('Удалить элемент', 'el_delete', 'mdi6.delete-outline')
+            m.exec(self.tree.viewport().mapToGlobal(pos))
+            return
         if key is not None and key.startswith('mesh:'):
             if key == self.POINTS or key == self.MESHES:
                 act('Показать точки сканов', 'points_on', 'mdi6.eye-outline', self.points_hidden)
