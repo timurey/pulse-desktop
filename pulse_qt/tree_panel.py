@@ -223,9 +223,10 @@ class TreePanel(QFrame):
         self.selected.emit(self.current())
 
     def rebuild(self):
-        """Перестроить дерево из сеанса, сохранив раскрытие и выбор."""
+        """Перестроить дерево из сеанса, сохранив раскрытие, выбор и прокрутку."""
         s = self.session
         tree = self.tree
+        scroll = tree.verticalScrollBar().value()
         expanded = {k for k, it in self._items.items() if it.isExpanded()}
         first = not self._items
         cur = self.current()
@@ -294,6 +295,7 @@ class TreePanel(QFrame):
         tree.setDragEnabled(not flt)                # с фильтром порядок в списке неполный
         self.expand_next = set()
         tree.blockSignals(False)
+        tree.verticalScrollBar().setValue(scroll)   # иначе глаз в конце списка роняет просмотр в начало
         self.empty.setVisible(not s.scans)
         self.tree.setVisible(bool(s.scans))
 
