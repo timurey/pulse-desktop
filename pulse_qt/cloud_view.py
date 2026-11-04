@@ -208,9 +208,12 @@ class CloudView(QWidget):
     # ── сечение ──────────────────────────────────────────────────────────
     NO_SECTION = ('grid', 'meas:', 'pivot:', 'sect:', 'mplane')
 
-    def set_section(self, st):
-        """Сечение (dict из section.py или None): плоскости отсечения на все облака и сетки."""
+    def set_section(self, st, clip_boxes_planes=None):
+        """Сечение (dict из section.py или None): плоскости отсечения на все облака
+        и сетки. clip_boxes_planes — плоскости ЕДИНСТВЕННОГО включённого бокса
+        отсечения (GPU-режим; несколько боксов рендерит вызывающий CPU-маской)."""
         self.section = st if st and st.get('mode', 'off') != 'off' else None
+        self.box_planes = list(clip_boxes_planes or [])
         for n, it in self.items.items():
             self._apply_section(n, it.actor)
         self.update_view()
@@ -220,9 +223,15 @@ class CloudView(QWidget):
         import section
         m = actor.GetMapper()
         m.RemoveAllClippingPlanes()
-        if self.section is None or name.startswith(self.NO_SECTION):
+        if name.startswith(self.NO_SECTION):
             return
-        for o, n in section.vtk_planes(self.section):
+        if self.section is not None:
+            for o, n in section.vtk_planes(self.section):
+                pl = vtkPlane()
+                pl.SetOrigin(*o)
+                pl.SetNormal(*n)
+                m.AddClippingPlane(pl)
+        for o, n in getattr(self, 'box_planes', []):
             pl = vtkPlane()
             pl.SetOrigin(*o)
             pl.SetNormal(*n)
@@ -609,10 +618,14 @@ class CloudView(QWidget):
             P = it.P if it.T is None else it.P @ it.T[:3, :3].T + it.T[:3, 3]
             s, depth, front = self.project(P)
             m = front & (np.abs(s[:, 0] - x) < tol_px) & (np.abs(s[:, 1] - y) < tol_px)
-            if self.section is not None and not n.startswith(self.NO_SECTION) and m.any():
-                import section
+            if not n.startswith(self.NO_SECTION) and m.any():
+                import section, clip as clip_mod
                 idx = np.flatnonzero(m)
-                m[idx[~section.keep_mask(P[idx], self.section)]] = False
+                keep = section.keep_mask(P[idx], self.section) \
+                    if self.section is not None else np.ones(len(idx), bool)
+                if getattr(self, 'box_planes_mask_fn', None) is not None:
+                    keep &= self.box_planes_mask_fn(P[idx])
+                m[idx[~keep]] = False
             if not m.any():
                 continue
             idx = np.flatnonzero(m)

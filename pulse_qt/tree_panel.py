@@ -203,7 +203,7 @@ class TreePanel(QFrame):
         """Выделенные узлы дерева проекта (без строк сеток и элементов) в порядке дерева."""
         sel = {it.data(0, ROLE) for it in self.tree.selectedItems()}
         return [k for k in self._items if k in sel
-                and not k.startswith('mesh:') and not k.startswith('elem:')]
+                and not k.startswith(('mesh:', 'elem:', 'cbox:'))]
 
     def select_keys(self, keys):
         self.tree.clearSelection()
@@ -287,6 +287,7 @@ class TreePanel(QFrame):
             add(root, ch)
         self._add_meshes(root, expanded, first)
         self._add_elements(root, expanded, first)
+        self._add_boxes(root, expanded, first)
         if cur in self._items:
             tree.setCurrentItem(self._items[cur])
         for k in sel:
@@ -378,6 +379,40 @@ class TreePanel(QFrame):
             self.tree.setItemWidget(it, 0, r)
         g.setExpanded(True)
 
+    CBOXES = 'cbox:*'                                   # ключ ветви боксов отсечения
+
+    def _add_boxes(self, root, expanded, first):
+        """Ветвь «Боксы отсечения» (clip.py): глаз — бокс активен (режет облако,
+        каркас виден); меню — переименовать, удалить, все."""
+        boxes = getattr(self.session, 'clip_boxes', []) or []
+        if not boxes:
+            return
+        fixed = (Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+        g = QTreeWidgetItem(root)
+        g.setData(0, ROLE, self.CBOXES)
+        g.setData(0, ROLE + 1, False)
+        g.setFlags(fixed)
+        g.setSizeHint(0, QSize(10, 30))
+        self._items[self.CBOXES] = g
+        any_on = any(b.get('on') for b in boxes)
+        row = _Row(self, self.CBOXES, 'Боксы отсечения', any_on, group=True, count=len(boxes))
+        row.setToolTip('Боксы отсечения: показываются точки внутри включённых боксов '
+                       '(вместе с сечением). Глаз — включить/выключить бокс')
+        self.tree.setItemWidget(g, 0, row)
+        for b in boxes:
+            key = 'cbox:' + b['id']
+            it = QTreeWidgetItem(g)
+            it.setData(0, ROLE, key)
+            it.setFlags(fixed)
+            it.setSizeHint(0, QSize(10, 30))
+            self._items[key] = it
+            sx = b['size'][0] * b['size'][1] * b['size'][2]
+            r = _Row(self, key, b.get('name', b['id']), bool(b.get('on')),
+                     chip=(f'{b["size"][0]:.0f}×{b["size"][1]:.0f}×{b["size"][2]:.0f} м' if sx > 0.001 else '', 'mut'))
+            r.setToolTip('Глаз — бокс режет облако (каркас виден). Меню: переименовать, удалить')
+            self.tree.setItemWidget(it, 0, r)
+        g.setExpanded(True)
+
     def _menu(self, pos):
         it = self.tree.itemAt(pos)
         key = it.data(0, ROLE) if it is not None else None
@@ -389,6 +424,17 @@ class TreePanel(QFrame):
             a = m.addAction(t.icon(icon) if icon else QIcon(), text)
             a.setEnabled(enabled)
             a.triggered.connect(lambda: self.action.emit(name, key))
+        if key is not None and key.startswith('cbox:'):
+            if key == self.CBOXES:
+                act('Включить все', 'cbox_show_all', 'mdi6.eye-outline')
+                act('Выключить все', 'cbox_hide_all', 'mdi6.eye-off-outline')
+            else:
+                act('Включить / выключить', 'cbox_toggle', 'mdi6.eye-outline')
+                act('Переименовать', 'cbox_rename', 'mdi6.pencil-outline')
+                m.addSeparator()
+                act('Удалить бокс', 'cbox_delete', 'mdi6.delete-outline')
+            m.exec(self.tree.viewport().mapToGlobal(pos))
+            return
         if key is not None and key.startswith('elem:'):
             if key == self.ELEMENTS:
                 act('Показать все', 'el_show_all', 'mdi6.eye-outline')

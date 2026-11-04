@@ -245,6 +245,7 @@ class Session:
         self.measures = []           # замеры (measure.py), точки в общей системе
         self.measure_undo = deque(maxlen=10)   # снимки measures перед мутациями (не сериализуется)
         self.section = None          # сечение (section.py), общая система
+        self.clip_boxes = []         # боксы отсечения (clip.py), общая система
         self.elements = []           # элементы (fits.py), в канон. системе своих сканов
         self._units = {}             # запечённые группы: gid → BakedGroup (по полю baked в дереве)
         self.last_conflicts = []     # связи, отключённые последним «Принять позу» (reject_conflicts)
@@ -270,6 +271,7 @@ class Session:
         s.zero = proj.get('zero')
         s.measures = proj.get('measures', [])
         s.section = proj.get('section')
+        s.clip_boxes = proj.get('clip_boxes', [])
         s.elements = proj.get('elements', [])
         s.apply_visibility()
         s.sync_filters()
@@ -338,6 +340,7 @@ class Session:
                 'scans': [s.to_json() for s in self.scans],
                 'tree': self.tree.to_json(),
                 'zero': self.zero, 'measures': _jsonable(self.measures), 'section': _jsonable(self.section),
+                'clip_boxes': _jsonable(self.clip_boxes),
                 'elements': _jsonable(self.elements),
                 'pairs': [_jsonable(e) for e in auto],
                 'manual_edges': [_jsonable(e) for e in manual]}
@@ -983,6 +986,7 @@ class Session:
         st = self.section or {}
         parts += [st.get('mode'), st.get('base'), round(st.get('c', 0), 4), st.get('a'), st.get('b'),
                   st.get('thick'), st.get('flip')]
+        parts.append(len(self.clip_boxes))
         return hash(tuple(parts))
 
     def zero_z(self):
@@ -1086,6 +1090,30 @@ class Session:
         if len(r) == 0:
             return np.zeros(0, np.int64)
         return np.flatnonzero(np.abs(r) <= k * max(float(el['sigma']), 1e-4))
+
+    # ── боксы отсечения (clip.py) ────────────────────────────────────────
+    def add_box(self, center, size=None, yaw_deg=0.0, name=None):
+        """Новый бокс отсечения (общая система). → dict бокса."""
+        import clip
+        n = 1
+        while any(b.get('id') == f'box{n}' for b in self.clip_boxes):
+            n += 1
+        b = {'id': f'box{n}',
+             'name': name or f'Бокс {n}',
+             'on': True, 'visible': True,
+             'center': [float(c) for c in center],
+             'size': [float(v) for v in (size or clip.DEFAULT_SIZE)],
+             'yaw_deg': float(yaw_deg)}
+        self.clip_boxes.append(b)
+        return b
+
+    def box_by_id(self, box_id):
+        return next((b for b in self.clip_boxes if b.get('id') == box_id), None)
+
+    def remove_box(self, box_id):
+        n = len(self.clip_boxes)
+        self.clip_boxes = [b for b in self.clip_boxes if b.get('id') != box_id]
+        return len(self.clip_boxes) < n
 
     # ── автостыковка ─────────────────────────────────────────────────────
     def run_auto(self, progress=None, yaw='manhattan', reuse=True, by_tree=None, combos=None, cancel=None):

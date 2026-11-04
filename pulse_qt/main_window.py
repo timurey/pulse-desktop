@@ -340,6 +340,7 @@ class MainWindow(QMainWindow):
         self._el_labels = []                     # подписи элементов (рисуются с замерами)
         self.level_ring = None                   # транспортир горизонта: {'a','b','L0','c','r','R'}
         self.snap_on = True                      # привязка замеров (B): вершины/центры важнее облака
+        self.cbox_sel = None                     # выбранный бокс отсечения (панель)
         self.zero_show = True
         self.z0 = None
         self.points_hidden = False               # «Поверхность»: показывать только сетки
@@ -585,6 +586,10 @@ class MainWindow(QMainWindow):
                              'Показать только полосу облака у плоскости (план этажа, разрез)', checkable=True)
         self.b_clip = g.big('mdi6.flip-to-back', 'Отсечение', lambda: self.section_toggle('clip'),
                             'Скрыть всё по одну сторону плоскости (например, выше 2.5 м)', checkable=True)
+        g.small('mdi6.cube-outline', 'Бокс', self.add_box_gather,
+                'Бокс отсечения по габариту видимых сканов: изоляция комнаты; поля и список — «Контроль» → «Боксы»')
+        g.small('mdi6.cursor-default-click-outline', 'Бокс\nкликом', self.add_box_click,
+                'Клик по модели — центр нового бокса (размер — как у последнего)')
         g = rb.add_group(pg, 'Нулевой уровень')
         self.b_zero = g.big('mdi6.format-vertical-align-bottom', 'Нулевой\nуровень', tool('zero'),
                             'Нулевой уровень: показ, по полу, кликом, числом; отметки считаются от него',
@@ -720,7 +725,8 @@ class MainWindow(QMainWindow):
         self._sync_ribbon()
 
     def _leave_tool(self, key):
-        if key in ('measure', 'fit') or (key in ('zero', 'section') and self.measure_mode in ('zero', 'secplane', 'level')):
+        if key in ('measure', 'fit') or \
+                (key in ('zero', 'section') and self.measure_mode in ('zero', 'secplane', 'level', 'cbox')):
             if self.measure_mode:
                 self.set_measure_mode(None, keep=True)
         if key == 'frame' and self.select_mode:
@@ -1032,13 +1038,16 @@ class MainWindow(QMainWindow):
                      'secplane': 'Сечение: щёлкните по стене или полу — плоскость встанет параллельно ей',
                      'level': 'Горизонт по плоскости: щёлкните по горизонтальной поверхности '
                               '(пол коридора, площадка) — проект выровняется по ней',
+                     'cbox': 'Бокс отсечения: щёлкните по модели — центр нового бокса '
+                             '(размер — как у последнего бокса; поля — в «Контроль» → «Боксы»)',
                      'fit': 'Элемент: щёлкните по поверхности облака — подгонится плоскость, сфера, '
                             'цилиндр или окружность'}
 
     def set_measure_mode(self, mode, keep=False):
         if mode is not None and mode == self.measure_mode:
             mode = None
-        want = {'zero': 'zero', 'secplane': 'section', 'fit': 'fit', 'level': 'zero'}.get(mode, 'measure')
+        want = {'zero': 'zero', 'secplane': 'section', 'fit': 'fit', 'level': 'zero',
+                'cbox': 'section'}.get(mode, 'measure')
         if mode is not None and self.tool != want:
             self.open_tool(want)
         if mode in self.control.m_type.values:
@@ -1068,6 +1077,7 @@ class MainWindow(QMainWindow):
         self.control.set_measures(self.s.measures, self.z0)
         if self.control.snap_sw.isChecked() != self.snap_on:
             self.control.snap_sw.setChecked(self.snap_on)
+        self.refresh_cbox_panel()
 
     def _set_zero(self, z, source):
         self.s.zero = None if source is None else {'z': float(z), 'source': source}
@@ -1077,6 +1087,70 @@ class MainWindow(QMainWindow):
         self.refresh_control()
         self.vp.update_overlays()
         self.set_status(f'нулевой уровень: z = {self.z0:.3f} м ({source or "пол опорного скана"})')
+
+    # ── боксы отсечения (clip.py, Ф15) ───────────────────────────────────
+    def _multi_box(self):
+        """Включённых боксов 2+ (CPU-маска при рисовании)."""
+        import clip
+        return len(clip.active_boxes(self.s)) >= 2
+
+    def refresh_clip_boxes(self):
+        """Применить боксы к виду: GPU-плоскости при одном включённом, каркасы,
+        CPU-перерисовка при нескольких."""
+        import clip
+        active = clip.active_boxes(self.s)
+        planes = clip.box_planes(active[0]) if len(active) == 1 else []
+        # CPU-фильтр пикинга — при любом числе боксов (GPU-плоскости режут только рендер)
+        self.view.box_planes_mask_fn = (lambda P: clip.combined_mask(P, self.s)) if active else None
+        self.view.set_section(self.s.section, clip_boxes_planes=planes)
+        for b in self.s.clip_boxes:
+            name = f"cbox:{b['id']}"
+            if b.get('visible') and b.get('on'):
+                V, E = clip.box_wire(b['center'], b['size'], b.get('yaw_deg', 0.0))
+                self.view.set_lines(name, V, E, None, None, 1.5, (0.98, 0.62, 0.25), 0.9, on_top=True)
+            else:
+                self.view.remove(name)
+        if len(active) >= 2:
+            self.redraw_all()                            # CPU-маска — пересоздать облака
+        if self.tool == 'control' and hasattr(self, 'control'):
+            self.refresh_control()
+
+    def add_box_gather(self):
+        """Бокс по габариту видимых размещённых сканов."""
+        if not self.s.placed():
+            self.set_status('нет размещённых сканов')
+            return
+        lo, hi = self._visible_bbox()
+        c = 0.5 * (lo + hi)
+        size = np.maximum(hi - lo, 0.1)
+        b = self.s.add_box(c.tolist(), size.tolist())
+        self.cbox_sel = b['id']
+        self.refresh_clip_boxes()
+        self.tree_panel.rebuild()
+        self.set_status(f"{b['name']}: по габариту облака (поля — в «Контроль» → «Боксы»)")
+
+    def add_box_click(self):
+        """Режим: клик по модели — центр нового бокса (размер — как у последнего)."""
+        self.set_measure_mode('cbox')
+
+    def cbox_click_at(self, cloud, p_world):
+        sc = self._scan_of(cloud)
+        if sc is None:
+            self.set_status('мимо облака', log=False)
+            return None
+        last = self.s.clip_boxes[-1] if self.s.clip_boxes else None
+        size = np.asarray(last['size'], float) if last else None
+        b = self.s.add_box(list(np.asarray(p_world, float)), None if size is None else size.tolist())
+        self.cbox_sel = b['id']
+        self.set_measure_mode(None, keep=True)
+        self.refresh_clip_boxes()
+        self.tree_panel.rebuild()
+        self.refresh_control()
+        self.set_status(f"{b['name']}: центр по клику (поля — в «Контроль» → «Боксы»)")
+        return p_world
+
+    def refresh_cbox_panel(self):
+        self.control.set_boxes(self.s.clip_boxes, self.cbox_sel)
 
     # ── сечение ──────────────────────────────────────────────────────────
     def _section_state(self):
@@ -1204,6 +1278,33 @@ class MainWindow(QMainWindow):
             self.set_measure_mode(arg)
         elif name == 'done':
             self.close_tool()
+        elif name == 'box_gather':
+            self.add_box_gather()
+        elif name == 'box_click':
+            self.add_box_click()
+        elif name == 'box_on':
+            box_id, on = arg
+            b = self.s.box_by_id(box_id)
+            if b is not None:
+                b['on'] = bool(on)
+                b['visible'] = bool(on)
+                self.refresh_clip_boxes()
+                self.tree_panel.rebuild()
+        elif name == 'box_delete':
+            if self.s.remove_box(arg):
+                if self.cbox_sel == arg:
+                    self.cbox_sel = None
+                self.refresh_clip_boxes()
+                self.tree_panel.rebuild()
+        elif name == 'box_edit':
+            b = self.s.box_by_id(arg['id'])
+            if b is not None:
+                b.update({k: arg[k] for k in ('name', 'center', 'size', 'yaw_deg')})
+                if not b['name']:
+                    b.pop('name', None)
+                self.refresh_clip_boxes()
+                self.tree_panel.rebuild()
+                self.set_status('бокс изменён')
         elif name == 'measure_h':
             if 0 <= arg < len(self.s.measures):
                 self.s.push_measure_undo()
@@ -1263,6 +1364,8 @@ class MainWindow(QMainWindow):
             return self.fit_click_at(name, p)
         if self.measure_mode == 'level':
             return self.level_click_at(name, p)
+        if self.measure_mode == 'cbox':
+            return self.cbox_click_at(name, p)
         if snap_kind:
             self.set_status(f'привязка: {self.SNAP_RU.get(snap_kind, snap_kind)}', log=False)
         return self.measure_point(p, name)
@@ -1933,6 +2036,14 @@ class MainWindow(QMainWindow):
         P = sc._display
         if dsp.has_limits(d):
             P = P[dsp.mask(P, d)]
+        if self._multi_box():                            # 2+ бокса — CPU-маска (OR плоскостями не выразить)
+            import clip as clip_mod
+            Tw = pr.transform(P, T) if T is not None else P
+            keep = clip_mod.combined_mask(Tw, self.s)
+            P = P[keep]
+            if len(P) == 0:
+                self.view.remove(name)
+                return
         color = dsp.hex_rgb(d['color']) if d.get('color_mode') == 'solid' and d.get('color') else \
             self.scan_color(sc.id)[0]
         colors = None
@@ -1961,7 +2072,10 @@ class MainWindow(QMainWindow):
         self.quality_refresh()
         self._draw_meshes()
         self._draw_measures()
-        self.view.set_section(self.s.section)
+        import clip as clip_mod
+        active = clip_mod.active_boxes(self.s)
+        self.view.set_section(self.s.section,
+                              clip_boxes_planes=clip_mod.box_planes(active[0]) if len(active) == 1 else None)
         self._draw_section()
 
     def apply_visibility(self):
@@ -2506,6 +2620,8 @@ class MainWindow(QMainWindow):
     def on_tree_visible(self, key, vis):
         if key.startswith('mesh:'):
             return self._mesh_tree_visible(key, vis)
+        if key.startswith('cbox:'):
+            return self._cbox_tree_visible(key, vis)
         if key.startswith('elem:'):
             return self._element_tree_visible(key, vis)
         self._vis_backup = None
@@ -2515,6 +2631,21 @@ class MainWindow(QMainWindow):
             self.set_status('точки сканов снова показаны', log=False)
         self.apply_visibility()
         self.tree_panel.rebuild()
+
+    def _cbox_tree_visible(self, key, vis):
+        """Глаз в ветви «Боксы отсечения»: вся ветвь или один бокс."""
+        tp = self.tree_panel
+        if key == tp.CBOXES:
+            for b in self.s.clip_boxes:
+                b['on'] = b['visible'] = bool(vis)
+            self.refresh_clip_boxes()
+            self.refresh_control()
+            return
+        b = self.s.box_by_id(key[5:])
+        if b is not None:
+            b['on'] = b['visible'] = bool(vis)
+            self.refresh_clip_boxes()
+            self.refresh_control()
 
     def _element_tree_visible(self, key, vis):
         """Глаз в ветви «Элементы»: вся ветвь (слой «Элементы») или один элемент."""
@@ -2714,6 +2845,30 @@ class MainWindow(QMainWindow):
             self.level_by_element(key[5:])
         elif name == 'el_delete':
             self.on_fit_action('delete', key[5:])
+        elif name == 'cbox_toggle':
+            b = self.s.box_by_id(key[5:])
+            if b is not None:
+                self._cbox_tree_visible(key, not b.get('on'))
+                self.tree_panel.rebuild()
+        elif name == 'cbox_rename':
+            b = self.s.box_by_id(key[5:])
+            if b is not None:
+                d = AskDialog(self, 'Переименовать бокс', [('Имя', 'text', b.get('name', ''), None)],
+                              'mdi6.pencil-outline', 'Переименовать')
+                if d.exec() and d.values()[0].strip():
+                    b['name'] = d.values()[0].strip()
+                    self.refresh_clip_boxes()
+                    self.tree_panel.rebuild()
+        elif name == 'cbox_delete':
+            if self.s.remove_box(key[5:]):
+                self.refresh_clip_boxes()
+                self.tree_panel.rebuild()
+        elif name in ('cbox_show_all', 'cbox_hide_all'):
+            for b in self.s.clip_boxes:
+                b['on'] = b['visible'] = (name == 'cbox_show_all')
+            self.refresh_clip_boxes()
+            self.refresh_control()
+            self.tree_panel.rebuild()
         elif name in ('el_show_all', 'el_hide_all'):
             for e in self.s.elements:
                 e['visible'] = name == 'el_show_all'

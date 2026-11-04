@@ -128,6 +128,107 @@ class _MeasureEdit(QFrame):
                                            'note': self.note_e.text().strip()})
 
 
+class _BoxRow(QFrame):
+    """Строка бокса в списке: глаз-чек (режет + каркас), имя, удаление."""
+
+    def __init__(self, b, panel):
+        super().__init__()
+        self.setObjectName('PairRow')
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(8, 4, 4, 4)
+        lay.setSpacing(6)
+        self.eye = W.Switch(bool(b.get('on')))
+        self.eye.toggled.connect(lambda v: panel.action.emit('box_on', (b['id'], v)))
+        self.eye.setToolTip('Бокс режет облако (и каркас виден)')
+        lay.addWidget(self.eye)
+        name = QLabel(b.get('name', b['id']))
+        name.setStyleSheet('font-size:12px;')
+        name.setWordWrap(True)
+        lay.addWidget(name, 1)
+        lay.addWidget(W.tool(W.THEME.icon('mdi6.close', 'ink3'), tip='Удалить бокс', icon_only=True,
+                             cb=lambda: panel.action.emit('box_delete', b['id'])))
+
+
+class _BoxFields(QFrame):
+    """Поля выбранного бокса: имя, центр, размер, поворот; «Применить»."""
+
+    apply = Signal(dict)
+
+    def __init__(self):
+        super().__init__()
+        self.setObjectName('SecBody')
+        g = QVBoxLayout(self)
+        g.setContentsMargins(2, 2, 2, 4)
+        g.setSpacing(4)
+        self.name_e = QLineEdit()
+        g.addWidget(self.name_e)
+        self.spins = {}
+        row1 = QHBoxLayout()
+        row1.setSpacing(3)
+        row1.addWidget(QLabel('центр'))
+        for k in ('x', 'y', 'z'):
+            sb = QDoubleSpinBox()
+            sb.setRange(-1e6, 1e6)
+            sb.setDecimals(3)
+            sb.setSingleStep(0.1)
+            sb.setKeyboardTracking(False)
+            row1.addWidget(sb)
+            self.spins['c' + k] = sb
+        g.addLayout(row1)
+        row2 = QHBoxLayout()
+        row2.setSpacing(3)
+        row2.addWidget(QLabel('размер'))
+        for k in ('x', 'y', 'z'):
+            sb = QDoubleSpinBox()
+            sb.setRange(0.05, 1e6)
+            sb.setDecimals(2)
+            sb.setSingleStep(0.1)
+            sb.setMinimumWidth(72)
+            sb.setKeyboardTracking(False)
+            row2.addWidget(sb)
+            self.spins['s' + k] = sb
+        g.addLayout(row2)
+        row3 = QHBoxLayout()
+        row3.setSpacing(3)
+        row3.addWidget(QLabel('поворот'))
+        sb = QDoubleSpinBox()
+        sb.setRange(-180, 180)
+        sb.setDecimals(1)
+        sb.setSuffix('°')
+        sb.setKeyboardTracking(False)
+        self.spins['yaw'] = sb
+        row3.addWidget(sb)
+        row3.addStretch(1)
+        g.addLayout(row3)
+        g.addWidget(W.button('Применить', self._apply, icon=W.THEME.icon('mdi6.check')))
+        self.box_id = None
+
+    def set_box(self, b):
+        if b is None:
+            self.box_id = None
+            self.setVisible(False)
+            return
+        self.box_id = b['id']
+        self.name_e.setText(b.get('name', ''))
+        vals = {'cx': b['center'][0], 'cy': b['center'][1], 'cz': b['center'][2],
+                'sx': b['size'][0], 'sy': b['size'][1], 'sz': b['size'][2],
+                'yaw': b.get('yaw_deg', 0.0)}
+        for k, sb in self.spins.items():
+            sb.blockSignals(True)
+            sb.setValue(float(vals[k]))
+            sb.blockSignals(False)
+        self.setVisible(True)
+
+    def _apply(self):
+        if self.box_id is None:
+            return
+        self.apply.emit({'id': self.box_id,
+                         'name': self.name_e.text().strip(),
+                         'center': [self.spins['cx'].value(), self.spins['cy'].value(), self.spins['cz'].value()],
+                         'size': [self.spins['sx'].value(), self.spins['sy'].value(), self.spins['sz'].value()],
+                         'yaw_deg': self.spins['yaw'].value()})
+
+
 class ControlPanel(_Panel):
     action = Signal(str, object)
     MEASURES = [('расстояние', 'dist'), ('отметка', 'height'), ('до плоскости', 'plane'), ('ломаная', 'poly')]
@@ -159,6 +260,21 @@ class ControlPanel(_Panel):
                                tip='Щелчок по точке облака — её высота станет ±0.000'), spacing=6))
         s0.add(W.label('Высоту можно ввести числом в поле выше. Отметки замеров считаются от этого уровня.',
                        'Hint', wrap=True))
+        sb = self.add(W.Section('Боксы отсечения'), 'cbox')
+        self.box_list = QVBoxLayout()
+        self.box_list.setSpacing(4)
+        sb.add(self.box_list)
+        self.box_empty = W.label('боксов нет — «Бокс» на ленте «Контроль» или «Кликом»', 'Hint', wrap=True)
+        sb.add(self.box_empty)
+        sb.add(W.hbox(W.button('Бокс по облаку', lambda: self.action.emit('box_gather', None),
+                               icon=t.icon('mdi6.cube-outline'), tip='По габариту видимых сканов'),
+                      W.button('Бокс кликом', lambda: self.action.emit('box_click', None),
+                               icon=t.icon('mdi6.cursor-default-click-outline'), tip='Клик по модели — центр нового бокса'),
+                      spacing=6))
+        self.box_fields = _BoxFields()
+        self.box_fields.apply.connect(lambda d: self.action.emit('box_edit', d))
+        sb.add(self.box_fields)
+        self.box_fields.setVisible(False)
         ss = self.add(W.Section('Сечение'), 'section')
         self.sec_mode = W.Segmented([('выкл.', 'off'), ('срез', 'slice'), ('отсечение', 'clip')], 'off')
         self.sec_mode.changed.connect(lambda v: self.action.emit('sec', {'mode': v}))
@@ -262,6 +378,20 @@ class ControlPanel(_Panel):
         self.sec_thick_row.setVisible(st['mode'] == 'slice')
         self.sec_flip_row.setVisible(st['mode'] == 'clip')
         self.sec_desc.setText(desc)
+
+    def set_boxes(self, boxes, sel_id):
+        """Список боксов + поля выбранного (sel_id или первый включённый)."""
+        while self.box_list.count():
+            w = self.box_list.takeAt(0).widget()
+            if w is not None:
+                w.hide()
+                w.deleteLater()
+        for b in boxes:
+            self.box_list.addWidget(_BoxRow(b, self))
+        self.box_empty.setVisible(not boxes)
+        cur = next((b for b in boxes if b['id'] == sel_id), None) or \
+            (boxes[0] if boxes else None)
+        self.box_fields.set_box(cur)
 
     def set_measures(self, measures, z0):
         while self.list.count():

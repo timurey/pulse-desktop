@@ -54,15 +54,17 @@ def plane_frame(n):
 
 
 def band_points(session, st):
-    """Точки размещённых видимых сканов в полосе среза (общая система).
+    """Точки размещённых видимых сканов в полосе среза (общая система);
+    включённые боксы отсечения (clip.py) AND-ятся поверх — чертёж комнаты.
     sc.down запускает ленивый анализ сам — ждать «проанализировано» не нужно."""
+    import clip
     out = []
     for sc in session.placed():
         if not sc.visible:
             continue
         T = session.Tc(sc)
         P = sc.down @ T[:3, :3].T + T[:3, 3]
-        P = P[sec.keep_mask(P, st)]
+        P = P[clip.combined_mask(P, session, section_keep=sec.keep_mask(P, st))]
         if len(P):
             out.append(P)
     return np.vstack(out) if out else np.zeros((0, 3))
