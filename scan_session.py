@@ -242,6 +242,7 @@ class Session:
         self.zero = None             # нулевой уровень {'z', 'source'} (общая система); None — пол опорного
         self.measures = []           # замеры (measure.py), точки в общей системе
         self.section = None          # сечение (section.py), общая система
+        self.elements = []           # элементы (fits.py), в канон. системе своих сканов
         self._units = {}             # запечённые группы: gid → BakedGroup (по полю baked в дереве)
         self.last_conflicts = []     # связи, отключённые последним «Принять позу» (reject_conflicts)
         self.lock = threading.RLock()
@@ -266,6 +267,7 @@ class Session:
         s.zero = proj.get('zero')
         s.measures = proj.get('measures', [])
         s.section = proj.get('section')
+        s.elements = proj.get('elements', [])
         s.apply_visibility()
         s.sync_filters()
         s.project_path = str(path)
@@ -333,6 +335,7 @@ class Session:
                 'scans': [s.to_json() for s in self.scans],
                 'tree': self.tree.to_json(),
                 'zero': self.zero, 'measures': _jsonable(self.measures), 'section': _jsonable(self.section),
+                'elements': _jsonable(self.elements),
                 'pairs': [_jsonable(e) for e in auto],
                 'manual_edges': [_jsonable(e) for e in manual]}
         for e in proj['scans']:
@@ -942,7 +945,8 @@ class Session:
                       json.dumps(sc.display, sort_keys=True) if sc.display else None]
         for e in self.edges:
             parts += [e['A'], e['B'], e.get('user'), e.get('method')]
-        parts += [None if self.zero is None else round(self.zero['z'], 6), len(self.measures)]
+        parts += [None if self.zero is None else round(self.zero['z'], 6), len(self.measures),
+                  len(self.elements)]
         parts.append(json.dumps(self.tree.to_json(), sort_keys=True, ensure_ascii=False))
         st = self.section or {}
         parts += [st.get('mode'), st.get('base'), round(st.get('c', 0), 4), st.get('a'), st.get('b'),
@@ -967,6 +971,77 @@ class Session:
         if voxel > (scan.res['voxel'] or 0):
             pc = pc.voxel_down_sample(voxel)
         return np.asarray(pc.points)
+
+    # ── элементы (fits.py) ───────────────────────────────────────────────
+    EL_NAMES = {'plane': 'Плоскость', 'sphere': 'Сфера', 'cylinder': 'Цилиндр',
+                'circle': 'Окружность'}
+
+    def add_element(self, scan, p_canon, kind='auto', d_fixed=None):
+        """
+        Подогнать элемент по щелчку (fits.fit_click по down скана) и добавить в
+        сеанс. Геометрия — в канонической системе скана: движется с его позой.
+        → элемент (dict, jsonable) или None (не подогналось).
+        """
+        import fits
+        el = fits.fit_click(scan.down, p_canon, kind=kind, d_fixed=d_fixed)
+        if el is None:
+            return None
+        el.pop('used', None)               # индексы нестабильны (чистка/обрезка меняют down)
+        el['id'] = self._next_element_id()
+        el['scan'] = scan.id
+        el['name'] = self._element_name(el['kind'])
+        el = _jsonable(el)
+        self.elements.append(el)
+        return el
+
+    def _next_element_id(self):
+        n = 0
+        for e in self.elements:
+            try:
+                n = max(n, int(str(e.get('id', ''))[2:]))
+            except ValueError:
+                pass
+        return f'el{n + 1}'
+
+    def _element_name(self, kind):
+        stem = self.EL_NAMES.get(kind, 'Элемент')
+        return f"{stem} {1 + sum(1 for e in self.elements if e.get('kind') == kind)}"
+
+    def remove_element(self, el_id):
+        """Удалить элемент; → True, если был."""
+        n = len(self.elements)
+        self.elements = [e for e in self.elements if e.get('id') != el_id]
+        return len(self.elements) < n
+
+    def element_by_id(self, el_id):
+        return next((e for e in self.elements if e.get('id') == el_id), None)
+
+    def element_visible(self, el):
+        """Показан ли элемент (глаз в дереве); у старых проектов флага нет —
+        значит показан."""
+        return bool(el.get('visible', True))
+
+    def set_element_visible(self, el_id, on):
+        el = self.element_by_id(el_id)
+        if el is not None:
+            el['visible'] = bool(on)
+        return el
+
+    def rename_element(self, el_id, name):
+        for e in self.elements:
+            if e.get('id') == el_id:
+                e['name'] = str(name)
+                return e
+        return None
+
+    def element_inliers(self, scan, el, k=3.0):
+        """Индексы точек down скана на поверхности элемента (|остаток| ≤ k·σ).
+        Для отрисовки; вычисляется заново — хранить индексы ненадёжно."""
+        import fits
+        r = fits.element_residual(el, scan.down)
+        if len(r) == 0:
+            return np.zeros(0, np.int64)
+        return np.flatnonzero(np.abs(r) <= k * max(float(el['sigma']), 1e-4))
 
     # ── автостыковка ─────────────────────────────────────────────────────
     def run_auto(self, progress=None, yaw='manhattan', reuse=True, by_tree=None, combos=None, cancel=None):

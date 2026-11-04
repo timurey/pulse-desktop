@@ -75,6 +75,49 @@ class TestSession(unittest.TestCase):
         local = (np.asarray(world_xyz) - o) @ pr.rot_z(-yaw).T      # Z вверх, начало — сканер
         return local                                               # канон. = локальная Z-вверх
 
+    def test_elements(self):
+        """Элементы (fits.py): подгонка по «клику», остатки, каркас, сохранение."""
+        import fits
+        s = Session.from_scans(self.paths[:1])
+        A = s.scans[0]
+        el = s.add_element(A, self._canon_point(s, A, (1.0, 1.0, 0.0)), kind='auto')
+        self.assertIsNotNone(el)
+        self.assertEqual(el['kind'], 'plane')
+        self.assertEqual(el['name'], 'Плоскость 1')
+        self.assertNotIn('used', el)                       # индексы не хранятся
+        # пол: нормаль вверх (на сканер), отметка ≈ −1.4 (штатив), инлайнеры есть
+        n = np.asarray(el['params']['n'])
+        self.assertLess(abs(n[2]), 1.0, msg='нормаль не вертикальна')
+        self.assertAlmostEqual(el['params']['c'], -1.4, delta=0.03)
+        self.assertGreater(len(s.element_inliers(A, el)), 5000)
+        pts, segs = fits.element_wire(el)
+        self.assertEqual(len(segs), 4)                     # прямоугольник
+        # сохранение/загрузка
+        p = Path(self.tmp) / 'el.json'
+        s.save(p)
+        s2 = Session.from_project(p)
+        self.assertEqual(len(s2.elements), 1)
+        self.assertEqual(s2.elements[0]['id'], el['id'])
+        self.assertEqual(s2.elements[0]['params'], el['params'])
+        # переименование, id не переиспользуются, удаление
+        s2.rename_element(el['id'], 'Пол')
+        self.assertEqual(s2.elements[0]['name'], 'Пол')
+        el2 = s2.add_element(A, self._canon_point(s2, A, (9.0, 3.0, 1.5)), kind='auto')
+        self.assertIsNotNone(el2)
+        self.assertNotEqual(el2['id'], el['id'])
+        self.assertEqual(el2['name'], 'Плоскость 2')
+        # видимость: по умолчанию True, флаг переживает сохранение
+        self.assertTrue(s2.element_visible(el2))
+        s2.set_element_visible(el2['id'], False)
+        self.assertFalse(s2.element_visible(s2.element_by_id(el2['id'])))
+        p2 = Path(self.tmp) / 'el2.json'
+        s2.save(p2)
+        s3 = Session.from_project(p2)
+        self.assertFalse(s3.element_visible(s3.element_by_id(el2['id'])))
+        self.assertTrue(s3.element_visible(s3.element_by_id(el['id'])))
+        self.assertTrue(s2.remove_element(el['id']))
+        self.assertEqual([e['id'] for e in s2.elements], [el2['id']])
+
     def test_manual_planes(self):
         s = Session.from_scans(self.paths[:2])
         A, B = s.scans
