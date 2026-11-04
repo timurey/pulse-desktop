@@ -204,3 +204,57 @@ class TestExportMeasures(unittest.TestCase):
         texts = [e.dxf.text for e in msp if e.dxf.layer == 'IZM_TEXT']
         self.assertTrue(any('Ширина = 2.000' in t for t in texts))
         self.assertTrue(any('2.000 м²' in t for t in texts))
+
+
+class TestPlans(unittest.TestCase):
+    """Ф8/Ф9: сохранённые планы, привязка замеров, отвязка при удалении, 2D-DXF."""
+
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.mkdtemp()
+        self.origins = write_scans(self.tmp)
+        self.paths = [str(Path(self.tmp) / n) for n in self.origins]
+        self.s = Session.from_scans(self.paths[:1])
+
+    def test_plan_roundtrip_and_detach(self):
+        st = {'mode': 'slice', 'base': 'z', 'n0': [0, 0, 1.0], 'a': 0.0, 'b': 0.0,
+              'c': 1.2, 'thick': 0.1, 'flip': False}
+        pl = self.s.add_plan('1 этаж', st)
+        self.s.active_plan = pl['id']
+        self.s.measures.append({'type': 'dist', 'pts': [[0, 0, 1.2], [1, 0, 1.2]], 'plan': pl['id']})
+        self.s.measures.append({'type': 'dist', 'pts': [[0, 0, 0.0], [1, 0, 0.0]]})
+        p = Path(self.tmp) / 'pl.pulse'
+        self.s.save(p)
+        from scan_session import Session
+        s2 = Session.from_project(p)
+        self.assertEqual(s2.active_plan, pl['id'])
+        self.assertEqual(len(s2.plans), 1)
+        self.assertAlmostEqual(s2.plans[0]['state']['c'], 1.2)
+        # удаление плана: замер остаётся, отвязывается; активный сбрасывается
+        self.assertTrue(s2.remove_plan('plan1'))
+        self.assertIsNone(s2.active_plan)
+        self.assertEqual(len(s2.measures), 2)
+        self.assertFalse([m for m in s2.measures if m.get('plan')])
+
+    def test_plan_dxf_flat(self):
+        import ezdxf
+        import measure_export
+        st = {'mode': 'slice', 'base': 'z', 'n0': [0, 0, 1.0], 'a': 0.0, 'b': 0.0,
+              'c': 1.2, 'thick': 0.1, 'flip': False}
+        pl = self.s.add_plan('Этаж', st)
+        self.s.measures.append({'type': 'dist', 'pts': [[0, 0, 1.2], [3, 0, 1.2]],
+                                'name': 'Коридор', 'plan': pl['id']})
+        out = Path(self.tmp) / 'pl.dxf'
+        measure_export.write_plan_dxf(self.s, pl, out, with_contour=False)
+        doc = ezdxf.readfile(out)
+        self.assertEqual(doc.header['$INSUNITS'], 6)
+        msp = doc.modelspace()
+        lines = [e for e in msp if e.dxftype() == 'LINE' and e.dxf.layer == 'PLAN_MEAS']
+        self.assertEqual(len(lines), 1)
+        # плоский: z = 0 у всех вершин
+        for e in msp:
+            if e.dxftype() == 'LINE':
+                self.assertAlmostEqual(e.dxf.start.z, 0.0, places=9)
+                self.assertAlmostEqual(e.dxf.end.z, 0.0, places=9)
+        texts = [e.dxf.text for e in msp if e.dxf.layer == 'PLAN_TEXT']
+        self.assertTrue(any('Коридор = 3.000' in t for t in texts))

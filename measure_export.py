@@ -131,3 +131,71 @@ def write_dxf(session, path, z0=None):
         with open(p, 'w', encoding='utf-8', newline='\n') as f:
             doc.write(f)
     return path
+
+
+def write_plan_dxf(session, plan, path, with_contour=True):
+    """
+    План (Ф8) → плоский 2D-DXF (метры): замеры плана в базисе плоскости сечения
+    (u, v), z = 0 у всех — «плоский чертёж этажа». Опция + контур среза:
+    осевые цепочки drawing.build отдельным слоем CONTOUR.
+    """
+    import ezdxf
+    import section as sec
+    from fileio import native_path
+    st = plan['state']
+    n = sec.normal(st)
+    # базис листа: v — вверх, u — горизонталь (как в drawing.plane_frame)
+    if abs(n[2]) > 0.9:
+        u_ax, v_ax = np.array([1.0, 0, 0]), np.array([0, 1.0, 0])
+    else:
+        v_ax = np.array([0, 0, 1.0]) - n[2] * n
+        v_ax /= np.linalg.norm(v_ax)
+        u_ax = np.cross(v_ax, n)
+
+    def to2d(p):
+        return (float((p - _o) @ u_ax), float((p - _o) @ v_ax))
+
+    _o = np.zeros(3)                                     # origin поставим по первому замеру
+    pts_all = [np.asarray(p, float) for m in session.measures if m.get('plan') == plan['id']
+               for p in m['pts']]
+    if pts_all:
+        _o = pts_all[0] - ((pts_all[0] @ n) - float(st['c'])) * n
+
+    doc = ezdxf.new('R2010', setup=False)
+    doc.header['$INSUNITS'] = 6                          # метры
+    doc.layers.add('PLAN_MEAS', color=1)                 # замеры
+    doc.layers.add('PLAN_TEXT', color=7)
+    doc.layers.add('CONTOUR', color=5)                   # контур среза (синий)
+    msp = doc.modelspace()
+    for i, m in enumerate(session.measures, 1):
+        if m.get('plan') != plan['id']:
+            continue
+        title = _title(m, i)
+        value, units = _value_units(m, session.zero_z() if session.scans else 0.0)
+        P = [np.asarray(p, float) for p in m['pts']]
+        t = m['type']
+        if t == 'height':
+            msp.add_point(to2d(P[0]), dxfattribs={'layer': 'PLAN_MEAS'})
+        elif t == 'dist' and len(P) == 2:
+            msp.add_line(to2d(P[0]), to2d(P[1]), dxfattribs={'layer': 'PLAN_MEAS'})
+        elif t == 'poly' and len(P) >= 2:
+            msp.add_lwpolyline([to2d(p) for p in P],
+                               dxfattribs={'layer': 'PLAN_MEAS', 'closed': bool(m.get('closed'))})
+        if value is not None:
+            at = to2d(_plan(m, session))
+            text = f"{title} = {value:.3f} {units}" if m.get('name') else f"{value:.3f} {units}"
+            msp.add_text(text, height=0.2, dxfattribs={'layer': 'PLAN_TEXT'}).set_placement(at)
+    if with_contour:
+        import drawing
+        try:
+            sheet = drawing.build(session, st)
+        except Exception:                                # noqa: BLE001 — контур не обязателен
+            sheet = None
+        if sheet is not None:
+            for _, pts in sheet['chains']:
+                msp.add_lwpolyline([(float(u), float(v)) for u, v in pts],
+                                   dxfattribs={'layer': 'CONTOUR', 'closed': False})
+    with native_path(path, 'w') as p:
+        with open(p, 'w', encoding='utf-8', newline='\n') as f:
+            doc.write(f)
+    return path

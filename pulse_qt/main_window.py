@@ -1081,6 +1081,7 @@ class MainWindow(QMainWindow):
         if self.control.snap_sw.isChecked() != self.snap_on:
             self.control.snap_sw.setChecked(self.snap_on)
         self.refresh_cbox_panel()
+        self.control.set_plans(self.s.plans, self.s.active_plan)
 
     def _set_zero(self, z, source):
         self.s.zero = None if source is None else {'z': float(z), 'source': source}
@@ -1281,6 +1282,40 @@ class MainWindow(QMainWindow):
             self.set_measure_mode(arg)
         elif name == 'done':
             self.close_tool()
+        elif name == 'plan_add':
+            d = AskDialog(self, 'Сохранить сечение как план',
+                          [('Имя плана', 'text', f'План {len(self.s.plans) + 1}', None)],
+                          'mdi6.map-outline', 'Сохранить')
+            if d.exec() and d.values()[0].strip():
+                pl = self.s.add_plan(d.values()[0].strip(), self._section_state())
+                self.tree_panel.rebuild()
+                self.set_status(f"план «{pl['name']}» сохранён (глаз в ветви «Планы» — активировать)")
+        elif name == 'plan_eye_on':
+            self._activate_plan(key[5:])
+        elif name == 'plan_eye':
+            plan_id, on = arg
+            if on:
+                self._activate_plan(plan_id)
+            elif self.s.active_plan == plan_id:
+                self._deactivate_plan()
+        elif name == 'plan_done':
+            self._deactivate_plan()
+        elif name == 'plan_dxf':
+            self.on_plan_dxf(arg)
+        elif name == 'plan_delete':
+            if self.s.remove_plan(arg):
+                self.tree_panel.rebuild()
+                self._draw_measures()
+                self.refresh_control()
+        elif name == 'plan_rename':
+            pl = self.s.plan_by_id(arg)
+            if pl is not None:
+                d = AskDialog(self, 'Переименовать план', [('Имя', 'text', pl.get('name', ''), None)],
+                              'mdi6.pencil-outline', 'Переименовать')
+                if d.exec() and d.values()[0].strip():
+                    pl['name'] = d.values()[0].strip()
+                    self.tree_panel.rebuild()
+                    self.refresh_control()
         elif name == 'box_gather':
             self.add_box_gather()
         elif name == 'box_click':
@@ -1431,6 +1466,8 @@ class MainWindow(QMainWindow):
                 m['plane'] = self._mplane
                 self.view.remove('mplane')
             self.s.push_measure_undo()
+            if self.s.active_plan:
+                m['plan'] = self.s.active_plan
             self.s.measures.append(m)
             self._mpts, self._mplane = [], None
             self.refresh_control()
@@ -1443,6 +1480,8 @@ class MainWindow(QMainWindow):
             return None
         m = {'type': 'poly', 'pts': self._mpts, 'closed': bool(closed and len(self._mpts) >= 3)}
         self.s.push_measure_undo()
+        if self.s.active_plan:
+            m['plan'] = self.s.active_plan
         self.s.measures.append(m)
         self._mpts = []
         self._draw_measures()
@@ -1455,7 +1494,9 @@ class MainWindow(QMainWindow):
         self.view.remove_prefix('meas:')
         z0 = self.s.zero_z() if self.s.scans else 0.0
         self.z0 = z0
-        items = [(m, False) for m in self.s.measures]
+        vis = [m for m in self.s.measures
+               if not self.s.active_plan or m.get('plan') == self.s.active_plan]
+        items = [(m, False) for m in vis]
         if self._mpts:
             items.append(({'type': self.measure_mode, 'pts': self._mpts}, True))
         labels = []
@@ -1785,6 +1826,54 @@ class MainWindow(QMainWindow):
         if not self.snap_on:
             self.view.remove('snap')
         self.set_status('привязка включена' if self.snap_on else 'привязка выключена', log=False)
+
+    # ── сохранённые планы (Ф8/Ф9) ────────────────────────────────────────
+    def _activate_plan(self, plan_id):
+        """Активный план: его сечение — на вид, камера — вдоль нормали (орто),
+        новые замеры привязываются к плану, на сцене — только его замеры."""
+        import copy
+        plan = self.s.plan_by_id(plan_id)
+        if plan is None:
+            return
+        self.s.section = copy.deepcopy(plan['state'])
+        self.s.active_plan = plan_id
+        self.refresh_clip_boxes()
+        self._draw_section()
+        self._refresh_section_panel()
+        self._draw_measures()
+        self.refresh_control()
+        self._sync_ribbon()
+        # вид вдоль нормали плана, ортопроекция
+        import section as sec
+        n = sec.normal(self.s.section)
+        lo, hi = self._visible_bbox()
+        self.view.set_parallel(True)
+        self.view.fit(lo, hi, direction=n if abs(n[2]) < 0.9 else np.array([0, 0, 1.0]),
+                      up_hint=np.array([0, 1.0, 0]) if abs(n[2]) > 0.9 else np.array([0, 0, 1.0]))
+        self.set_status(f"план «{plan['name']}» активен: замеры этого плана; Esc/«Завершить план» — обзор")
+
+    def _deactivate_plan(self):
+        self.s.active_plan = None
+        self._draw_measures()
+        self.refresh_control()
+        self._sync_ribbon()
+        self.set_status('обзор: все замеры')
+
+    def on_plan_dxf(self, plan_id):
+        plan = self.s.plan_by_id(plan_id)
+        if plan is None:
+            return
+        p = QFileDialog.getSaveFileName(self, 'Экспорт плана', f"{plan['name']}.dxf",
+                                        'DXF (*.dxf)')[0]
+        if not p:
+            return
+        import measure_export
+        try:
+            measure_export.write_plan_dxf(self.s, plan, p)
+        except Exception as e:                                # noqa: BLE001
+            self.set_status(f'не сохранилось: {e}')
+            return
+        self.set_status(f'план сохранён: {p}')
 
     def on_measures_export(self, what):
         """Экспорт замеров: CSV (Excel) или 3D-DXF (метры, слои IZM_*)."""
@@ -2648,6 +2737,10 @@ class MainWindow(QMainWindow):
             return self._mesh_tree_visible(key, vis)
         if key.startswith('cbox:'):
             return self._cbox_tree_visible(key, vis)
+        if key.startswith('plan:'):
+            if key == self.tree_panel.PLANS:
+                return
+            return self._activate_plan(key[5:])     # глаз плана — активировать
         if key.startswith('elem:'):
             return self._element_tree_visible(key, vis)
         self._vis_backup = None

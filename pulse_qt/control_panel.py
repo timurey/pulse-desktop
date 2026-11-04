@@ -229,6 +229,32 @@ class _BoxFields(QFrame):
                          'yaw_deg': self.spins['yaw'].value()})
 
 
+class _PlanRow(QFrame):
+    """Строка плана: глаз — активен, имя, DXF, удаление."""
+
+    def __init__(self, pl, active, panel):
+        super().__init__()
+        self.setObjectName('PairRow')
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(8, 4, 4, 4)
+        lay.setSpacing(6)
+        self.eye = W.Switch(bool(active))
+        self.eye.toggled.connect(lambda v: panel.action.emit('plan_eye', (pl['id'], v)))
+        self.eye.setToolTip('Активировать план (сечение + его замеры) / завершить')
+        lay.addWidget(self.eye)
+        name = QLabel(pl.get('name', pl['id']))
+        name.setStyleSheet('font-size:12px;' + ('font-weight:600;' if active else ''))
+        name.setWordWrap(True)
+        lay.addWidget(name, 1)
+        st = pl.get('state', {})
+        if st.get('base') == 'z' or abs((st.get('n0') or [0, 0, 1])[2]) > 0.9:
+            lay.addWidget(W.label(f"H={st.get('c', 0):.2f}", 'Hint'))
+        lay.addWidget(W.tool(W.THEME.icon('mdi6.file-cad-box', 'ink3'), tip='Экспорт плана в DXF',
+                             icon_only=True, cb=lambda: panel.action.emit('plan_dxf', pl['id'])))
+        lay.addWidget(W.tool(W.THEME.icon('mdi6.close', 'ink3'), tip='Удалить план (замеры останутся)',
+                             icon_only=True, cb=lambda: panel.action.emit('plan_delete', pl['id'])))
+
+
 class ControlPanel(_Panel):
     action = Signal(str, object)
     MEASURES = [('расстояние', 'dist'), ('отметка', 'height'), ('до плоскости', 'plane'), ('ломаная', 'poly')]
@@ -275,6 +301,19 @@ class ControlPanel(_Panel):
         self.box_fields.apply.connect(lambda d: self.action.emit('box_edit', d))
         sb.add(self.box_fields)
         self.box_fields.setVisible(False)
+        sp = self.add(W.Section('Планы'), 'plans')
+        self.plan_list = QVBoxLayout()
+        self.plan_list.setSpacing(4)
+        sp.add(self.plan_list)
+        self.plan_empty = W.label('планов нет — сохраните текущее сечение', 'Hint', wrap=True)
+        sp.add(self.plan_empty)
+        sp.add(W.hbox(W.button('Сохранить сечение', lambda: self.action.emit('plan_add', None),
+                               icon=t.icon('mdi6.map-plus'), tip='Текущее сечение — новый план'),
+                      W.button('Завершить план', lambda: self.action.emit('plan_done', None),
+                               icon=t.icon('mdi6.map-marker-minus'),
+                               tip='Выйти из плана: все замеры, обзор'), spacing=6))
+        sp.add(W.label('Активный план: на сцене только его замеры, новые привязываются к нему; '
+                       'камера — вид вдоль плоскости. DXF плана — в меню строки.', 'Hint', wrap=True))
         ss = self.add(W.Section('Сечение'), 'section')
         self.sec_mode = W.Segmented([('выкл.', 'off'), ('срез', 'slice'), ('отсечение', 'clip')], 'off')
         self.sec_mode.changed.connect(lambda v: self.action.emit('sec', {'mode': v}))
@@ -383,6 +422,16 @@ class ControlPanel(_Panel):
         self.sec_thick_row.setVisible(st['mode'] == 'slice')
         self.sec_flip_row.setVisible(st['mode'] == 'clip')
         self.sec_desc.setText(desc)
+
+    def set_plans(self, plans, active_id):
+        while self.plan_list.count():
+            w = self.plan_list.takeAt(0).widget()
+            if w is not None:
+                w.hide()
+                w.deleteLater()
+        for pl in plans:
+            self.plan_list.addWidget(_PlanRow(pl, pl['id'] == active_id, self))
+        self.plan_empty.setVisible(not plans)
 
     def set_boxes(self, boxes, sel_id):
         """Список боксов + поля выбранного (sel_id или первый включённый)."""

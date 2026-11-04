@@ -203,7 +203,7 @@ class TreePanel(QFrame):
         """Выделенные узлы дерева проекта (без строк сеток и элементов) в порядке дерева."""
         sel = {it.data(0, ROLE) for it in self.tree.selectedItems()}
         return [k for k in self._items if k in sel
-                and not k.startswith(('mesh:', 'elem:', 'cbox:'))]
+                and not k.startswith(('mesh:', 'elem:', 'cbox:', 'plan:'))]
 
     def select_keys(self, keys):
         self.tree.clearSelection()
@@ -288,6 +288,7 @@ class TreePanel(QFrame):
         self._add_meshes(root, expanded, first)
         self._add_elements(root, expanded, first)
         self._add_boxes(root, expanded, first)
+        self._add_plans(root, expanded, first)
         if cur in self._items:
             tree.setCurrentItem(self._items[cur])
         for k in sel:
@@ -413,6 +414,41 @@ class TreePanel(QFrame):
             self.tree.setItemWidget(it, 0, r)
         g.setExpanded(True)
 
+    PLANS = 'plan:*'                                    # ключ ветви планов
+
+    def _add_plans(self, root, expanded, first):
+        """Ветвь «Планы» (Ф8): глаз — план активен (сечение + его замеры);
+        меню — переименовать, DXF, удалить."""
+        plans = getattr(self.session, 'plans', []) or []
+        if not plans:
+            return
+        fixed = (Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+        g = QTreeWidgetItem(root)
+        g.setData(0, ROLE, self.PLANS)
+        g.setData(0, ROLE + 1, False)
+        g.setFlags(fixed)
+        g.setSizeHint(0, QSize(10, 30))
+        self._items[self.PLANS] = g
+        active = getattr(self.session, 'active_plan', None)
+        row = _Row(self, self.PLANS, 'Планы', active is not None, group=True, count=len(plans))
+        row.setToolTip('Сохранённые сечения. Глаз — активировать план (на сцене его сечение '
+                       'и его замеры, камера вдоль плоскости). Сохранение — «Контроль» → «Планы»')
+        self.tree.setItemWidget(g, 0, row)
+        for pl in plans:
+            key = 'plan:' + pl['id']
+            it = QTreeWidgetItem(g)
+            it.setData(0, ROLE, key)
+            it.setFlags(fixed)
+            it.setSizeHint(0, QSize(10, 30))
+            self._items[key] = it
+            on = pl['id'] == active
+            st = pl.get('state', {})
+            chip = f"H={st.get('c', 0):.2f}" if abs((st.get('n0') or [0, 0, 1])[2]) > 0.9 else ''
+            r = _Row(self, key, pl.get('name', pl['id']), on, chip=(chip, 'mut'))
+            r.setToolTip('Глаз — активировать план; меню: переименовать, DXF, удалить')
+            self.tree.setItemWidget(it, 0, r)
+        g.setExpanded(True)
+
     def _menu(self, pos):
         it = self.tree.itemAt(pos)
         key = it.data(0, ROLE) if it is not None else None
@@ -424,6 +460,15 @@ class TreePanel(QFrame):
             a = m.addAction(t.icon(icon) if icon else QIcon(), text)
             a.setEnabled(enabled)
             a.triggered.connect(lambda: self.action.emit(name, key))
+        if key is not None and key.startswith('plan:'):
+            if key != self.PLANS:
+                act('Активировать', 'plan_eye_on', 'mdi6.map-marker')
+                act('Переименовать', 'plan_rename', 'mdi6.pencil-outline')
+                act('Экспорт плана в DXF…', 'plan_dxf', 'mdi6.file-cad-box')
+                m.addSeparator()
+                act('Удалить план (замеры останутся)', 'plan_delete', 'mdi6.delete-outline')
+            m.exec(self.tree.viewport().mapToGlobal(pos))
+            return
         if key is not None and key.startswith('cbox:'):
             if key == self.CBOXES:
                 act('Включить все', 'cbox_show_all', 'mdi6.eye-outline')

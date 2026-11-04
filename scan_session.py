@@ -246,6 +246,8 @@ class Session:
         self.measure_undo = deque(maxlen=10)   # снимки measures перед мутациями (не сериализуется)
         self.section = None          # сечение (section.py), общая система
         self.clip_boxes = []         # боксы отсечения (clip.py), общая система
+        self.plans = []              # сохранённые планы (Ф8): {'id', 'name', 'state'}
+        self.active_plan = None      # id активного плана (None — обзор, замеры без фильтра)
         self.elements = []           # элементы (fits.py), в канон. системе своих сканов
         self._units = {}             # запечённые группы: gid → BakedGroup (по полю baked в дереве)
         self.last_conflicts = []     # связи, отключённые последним «Принять позу» (reject_conflicts)
@@ -272,6 +274,8 @@ class Session:
         s.measures = proj.get('measures', [])
         s.section = proj.get('section')
         s.clip_boxes = proj.get('clip_boxes', [])
+        s.plans = proj.get('plans', [])
+        s.active_plan = proj.get('active_plan')
         s.elements = proj.get('elements', [])
         s.apply_visibility()
         s.sync_filters()
@@ -341,6 +345,7 @@ class Session:
                 'tree': self.tree.to_json(),
                 'zero': self.zero, 'measures': _jsonable(self.measures), 'section': _jsonable(self.section),
                 'clip_boxes': _jsonable(self.clip_boxes),
+                'plans': _jsonable(self.plans), 'active_plan': self.active_plan,
                 'elements': _jsonable(self.elements),
                 'pairs': [_jsonable(e) for e in auto],
                 'manual_edges': [_jsonable(e) for e in manual]}
@@ -1114,6 +1119,31 @@ class Session:
         n = len(self.clip_boxes)
         self.clip_boxes = [b for b in self.clip_boxes if b.get('id') != box_id]
         return len(self.clip_boxes) < n
+
+    # ── сохранённые планы (Ф8) ───────────────────────────────────────────
+    def add_plan(self, name, state):
+        """Сохранить текущее сечение как план (копия state). → dict плана."""
+        import copy
+        n = 1
+        while any(pl.get('id') == f'plan{n}' for pl in self.plans):
+            n += 1
+        pl = {'id': f'plan{n}', 'name': name or f'План {n}', 'state': copy.deepcopy(state)}
+        self.plans.append(pl)
+        return pl
+
+    def plan_by_id(self, plan_id):
+        return next((pl for pl in self.plans if pl.get('id') == plan_id), None)
+
+    def remove_plan(self, plan_id):
+        """Удалить план; его замеры остаются, но отвязываются (m.pop('plan'))."""
+        n = len(self.plans)
+        self.plans = [pl for pl in self.plans if pl.get('id') != plan_id]
+        for m in self.measures:
+            if m.get('plan') == plan_id:
+                m.pop('plan', None)
+        if self.active_plan == plan_id:
+            self.active_plan = None
+        return len(self.plans) < n
 
     # ── автостыковка ─────────────────────────────────────────────────────
     def run_auto(self, progress=None, yaw='manhattan', reuse=True, by_tree=None, combos=None, cancel=None):
