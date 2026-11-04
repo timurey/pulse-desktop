@@ -1,37 +1,131 @@
 """Правая панель вкладки «Контроль»: нулевой уровень, сечение, замеры."""
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import QFrame, QHBoxLayout, QVBoxLayout, QLabel, QDoubleSpinBox, QSlider
+from PySide6.QtGui import QDoubleValidator
+from PySide6.QtWidgets import (QFrame, QHBoxLayout, QVBoxLayout, QLabel, QDoubleSpinBox, QSlider,
+                               QLineEdit)
 
 import measure
 from . import widgets as W
 from .inspector import _Panel
 
 
+def _num(v):
+    """Число в поле ввода: без лишних нулей, точка → запятая не нужна (локаль ок)."""
+    return f'{float(v):.3f}'
+
+
+_fval = QDoubleValidator(-1e6, 1e6, 3)
+
+
 class _MeasureRow(QFrame):
+    """Строка замера: значение, детали; H — отметка в подписи, ✎ — правка
+    названия, примечания и координат вершин числами (общая система, метры)."""
+
     def __init__(self, i, m, z0, panel):
         super().__init__()
         self.setObjectName('PairRow')
-        lay = QHBoxLayout(self)
+        self.i, self.m, self.z0, self.panel = i, m, z0, panel
+        self._edit = None
+        lay = QVBoxLayout(self)
         lay.setContentsMargins(8, 6, 4, 6)
-        lay.setSpacing(6)
+        lay.setSpacing(4)
+        top = QHBoxLayout()
+        top.setSpacing(6)
         num = QLabel(str(i + 1))
         num.setFixedSize(18, 18)
         num.setAlignment(Qt.AlignCenter)
         num.setStyleSheet('background:#ffd84a; color:#16181d; border-radius:5px; font-size:11px; font-weight:600;')
-        lay.addWidget(num, 0, Qt.AlignTop)
+        top.addWidget(num, 0, Qt.AlignTop)
         txt = QVBoxLayout()
         txt.setSpacing(1)
-        a = QLabel(f"{measure.TITLES.get(m['type'], m['type'])}: {measure.label(m, z0)}")
-        a.setStyleSheet('font-size:12px;')
+        head = (m.get('name') or measure.TITLES.get(m['type'], m['type']))
+        a = QLabel(head)
+        a.setStyleSheet('font-size:12px; font-weight:600;')
         a.setWordWrap(True)
         txt.addWidget(a)
-        for line in measure.details(m, z0)[1:]:
-            b = W.label(line, 'Hint', wrap=True)
+        val = measure.label(m, z0)
+        if val:
+            b = W.label(val, 'KV_v', wrap=True)
             txt.addWidget(b)
-        lay.addLayout(txt, 1)
-        lay.addWidget(W.tool(W.THEME.icon('mdi6.close', 'ink3'), tip='Удалить замер', icon_only=True,
+        for line in measure.details(m, z0)[1:]:
+            c = W.label(line, 'Hint', wrap=True)
+            txt.addWidget(c)
+        if m.get('note'):
+            txt.addWidget(W.label('примечание: ' + m['note'], 'Hint', wrap=True))
+        top.addLayout(txt, 1)
+        t = W.THEME
+        top.addWidget(W.tool(t.icon('mdi6.alpha-h-circle-outline', 'ink3' if m.get('with_h') else 'line2'),
+                             tip='Отметка H=±X.XXX первой точки в подписи', icon_only=True,
+                             cb=lambda: panel.action.emit('measure_h', i)), 0, Qt.AlignTop)
+        top.addWidget(W.tool(t.icon('mdi6.pencil-outline', 'ink3'), tip='Правка: название, примечание, координаты',
+                             icon_only=True, cb=self._toggle_edit), 0, Qt.AlignTop)
+        top.addWidget(W.tool(t.icon('mdi6.close', 'ink3'), tip='Удалить замер', icon_only=True,
                              cb=lambda: panel.action.emit('measure_delete', i)), 0, Qt.AlignTop)
+        lay.addLayout(top)
+
+    def _toggle_edit(self):
+        if self._edit is None:
+            self._edit = _MeasureEdit(self.m, self.i, self.panel)
+            self.layout().addWidget(self._edit)
+            self._edit.show()
+        else:
+            self._edit.setParent(None)
+            self._edit.deleteLater()
+            self._edit = None
+
+
+class _MeasureEdit(QFrame):
+    """Раскрытая правка замера: название, примечание, XYZ вершин, «Применить»."""
+
+    def __init__(self, m, index, panel):
+        super().__init__()
+        self.m, self.index, self.panel = m, index, panel
+        self.setObjectName('SecBody')
+        g = QVBoxLayout(self)
+        g.setContentsMargins(2, 2, 2, 4)
+        g.setSpacing(4)
+        self.name_e = QLineEdit(m.get('name', ''))
+        self.name_e.setPlaceholderText('Название')
+        g.addWidget(self.name_e)
+        self.note_e = QLineEdit(m.get('note', ''))
+        self.note_e.setPlaceholderText('Примечание')
+        g.addWidget(self.note_e)
+        self.pts = []
+        for k, p in enumerate(m.get('pts', [])):
+            row = QHBoxLayout()
+            row.setSpacing(3)
+            row.addWidget(QLabel(f'Т{k + 1}'))
+            xyz = []
+            for c in range(3):
+                e = QLineEdit(_num(p[c]))
+                e.setFixedWidth(64)
+                e.setAlignment(Qt.AlignRight)
+                e.setValidator(_fval)
+                xyz.append(e)
+                row.addWidget(e)
+            self.pts.append(xyz)
+            g.addLayout(row)
+        g.addWidget(W.button('Применить', self._apply,
+                             icon=W.THEME.icon('mdi6.check'),
+                             tip='Enter в поле — тоже применить (правки координат попадают в Ctrl+Z)'))
+        for e in [x for xyz in self.pts for x in xyz] + [self.name_e, self.note_e]:
+            e.returnPressed.connect(self._apply)
+
+    def _apply(self):
+        m, panel = self.m, self.panel
+        try:
+            new_pts = [[[float(e.text().replace(',', '.')) for e in xyz] for xyz in self.pts]]
+        except ValueError:
+            return                                   # незаполненное поле — не применять
+        if new_pts[0] == [list(map(float, p)) for p in m.get('pts', [])] \
+                and self.name_e.text() == m.get('name', '') \
+                and self.note_e.text() == m.get('note', ''):
+            return                                   # ничего не поменялось
+        panel.action.emit('measure_edit', {'index': self.index,
+                                           'pts': new_pts[0],
+                                           'name': self.name_e.text().strip(),
+                                           'note': self.note_e.text().strip()})
 
 
 class ControlPanel(_Panel):

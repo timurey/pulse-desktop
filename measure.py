@@ -105,24 +105,34 @@ def evaluate(m, z0=0.0):
 
 
 def label(m, z0=0.0):
-    """Короткая подпись значения замера (на 3D-виде)."""
+    """Короткая подпись значения замера (на 3D-виде); с флагом with_h —
+    вторая строка «H=±X.XXX» (отметка первой точки от нулевого уровня)."""
     v = evaluate(m, z0)
     t = m['type']
     if t == 'dist' and v:
         s = f"{v['length']:.3f} м"
         if abs(v['dz']) > 0.005 and v['horizontal'] > 0.005:
             s += f"  (гор. {v['horizontal']:.3f}, Δh {v['dz']:+.3f})"
-        return s
+        return _with_h(s, m, z0)
     if t == 'height' and v:
         return v['elevation']
     if t == 'plane' and v:
-        return f"⟂ {v['distance']:.3f} м"
+        return _with_h(f"⟂ {v['distance']:.3f} м", m, z0)
     if t == 'poly' and v:
         s = f"{v['length']:.2f} м"
         if 'area' in v:
             s = f"S {v['area']:.2f} м²" + (f" (план {v['area_plan']:.2f})" if abs(v['area'] - v['area_plan']) > 0.01 else '')
+        s = _with_h(s, m, z0)
         return s
     return ''
+
+
+def _with_h(s, m, z0):
+    """Вторая строка подписи «H=…» (кнопка H у замера)."""
+    if m.get('with_h') and m.get('pts'):
+        s = s or '·'
+        return f"{s}\nH={elevation(m['pts'][0][2], z0)}"
+    return s
 
 
 def details(m, z0=0.0):

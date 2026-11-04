@@ -100,3 +100,45 @@ class TestSnapTargets(unittest.TestCase):
         mids = [p for p, k in got if k == 'mid']
         self.assertEqual(len(mids), 3)                     # 2 рёбра + замыкающее
         self.assertTrue(any(np.allclose(m, [1.0, 1.0, 0]) for m in mids))  # замыкающее 2,2→0,0
+
+
+class TestMeasureEdit(unittest.TestCase):
+    """Ф3/Ф4: H-отметка в подписи, числовая правка координат, name/note."""
+
+    @classmethod
+    def setUpClass(cls):
+        import tempfile
+        cls.tmp = tempfile.mkdtemp()
+        cls.origins = write_scans(cls.tmp)
+        cls.paths = [str(Path(cls.tmp) / n) for n in cls.origins]
+        cls.s = Session.from_scans(cls.paths[:1])
+
+    def test_with_h_label(self):
+        m = {'type': 'dist', 'pts': [[0, 0, 1.2], [3, 0, 1.2]]}
+        self.assertNotIn('H=', M.label(m, z0=0.0))
+        m['with_h'] = True
+        lab = M.label(m, z0=0.0)
+        self.assertIn('H=+1.200', lab)
+        m['pts'][0][2] = -0.15
+        self.assertIn('H=−0.150', M.label(m, z0=0.0))
+
+    def test_edit_recomputes(self):
+        """Правка координат вершины меняет значение замера."""
+        m = {'type': 'dist', 'pts': [[0, 0, 0], [2, 0, 0]]}
+        self.assertAlmostEqual(M.evaluate(m, 0.0)['length'], 2.0)
+        m['pts'][1] = [5.0, 0.0, 0.0]
+        self.assertAlmostEqual(M.evaluate(m, 0.0)['length'], 5.0)
+
+    def test_name_note_roundtrip(self):
+        self.s.measures = [{'type': 'dist', 'pts': [[0, 0, 0], [1, 0, 0]],
+                            'name': 'Ширина зала', 'note': 'по плинтусам', 'with_h': True}]
+        p = Path(self.tmp) / 'mn.pulse'
+        self.s.save(p)
+        from scan_session import Session
+        s2 = Session.from_project(p)
+        m = s2.measures[0]
+        self.assertEqual(m['name'], 'Ширина зала')
+        self.assertEqual(m['note'], 'по плинтусам')
+        self.assertTrue(m['with_h'])
+        # старый проект без name/note — .get() ничего не ломает
+        self.assertIsNone(self.s.measures[0].get('zzz'))

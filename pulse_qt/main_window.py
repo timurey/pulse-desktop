@@ -1204,6 +1204,29 @@ class MainWindow(QMainWindow):
             self.set_measure_mode(arg)
         elif name == 'done':
             self.close_tool()
+        elif name == 'measure_h':
+            if 0 <= arg < len(self.s.measures):
+                self.s.push_measure_undo()
+                self.s.measures[arg]['with_h'] = not self.s.measures[arg].get('with_h')
+                self._draw_measures()
+                self.refresh_control()
+        elif name == 'measure_edit':
+            i = arg['index']
+            if 0 <= i < len(self.s.measures):
+                self.s.push_measure_undo()
+                m = self.s.measures[i]
+                m['pts'] = [list(map(float, p)) for p in arg['pts']]
+                if arg['name']:
+                    m['name'] = arg['name']
+                else:
+                    m.pop('name', None)
+                if arg['note']:
+                    m['note'] = arg['note']
+                else:
+                    m.pop('note', None)
+                self._draw_measures()
+                self.refresh_control()
+                self.set_status('замер изменён (Ctrl+Z — вернуть)')
         elif name == 'snap':
             self.snap_on = bool(arg)
             if not self.snap_on:
