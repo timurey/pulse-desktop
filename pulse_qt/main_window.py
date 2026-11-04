@@ -11,6 +11,7 @@
 """
 
 import json
+import os
 import platform
 import time
 from pathlib import Path
@@ -299,7 +300,9 @@ class MainWindow(QMainWindow):
         self._mesh_cancel = False
         self.downloading = False
         self._saved_sig = None
-        self._closing_ok = False
+        # автопроверки (PULSE_GUI_CHECK=1): закрывать без «Сохранить изменения?» —
+        # иначе окно теста ждёт щелчка человека
+        self._closing_ok = os.environ.get('PULSE_GUI_CHECK') == '1'
         # ручной режим
         self.fixed = self.moving = None
         self.T_moving = None
