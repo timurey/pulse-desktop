@@ -9,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import numpy as np                                # noqa: E402
 import measure as M                               # noqa: E402
+import measure_export                             # noqa: E402
 import test_registration as tr                    # noqa: E402
 from scan_session import Session                  # noqa: E402
 from test_session import write_scans              # noqa: E402
@@ -142,3 +143,64 @@ class TestMeasureEdit(unittest.TestCase):
         self.assertTrue(m['with_h'])
         # старый проект без name/note — .get() ничего не ломает
         self.assertIsNone(self.s.measures[0].get('zzz'))
+
+
+class TestExportMeasures(unittest.TestCase):
+    """Ф6/Ф7: CSV по вершинам, DXF слои IZM_* (паттерн test_drawing)."""
+
+    @classmethod
+    def setUpClass(cls):
+        import tempfile
+        cls.tmp = tempfile.mkdtemp()
+        cls.origins = write_scans(cls.tmp)
+        cls.paths = [str(Path(cls.tmp) / n) for n in cls.origins]
+        cls.s = Session.from_scans(cls.paths[:1])
+        cls.s.measures = [
+            {'type': 'dist', 'pts': [[0, 0, 0], [2, 0, 0]], 'name': 'Ширина'},
+            {'type': 'height', 'pts': [[1.0, 1.0, 1.2]], 'note': 'подоконник'},
+            {'type': 'poly', 'pts': [[0, 0, 0], [2, 0, 0], [2, 2, 0]], 'closed': True},
+        ]
+
+    def test_csv_rows(self):
+        rows = measure_export.csv_rows(self.s, z0=0.0)
+        # строка на каждую вершину: 2 + 1 + 3
+        self.assertEqual(len(rows), 6)
+        self.assertEqual(rows[0][1], 'Ширина')
+        self.assertEqual(rows[0][2], 'Расстояние')
+        self.assertEqual(rows[0][3], 'P1')
+        self.assertAlmostEqual(float(rows[0][7]), 2.0, places=3)      # значение на P1
+        self.assertEqual(rows[1][7], '')                              # на P2 значение пусто
+        self.assertAlmostEqual(float(rows[2][7]), 1.2, places=3)      # height
+        self.assertEqual(rows[3][2], 'Площадь')
+        self.assertAlmostEqual(float(rows[3][7]), 2.0, places=3)      # треугольник ½·2·2
+        self.assertEqual(rows[2][9], 'подоконник')
+
+    def test_write_csv(self):
+        out = Path(self.tmp) / 'z.csv'
+        measure_export.write_csv(self.s, out)
+        raw = out.read_bytes()
+        self.assertEqual(raw[:3], b'\xef\xbb\xbf')                    # utf-8-sig
+        text = raw.decode('utf-8-sig')
+        self.assertIn('Ширина', text)
+        self.assertEqual(text.count('\r\n'), 7)                       # заголовок + 6
+
+    def test_write_dxf(self):
+        import ezdxf
+        out = Path(self.tmp) / 'z.dxf'
+        measure_export.write_dxf(self.s, out)
+        doc = ezdxf.readfile(out)
+        self.assertEqual(doc.header['$INSUNITS'], 6)                  # метры
+        layers = {l.dxf.name: l.color for l in doc.layers}
+        for name, aci in measure_export.DXF_LAYERS.items():
+            self.assertEqual(layers.get(name), aci, name)
+        msp = doc.modelspace()
+        dists = [e for e in msp if e.dxf.layer == 'IZM_DIST' and e.dxftype() == 'LINE']
+        self.assertEqual(len(dists), 1)
+        areas = [e for e in msp if e.dxf.layer == 'IZM_AREA']
+        self.assertEqual(len(areas), 1)                               # closed poly
+        self.assertTrue(areas[0].closed)
+        points = [e for e in msp if e.dxf.layer == 'IZM_POINT']
+        self.assertEqual(len(points), 1)
+        texts = [e.dxf.text for e in msp if e.dxf.layer == 'IZM_TEXT']
+        self.assertTrue(any('Ширина = 2.000' in t for t in texts))
+        self.assertTrue(any('2.000 м²' in t for t in texts))

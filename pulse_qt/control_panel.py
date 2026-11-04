@@ -341,6 +341,11 @@ class ControlPanel(_Panel):
         s1.add(self.list)
         self.empty = W.label('замеров нет — выберите тип замера и щёлкайте по облаку', 'Hint', wrap=True)
         s1.add(self.empty)
+        s1.add(W.hbox(W.button('Экспорт CSV…', lambda: self.action.emit('measures_csv', None),
+                               icon=t.icon('mdi6.file-delimited-outline'), tip='Все замеры по вершинам (Excel)'),
+                      W.button('Экспорт DXF…', lambda: self.action.emit('measures_dxf', None),
+                               icon=t.icon('mdi6.file-cad-box'), tip='Замеры в 3D-DXF (метры, слои IZM_* — как у Оттиска)'),
+                      spacing=6))
         s1.add(W.button('Очистить замеры', lambda: self.action.emit('measure_clear', None),
                         icon=t.icon('mdi6.delete-sweep-outline')))
         self.finish()

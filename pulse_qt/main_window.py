@@ -1308,6 +1308,10 @@ class MainWindow(QMainWindow):
                 self.refresh_clip_boxes()
                 self.tree_panel.rebuild()
                 self.set_status('бокс изменён')
+        elif name == 'measures_csv':
+            self.on_measures_export('csv')
+        elif name == 'measures_dxf':
+            self.on_measures_export('dxf')
         elif name == 'measure_h':
             if 0 <= arg < len(self.s.measures):
                 self.s.push_measure_undo()
@@ -1781,6 +1785,25 @@ class MainWindow(QMainWindow):
         if not self.snap_on:
             self.view.remove('snap')
         self.set_status('привязка включена' if self.snap_on else 'привязка выключена', log=False)
+
+    def on_measures_export(self, what):
+        """Экспорт замеров: CSV (Excel) или 3D-DXF (метры, слои IZM_*)."""
+        import measure_export
+        if not self.s.measures:
+            self.set_status('замеров нет')
+            return
+        ext = 'csv' if what == 'csv' else 'dxf'
+        p = QFileDialog.getSaveFileName(self, 'Экспорт замеров', f'{short(self.s.frame)}_замеры.{ext}',
+                                        f'{ext.upper()} (*.{ext})')[0]
+        if not p:
+            return
+        try:
+            fn = measure_export.write_csv if what == 'csv' else measure_export.write_dxf
+            fn(self.s, p)
+        except Exception as e:                                # noqa: BLE001
+            self.set_status(f'не сохранилось: {e}')
+            return
+        self.set_status(f'замеры экспортированы: {p} ({len(self.s.measures)} шт.)')
 
     def on_undo(self):
         """Ctrl+Z: в режиме замеров — отмена замера (пустой стек не проваливается
