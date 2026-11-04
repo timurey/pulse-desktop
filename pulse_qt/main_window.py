@@ -151,6 +151,8 @@ class Viewport(QWidget):
                             checkable=True, icon_only=True)
         self.b_fit = W.tool(t.icon('mdi6.fit-to-screen-outline'), tip='Показать всё', cb=win.fit_all,
                             icon_only=True)
+        self.b_view_save = W.tool(t.icon('mdi6.camera-outline'), tip='Сохранить вид (ветвь «Виды» в дереве)',
+                                  cb=win.save_current_view, icon_only=True)
         self.b_proj = W.tool(t.icon('mdi6.perspective-less', 'ink2', 'accent'),
                              tip='Ортогональная проекция (O); выключено — перспектива',
                              cb=win.toggle_projection, checkable=True, icon_only=True)
@@ -191,29 +193,43 @@ class Viewport(QWidget):
         self.view.cameraChanged.connect(self.update_overlays)
 
     def set_labels(self, items):
-        """Подписи в точках мира: [(точка, текст)] — плашки поверх 3D-вида."""
-        for lab, _ in self.labels:
+        """Подписи в точках мира: [(точка, текст)] или [(точка, текст, tag, off)];
+        tag — ключ для драга/хит-теста, off — смещение плашки в мировых метрах
+        (Ф13: [dx, dy, dz], линия-выноска от точки рисуется вызывающим)."""
+        for lab, _, *_ in self.labels:
             lab.hide()
             lab.deleteLater()
         self.labels = []
-        for pt, text in items:
+        for it in items:
+            pt, text = it[0], it[1]
+            tag = it[2] if len(it) > 2 else None
+            off = np.asarray(it[3], float) if len(it) > 3 and it[3] is not None else None
             lab = QLabel(text, self)
             lab.setObjectName('MLabel')
             lab.adjustSize()
             lab.show()
-            self.labels.append((lab, np.asarray(pt, float)))
-        self._place_labels()
+            self.labels.append((lab, np.asarray(pt, float), tag, off))
 
     def _place_labels(self):
         if not self.labels:
             return
-        P = np.array([p for _, p in self.labels])
+        P = np.array([p + (off if off is not None else 0) for _, p, _, off in self.labels])
         s_, _, front = self.view.project(P)
-        for (lab, _), (x, y), f in zip(self.labels, s_, front):
+        for (lab, _, _, _), (x, y), f in zip(self.labels, s_, front):
             ok = f and -50 < x < self.width() + 50 and -20 < y < self.height() + 20
             lab.setVisible(bool(ok))
             if ok:
                 lab.move(int(x - lab.width() / 2), int(y - lab.height() - 6))
+
+    def label_at(self, x, y):
+        """Плашка под курсором → (pt, tag, off) или None (для драга подписей)."""
+        for lab, pt, tag, off in self.labels:
+            if tag is None or not lab.isVisible():
+                continue
+            g = lab.geometry()
+            if g.adjusted(-4, -4, 4, 4).contains(int(x), int(y)):
+                return pt, tag, off
+        return None
 
     def flash(self, text, ms=3500):
         """Короткое заметное сообщение над 3D-видом (не перетирается фоновым статусом)."""
@@ -344,6 +360,7 @@ class MainWindow(QMainWindow):
         self.level_ring = None                   # транспортир горизонта: {'a','b','L0','c','r','R'}
         self.snap_on = True                      # привязка замеров (B): вершины/центры важнее облака
         self.cbox_sel = None                     # выбранный бокс отсечения (панель)
+        self._label_drag = None                  # драг подписи замера (Ф13)
         self.zero_show = True
         self.z0 = None
         self.points_hidden = False               # «Поверхность»: показывать только сетки
@@ -1282,6 +1299,21 @@ class MainWindow(QMainWindow):
             self.set_measure_mode(arg)
         elif name == 'done':
             self.close_tool()
+        elif name == 'view_save':
+            self.save_current_view()
+        elif name == 'view_fly':
+            self.fly_to_view(key[5:])
+        elif name == 'view_rename':
+            v = self.s.view_by_id(key[5:])
+            if v is not None:
+                d = AskDialog(self, 'Переименовать вид', [('Имя', 'text', v.get('name', ''), None)],
+                              'mdi6.pencil-outline', 'Переименовать')
+                if d.exec() and d.values()[0].strip():
+                    v['name'] = d.values()[0].strip()
+                    self.tree_panel.rebuild()
+        elif name == 'view_delete':
+            if self.s.remove_view(key[5:]):
+                self.tree_panel.rebuild()
         elif name == 'plan_add':
             d = AskDialog(self, 'Сохранить сечение как план',
                           [('Имя плана', 'text', f'План {len(self.s.plans) + 1}', None)],
@@ -1489,6 +1521,13 @@ class MainWindow(QMainWindow):
         self.set_status(f"Ломаная: {measure.label(m, self.z0)}")
         return m
 
+    def _meas_index(self, m):
+        """Индекс замера в session.measures (для драга подписи)."""
+        for i, mm in enumerate(self.s.measures):
+            if mm is m:
+                return i
+        return -1
+
     def _draw_measures(self):
         """Замеры поверх облаков: линии, точки, подписи; текущий незаконченный — голубым."""
         self.view.remove_prefix('meas:')
@@ -1521,7 +1560,11 @@ class MainWindow(QMainWindow):
             if not live:
                 txt = f'{k + 1}  {measure.label(m, z0)}'
                 at = P.mean(axis=0) if t != 'height' else P[0]
-                labels.append((at, txt))
+                off = m.get('label_off')
+                labels.append((at, txt, ('meas', self._meas_index(m)), off))
+                if off is not None:
+                    self.view.set_lines(f'meas:lead{k}', np.array([at, at + np.asarray(off, float)]),
+                                        [[0, 1]], None, None, 1.0, col, on_top=True)
         if self.zero_show and self.s.scans and self.tree_panel.layer('grid'):
             lo, hi = self._visible_bbox()
             labels.append(([lo[0] - 1.5, lo[1] - 1.5, z0], '±0.000'))
@@ -1826,6 +1869,24 @@ class MainWindow(QMainWindow):
         if not self.snap_on:
             self.view.remove('snap')
         self.set_status('привязка включена' if self.snap_on else 'привязка выключена', log=False)
+
+    # ── сохранённые виды (Ф14) ───────────────────────────────────────────
+    def save_current_view(self):
+        pos, foc = self.view.cam.GetPosition(), self.view.cam.GetFocalPoint()
+        up = self.view.cam.GetViewUp()
+        d = AskDialog(self, 'Сохранить вид', [('Имя вида', 'text', f'Вид {len(self.s.views) + 1}', None)],
+                      'mdi6.camera-outline', 'Сохранить')
+        if d.exec() and d.values()[0].strip():
+            v = self.s.add_view(d.values()[0].strip(), pos, foc, up)
+            self.tree_panel.rebuild()
+            self.set_status(f"вид «{v['name']}» сохранён (ветвь «Виды»)")
+
+    def fly_to_view(self, vid):
+        v = self.s.view_by_id(vid)
+        if v is None:
+            return
+        self.view.look_at(v['target'], v['eye'], v['up'])
+        self.set_status(f"вид «{v['name']}»")
 
     # ── сохранённые планы (Ф8/Ф9) ────────────────────────────────────────
     def _activate_plan(self, plan_id):
@@ -3053,6 +3114,8 @@ class MainWindow(QMainWindow):
         elif name == 'fly_to':
             self.fly_to_scan(key)
         elif name == 'focus':
+            if key and key.startswith('view:'):
+                return self.fly_to_view(key[5:])
             self.focus_node(key)
 
     def bake_group(self, key=None, bake=True):
@@ -4401,6 +4464,11 @@ class MainWindow(QMainWindow):
         manual = self.mode == 'manual' and self.moving is not None and self.T_moving is not None
         if self.measure_mode and kind in ('press', 'release') and ev.button() == Qt.LeftButton:
             if kind == 'press':
+                hit = self.vp.label_at(x, y)             # драг подписи замера (Ф13)
+                if hit is not None and hit[1] and hit[1][0] == 'meas' and 0 <= hit[1][1] < len(self.s.measures):
+                    self.s.push_measure_undo()
+                    self._label_drag = {'i': hit[1][1], 'pt': np.asarray(hit[0], float)}
+                    return True
                 self._mclick = (x, y)
                 return False                             # перетаскивание — по-прежнему вращение вида
             if kind == 'release' and self._mclick is not None:
@@ -4409,6 +4477,34 @@ class MainWindow(QMainWindow):
                 if abs(x - x0) + abs(y - y0) < 5:
                     self.measure_click(x, y)
                 return False
+        if kind == 'press' and ev.button() == Qt.LeftButton and not manual:
+            hit = self.vp.label_at(x, y)
+            if hit is not None and hit[1] and hit[1][0] == 'meas':
+                i = hit[1][1]
+                if 0 <= i < len(self.s.measures):
+                    self.s.push_measure_undo()
+                    self._label_drag = {'i': i, 'pt': np.asarray(hit[0], float)}
+                    return True
+        if kind == 'move' and getattr(self, '_label_drag', None) is not None:
+            g = self._label_drag
+            m = self.s.measures[g['i']]
+            z0v = self.view.basis()[:, 2]
+            p0 = g['pt'] + (np.asarray(m.get('label_off', [0, 0, 0]), float) if m.get('label_off') is not None
+                            else np.zeros(3))
+            o, dvec = self.view.ray(x, y)
+            den = dvec @ z0v
+            if abs(den) > 1e-9:
+                q = o + ((p0 - o) @ z0v) / den * dvec
+                off = q - g['pt']
+                if np.linalg.norm(off) > 0.02:
+                    m['label_off'] = [float(v) for v in off]
+                else:
+                    m.pop('label_off', None)
+                self._draw_measures()
+            return True
+        if kind == 'release' and getattr(self, '_label_drag', None) is not None:
+            self._label_drag = None
+            return True
         if kind == 'press' and ev.button() == Qt.LeftButton:
             if manual and self.pivot_pick and mods & (Qt.ControlModifier | Qt.MetaModifier):
                 want = self.fixed if self.pivot_A is None else self.moving

@@ -313,5 +313,19 @@ class TestSession(unittest.TestCase):
         self.assertTrue(out.exists())
 
 
+    def test_views_roundtrip(self):
+        """Ф14: сохранённые виды — roundtrip, удаление."""
+        s = Session.from_scans(self.paths[:1])
+        v = s.add_view('Вход', [1, 2, 3], [4, 5, 6], [0, 0, 1])
+        p = Path(self.tmp) / 'vw.pulse'
+        s.save(p)
+        s2 = Session.from_project(p)
+        got = s2.view_by_id(v['id'])
+        self.assertEqual(got['name'], 'Вход')
+        self.assertEqual(got['eye'], [1, 2, 3])
+        self.assertTrue(s2.remove_view(v['id']))
+        self.assertIsNone(s2.view_by_id(v['id']))
+
+
 if __name__ == '__main__':
     unittest.main()

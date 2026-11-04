@@ -203,7 +203,7 @@ class TreePanel(QFrame):
         """Выделенные узлы дерева проекта (без строк сеток и элементов) в порядке дерева."""
         sel = {it.data(0, ROLE) for it in self.tree.selectedItems()}
         return [k for k in self._items if k in sel
-                and not k.startswith(('mesh:', 'elem:', 'cbox:', 'plan:'))]
+                and not k.startswith(('mesh:', 'elem:', 'cbox:', 'plan:', 'view:'))]
 
     def select_keys(self, keys):
         self.tree.clearSelection()
@@ -289,6 +289,7 @@ class TreePanel(QFrame):
         self._add_elements(root, expanded, first)
         self._add_boxes(root, expanded, first)
         self._add_plans(root, expanded, first)
+        self._add_views(root, expanded, first)
         if cur in self._items:
             tree.setCurrentItem(self._items[cur])
         for k in sel:
@@ -449,6 +450,36 @@ class TreePanel(QFrame):
             self.tree.setItemWidget(it, 0, r)
         g.setExpanded(True)
 
+    VIEWS = 'view:*'                                    # ключ ветви видов
+
+    def _add_views(self, root, expanded, first):
+        """Ветвь «Виды» (Ф14): сохранённые позиции камеры; двойной клик — полёт."""
+        views = getattr(self.session, 'views', []) or []
+        if not views:
+            return
+        fixed = (Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+        g = QTreeWidgetItem(root)
+        g.setData(0, ROLE, self.VIEWS)
+        g.setData(0, ROLE + 1, False)
+        g.setFlags(fixed)
+        g.setSizeHint(0, QSize(10, 30))
+        self._items[self.VIEWS] = g
+        row = _Row(self, self.VIEWS, 'Виды', False, group=True, count=len(views))
+        row.setToolTip('Сохранённые позиции камеры. Двойной щелчок — полёт; меню — переименовать, удалить. '
+                       'Сохранить текущий вид — камера в ленте «Результат»')
+        self.tree.setItemWidget(g, 0, row)
+        for v in views:
+            key = 'view:' + v['id']
+            it = QTreeWidgetItem(g)
+            it.setData(0, ROLE, key)
+            it.setFlags(fixed)
+            it.setSizeHint(0, QSize(10, 30))
+            self._items[key] = it
+            r = _Row(self, key, v.get('name', v['id']), False)
+            r.setToolTip('Двойной щелчок — полёт к виду')
+            self.tree.setItemWidget(it, 0, r)
+        g.setExpanded(True)
+
     def _menu(self, pos):
         it = self.tree.itemAt(pos)
         key = it.data(0, ROLE) if it is not None else None
@@ -460,6 +491,14 @@ class TreePanel(QFrame):
             a = m.addAction(t.icon(icon) if icon else QIcon(), text)
             a.setEnabled(enabled)
             a.triggered.connect(lambda: self.action.emit(name, key))
+        if key is not None and key.startswith('view:'):
+            if key != self.VIEWS:
+                act('Лететь к виду', 'view_fly', 'mdi6.airplane')
+                act('Переименовать', 'view_rename', 'mdi6.pencil-outline')
+                m.addSeparator()
+                act('Удалить вид', 'view_delete', 'mdi6.delete-outline')
+            m.exec(self.tree.viewport().mapToGlobal(pos))
+            return
         if key is not None and key.startswith('plan:'):
             if key != self.PLANS:
                 act('Активировать', 'plan_eye_on', 'mdi6.map-marker')

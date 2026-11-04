@@ -248,6 +248,7 @@ class Session:
         self.clip_boxes = []         # боксы отсечения (clip.py), общая система
         self.plans = []              # сохранённые планы (Ф8): {'id', 'name', 'state'}
         self.active_plan = None      # id активного плана (None — обзор, замеры без фильтра)
+        self.views = []              # сохранённые позиции камеры (Ф14): {'id', 'name', 'eye', 'target', 'up'}
         self.elements = []           # элементы (fits.py), в канон. системе своих сканов
         self._units = {}             # запечённые группы: gid → BakedGroup (по полю baked в дереве)
         self.last_conflicts = []     # связи, отключённые последним «Принять позу» (reject_conflicts)
@@ -276,6 +277,7 @@ class Session:
         s.clip_boxes = proj.get('clip_boxes', [])
         s.plans = proj.get('plans', [])
         s.active_plan = proj.get('active_plan')
+        s.views = proj.get('views', [])
         s.elements = proj.get('elements', [])
         s.apply_visibility()
         s.sync_filters()
@@ -346,6 +348,7 @@ class Session:
                 'zero': self.zero, 'measures': _jsonable(self.measures), 'section': _jsonable(self.section),
                 'clip_boxes': _jsonable(self.clip_boxes),
                 'plans': _jsonable(self.plans), 'active_plan': self.active_plan,
+                'views': _jsonable(self.views),
                 'elements': _jsonable(self.elements),
                 'pairs': [_jsonable(e) for e in auto],
                 'manual_edges': [_jsonable(e) for e in manual]}
@@ -1144,6 +1147,25 @@ class Session:
         if self.active_plan == plan_id:
             self.active_plan = None
         return len(self.plans) < n
+
+    # ── сохранённые виды (Ф14) ───────────────────────────────────────────
+    def add_view(self, name, eye, target, up):
+        n = 1
+        while any(v.get('id') == f'view{n}' for v in self.views):
+            n += 1
+        v = {'id': f'view{n}', 'name': name or f'Вид {n}',
+             'eye': [float(x) for x in eye], 'target': [float(x) for x in target],
+             'up': [float(x) for x in up]}
+        self.views.append(v)
+        return v
+
+    def view_by_id(self, vid):
+        return next((v for v in self.views if v.get('id') == vid), None)
+
+    def remove_view(self, vid):
+        n = len(self.views)
+        self.views = [v for v in self.views if v.get('id') != vid]
+        return len(self.views) < n
 
     # ── автостыковка ─────────────────────────────────────────────────────
     def run_auto(self, progress=None, yaw='manhattan', reuse=True, by_tree=None, combos=None, cancel=None):
