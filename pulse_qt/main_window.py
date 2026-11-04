@@ -339,6 +339,7 @@ class MainWindow(QMainWindow):
         self.fit_kind = 'auto'                   # тип подгонки элемента (fits.py)
         self._el_labels = []                     # подписи элементов (рисуются с замерами)
         self.level_ring = None                   # транспортир горизонта: {'a','b','L0','c','r','R'}
+        self.snap_on = True                      # привязка замеров (B): вершины/центры важнее облака
         self.zero_show = True
         self.z0 = None
         self.points_hidden = False               # «Поверхность»: показывать только сетки
@@ -1045,6 +1046,7 @@ class MainWindow(QMainWindow):
         self.measure_mode = mode
         self._mpts, self._mplane = [], None
         self.view.remove_prefix('mplane')
+        self.view.remove('snap')
         self._draw_measures()
         self.control.mode_hint.setText(self.MEASURE_HINTS.get(mode, ''))
         self._banner()
@@ -1064,6 +1066,8 @@ class MainWindow(QMainWindow):
                  else 'пол не найден — уровень 0 общей системы'))
         self.control.set_zero(self.z0, text, self.zero_show)
         self.control.set_measures(self.s.measures, self.z0)
+        if self.control.snap_sw.isChecked() != self.snap_on:
+            self.control.snap_sw.setChecked(self.snap_on)
 
     def _set_zero(self, z, source):
         self.s.zero = None if source is None else {'z': float(z), 'source': source}
@@ -1190,6 +1194,7 @@ class MainWindow(QMainWindow):
                     self.set_status('нужно число, например 0.150')
         elif name == 'measure_delete':
             if 0 <= arg < len(self.s.measures):
+                self.s.push_measure_undo()
                 self.s.measures.pop(arg)
                 self._draw_measures()
                 self.refresh_control()
@@ -1199,24 +1204,44 @@ class MainWindow(QMainWindow):
             self.set_measure_mode(arg)
         elif name == 'done':
             self.close_tool()
+        elif name == 'snap':
+            self.snap_on = bool(arg)
+            if not self.snap_on:
+                self.view.remove('snap')
         elif name == 'measure_clear':
+            self.s.push_measure_undo()
             self.s.measures = []
             self._mpts, self._mplane = [], None
             self._draw_measures()
             self.refresh_control()
 
+    SNAP_RU = {'el-center': 'центр элемента', 'el-pt': 'вершина элемента',
+               'vertex': 'вершина замера', 'mid': 'середина', 'cloud': 'облако'}
+
     def measure_click(self, x, y):
         """Щелчок по облаку в режиме замера (вызывается и из тестов)."""
-        hit = self.view.pick_point(x, y, names={n for n in self.view.items if n.startswith('scan:')})
-        if hit is None:
-            self.set_status('мимо облака', log=False)
-            return None
-        name, p = hit
+        snap_kind = None
+        if self.snap_on and self.measure_mode in ('dist', 'height', 'plane', 'poly'):
+            got = self.view.snap_pick(x, y, self.s)
+            if got is None:
+                self.set_status('привязка не нашлась — кликните ближе к точке облака '
+                                'или вершине (B — отключить привязку)', log=False)
+                return None
+            p, snap_kind = got
+            name = None
+        else:
+            hit = self.view.pick_point(x, y, names={n for n in self.view.items if n.startswith('scan:')})
+            if hit is None:
+                self.set_status('мимо облака', log=False)
+                return None
+            name, p = hit
         p = np.asarray(p, float)
         if self.measure_mode == 'fit':
             return self.fit_click_at(name, p)
         if self.measure_mode == 'level':
             return self.level_click_at(name, p)
+        if snap_kind:
+            self.set_status(f'привязка: {self.SNAP_RU.get(snap_kind, snap_kind)}', log=False)
         return self.measure_point(p, name)
 
     def measure_point(self, p, cloud=None):
@@ -1272,6 +1297,7 @@ class MainWindow(QMainWindow):
             if mode == 'plane':
                 m['plane'] = self._mplane
                 self.view.remove('mplane')
+            self.s.push_measure_undo()
             self.s.measures.append(m)
             self._mpts, self._mplane = [], None
             self.refresh_control()
@@ -1283,6 +1309,7 @@ class MainWindow(QMainWindow):
         if self.measure_mode != 'poly' or len(self._mpts) < 2:
             return None
         m = {'type': 'poly', 'pts': self._mpts, 'closed': bool(closed and len(self._mpts) >= 3)}
+        self.s.push_measure_undo()
         self.s.measures.append(m)
         self._mpts = []
         self._draw_measures()
@@ -1620,6 +1647,27 @@ class MainWindow(QMainWindow):
         hl.addWidget(QLabel('Qt · VTK'))
         return bar
 
+    def toggle_snap(self):
+        self.snap_on = not self.snap_on
+        if not self.snap_on:
+            self.view.remove('snap')
+        self.set_status('привязка включена' if self.snap_on else 'привязка выключена', log=False)
+
+    def on_undo(self):
+        """Ctrl+Z: в режиме замеров — отмена замера (пустой стек не проваливается
+        в отмену чистки), иначе — отмена чистки."""
+        if self.measure_mode:
+            if self.s.undo_measure():
+                self._mpts, self._mplane = [], None
+                self.view.remove('mplane')
+                self._draw_measures()
+                self.refresh_control()
+                self.set_status('замер отменён')
+            else:
+                self.set_status('отменять нечего')
+            return
+        self.on_undo_erase()
+
     def _shortcuts(self):
         for key, fn in (('Ctrl+N', self.on_new_project), ('Ctrl+O', self.on_open), ('Ctrl+S', self.on_save),
                         ('Ctrl+Shift+S', self.on_save_as), ('F12', self.save_screenshot),
@@ -1628,7 +1676,8 @@ class MainWindow(QMainWindow):
                         ('[', lambda: self.set_point_size(self.view.point_px - 1)),
                         (']', lambda: self.set_point_size(self.view.point_px + 1)),
                         ('Delete', self.on_erase), ('Backspace', self.on_erase),
-                        ('Ctrl+Z', self.on_undo_erase), ('Ctrl+G', self.group_selected),
+                        ('Ctrl+Z', self.on_undo), ('Ctrl+G', self.group_selected),
+                        ('B', self.toggle_snap),
                         ('F1', self.show_manual),
                         ('Ctrl+Delete', lambda: self.remove_selected()),
                         ('Ctrl+Backspace', lambda: self.remove_selected()),
@@ -4107,6 +4156,14 @@ class MainWindow(QMainWindow):
         if kind == 'press' and manual and ev.button() == Qt.RightButton and mods & Qt.ShiftModifier:
             self._drag = {'mode': 'rot', 'T0': self.T_moving.copy(), 'x0': x, 'g0': None, 'z0': 0}
             return True
+        if kind == 'move' and self.measure_mode in ('dist', 'height', 'plane', 'poly') \
+                and self.snap_on and self._drag is None and self._ring_drag is None:
+            got = self.view.snap_pick(x, y, self.s)
+            if got is not None and got[1] != 'cloud':
+                col = (0.36, 0.61, 1.0) if got[1].startswith('el') else (1.0, 0.85, 0.29)
+                self.view.set_cloud('snap', [got[0]], col, size=9, on_top=True)
+            else:
+                self.view.remove('snap')
         if kind == 'move' and self._ring_drag is not None:
             g = self._ring_drag
             a = self._ring_angle(g['k'], x, y)

@@ -624,6 +624,32 @@ class CloudView(QWidget):
                 best = (depth[k], n, P[k])
         return None if best is None else (best[1], best[2])
 
+    def snap_pick(self, x, y, session, tol_px=10):
+        """
+        Привязка замера (osnap): цели measure.collect_snap_targets — элементы
+        (центры, каркасы), вершины и середины замеров; облако — fallback через
+        pick_point. Приоритет вида важнее экранной близости: центр элемента
+        перебивает вершину замера в той же зоне. → (точка, вид) или None.
+        """
+        import measure
+        targets = measure.collect_snap_targets(session)
+        if targets:
+            P = np.array([p for p, _ in targets])
+            s, _, front = self.project(P)
+            d2 = np.hypot(s[:, 0] - x, s[:, 1] - y)
+            ok = front & (d2 <= tol_px)
+            if ok.any():
+                # лучший вид по порядку SNAP_KINDS, в нём — ближайший к курсору
+                kinds = [k for _, k in targets]
+                rank = {k: i for i, k in enumerate(measure.SNAP_KINDS)}
+                best = min((i for i in np.flatnonzero(ok)),
+                           key=lambda i: (rank.get(kinds[i], 99), d2[i]))
+                return P[best], kinds[best]
+        hit = self.pick_point(x, y, tol_px=tol_px, names={n for n in self.items if n.startswith('scan:')})
+        if hit is None:
+            return None
+        return hit[1], 'cloud'
+
     # ── мышь ─────────────────────────────────────────────────────────────
     def mousePressEvent(self, ev):
         self.setFocus()

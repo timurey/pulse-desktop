@@ -149,3 +149,45 @@ def details(m, z0=0.0):
 
 
 TITLES = {'dist': 'Расстояние', 'height': 'Отметка', 'plane': 'До плоскости', 'poly': 'Ломаная'}
+
+
+# ── привязка (снап, osnap-механика «Оттиска») ──────────────────────────────
+
+SNAP_KINDS = ('el-center', 'el-pt', 'vertex', 'mid')   # приоритет: раньше = важнее
+
+
+def collect_snap_targets(session, circles=True):
+    """
+    Точки привязки в мировой системе: [(p, kind), …]. Приоритет вида — порядок
+    SNAP_KINDS: центры/оси подогнанных элементов, вершины каркасов, вершины
+    замеров, середины рёбер. Облако добавляет не здесь (оно в snap_pick через
+    pick_point — тяжёлое, к подсветке на каждое движение не подключается).
+    """
+    import fits
+    import numpy as np
+    out = []
+
+    def add(p, kind):
+        out.append((np.asarray(p, float), kind))
+
+    for el in getattr(session, 'elements', []):            # элементы: центр + каркас
+        sc = session.by_id(el.get('scan'))
+        if sc is None or sc.pose is None or not session.element_visible(el):
+            continue
+        T = session.Tc(sc)
+        if el['kind'] in ('sphere', 'circle', 'cylinder'):
+            add(T[:3, :3] @ np.asarray(el['center'], float) + T[:3, 3], 'el-center')
+        pts, _ = fits.element_wire(el)
+        for q in pts[::max(1, len(pts) // 16)]:            # вершины каркаса (до ~16 на элемент)
+            add(T[:3, :3] @ q + T[:3, 3], 'el-pt')
+    for m in getattr(session, 'measures', []):             # замеры: вершины, середины рёбер
+        P = [np.asarray(q, float) for q in m.get('pts', [])]
+        for q in P:
+            add(q, 'vertex')
+        if m['type'] in ('dist', 'poly') and len(P) >= 2:
+            extra = range(len(P) - 1)
+            if m.get('closed'):
+                extra = list(extra) + [len(P) - 1]
+            for i in extra:
+                add(0.5 * (P[i] + P[(i + 1) % len(P)]), 'mid')
+    return out

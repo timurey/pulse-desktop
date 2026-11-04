@@ -20,6 +20,8 @@ import json
 import time
 import threading
 import itertools
+import copy
+from collections import deque
 from pathlib import Path
 
 import numpy as np
@@ -241,6 +243,7 @@ class Session:
         self._removed_ids = set()    # удалённые из проекта сканы — их кеш не переносится при сохранении
         self.zero = None             # нулевой уровень {'z', 'source'} (общая система); None — пол опорного
         self.measures = []           # замеры (measure.py), точки в общей системе
+        self.measure_undo = deque(maxlen=10)   # снимки measures перед мутациями (не сериализуется)
         self.section = None          # сечение (section.py), общая система
         self.elements = []           # элементы (fits.py), в канон. системе своих сканов
         self._units = {}             # запечённые группы: gid → BakedGroup (по полю baked в дереве)
@@ -1044,6 +1047,18 @@ class Session:
 
     def element_by_id(self, el_id):
         return next((e for e in self.elements if e.get('id') == el_id), None)
+
+    # ── undo замеров ─────────────────────────────────────────────────────
+    def push_measure_undo(self):
+        """Снимок measures перед мутацией (добавить/удалить/очистить)."""
+        self.measure_undo.append(copy.deepcopy(self.measures))
+
+    def undo_measure(self):
+        """Отменить последнюю мутацию замеров. → True, если было что отменять."""
+        if not self.measure_undo:
+            return False
+        self.measures = self.measure_undo.pop()
+        return True
 
     def element_visible(self, el):
         """Показан ли элемент (глаз в дереве); у старых проектов флага нет —

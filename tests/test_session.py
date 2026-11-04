@@ -140,6 +140,33 @@ class TestSession(unittest.TestCase):
         self.assertLess(info2['tilt_deg'], 1e-6)
         np.testing.assert_allclose(s.level, L1, atol=1e-7)
 
+    def test_measure_undo(self):
+        """Undo замеров: снимок перед мутацией, стек до 10, независим от проекта."""
+        s = Session.from_scans(self.paths[:1])
+        for k in range(3):
+            s.push_measure_undo()
+            s.measures.append({'type': 'dist', 'pts': [[k, 0, 0], [k, 1, 0]]})
+        self.assertTrue(s.undo_measure())
+        self.assertEqual(len(s.measures), 2)
+        self.assertTrue(s.undo_measure())
+        self.assertEqual(len(s.measures), 1)
+        self.assertTrue(s.undo_measure())
+        self.assertEqual(s.measures, [])
+        self.assertFalse(s.undo_measure())
+        # снимок — глубокая копия: правка текущего замера после push не портит стек
+        s.measures.append({'type': 'height', 'pts': [[9, 9, 9]]})
+        s.push_measure_undo()
+        s.measures[0]['pts'][0][0] = 777
+        self.assertTrue(s.undo_measure())
+        self.assertEqual(len(s.measures), 1)
+        self.assertEqual(s.measures[0]['pts'][0][0], 9)       # состояние на момент push
+        # deque(maxlen=10) — не сериализуется: в проекте замеры, стека нет
+        p = Path(self.tmp) / 'mu.json'
+        s.save(p)
+        s2 = Session.from_project(p)
+        self.assertEqual(len(s2.measures), 1)
+        self.assertFalse(s2.undo_measure())
+
     def test_manual_planes(self):
         s = Session.from_scans(self.paths[:2])
         A, B = s.scans
