@@ -608,7 +608,7 @@ class MainWindow(QMainWindow):
                             'Скрыть всё по одну сторону плоскости (например, выше 2.5 м)', checkable=True)
         g.small('mdi6.cube-outline', 'Бокс', self.add_box_gather,
                 'Бокс отсечения по габариту видимых сканов: изоляция комнаты; поля и список — «Контроль» → «Боксы»')
-        g.small('mdi6.cursor-default-click-outline', 'Бокс\nкликом', self.add_box_click,
+        g.small('mdi6.cursor-default-click-outline', 'Кликом', self.add_box_click,
                 'Клик по модели — центр нового бокса (размер — как у последнего)')
         g = rb.add_group(pg, 'Нулевой уровень')
         self.b_zero = g.big('mdi6.format-vertical-align-bottom', 'Нулевой\nуровень', tool('zero'),
@@ -1114,16 +1114,20 @@ class MainWindow(QMainWindow):
 
     # ── боксы отсечения (clip.py, Ф15) ───────────────────────────────────
     def _multi_box(self):
-        """Включённых боксов 2+ (CPU-маска при рисовании)."""
-        import clip
-        return len(clip.active_boxes(self.s)) >= 2
+        """Боксы рисуются CPU-маской: их 2+ или один бокс вместе с сечением
+        (6 плоскостей бокса + 1–2 сечения больше лимита OpenGL в 6)."""
+        return getattr(self, '_boxes_cpu', False)
 
-    def refresh_clip_boxes(self):
-        """Применить боксы к виду: GPU-плоскости при одном включённом, каркасы,
-        CPU-перерисовка при нескольких."""
+    def refresh_clip_boxes(self, light=False):
+        """Применить боксы к виду: GPU-плоскости при одном включённом (и выключенном
+        сечении), иначе CPU-маска при перерисовке; каркасы. light — без
+        перерисовки облаков (сечение двигалось, боксы не менялись)."""
         import clip
         active = clip.active_boxes(self.s)
-        planes = clip.box_planes(active[0]) if len(active) == 1 else []
+        sec_on = (self.s.section or {}).get('mode', 'off') != 'off'
+        gpu = len(active) == 1 and not sec_on
+        self._boxes_cpu = bool(active) and not gpu
+        planes = clip.box_planes(active[0]) if gpu else []
         # CPU-фильтр пикинга — при любом числе боксов (GPU-плоскости режут только рендер)
         self.view.box_planes_mask_fn = (lambda P: clip.combined_mask(P, self.s)) if active else None
         self.view.set_section(self.s.section, clip_boxes_planes=planes)
@@ -1134,7 +1138,7 @@ class MainWindow(QMainWindow):
                 self.view.set_lines(name, V, E, None, None, 1.5, (0.98, 0.62, 0.25), 0.9, on_top=True)
             else:
                 self.view.remove(name)
-        if len(active) >= 2:
+        if self._boxes_cpu and not light:
             self.redraw_all()                            # CPU-маска — пересоздать облака
         if self.tool == 'control' and hasattr(self, 'control'):
             self.refresh_control()
@@ -1193,7 +1197,7 @@ class MainWindow(QMainWindow):
         st = self._section_state()
         for k, v in kw.items():
             st[k] = float((v + 180.0) % 360.0 - 180.0) if k in ('a', 'b') else v
-        self.view.set_section(st)
+        self.refresh_clip_boxes(light=True)              # GPU/CPU-композиция боксов и сечения
         self._draw_section()
         self._refresh_section_panel()
         self._sync_ribbon()
@@ -2340,8 +2344,10 @@ class MainWindow(QMainWindow):
         self._draw_measures()
         import clip as clip_mod
         active = clip_mod.active_boxes(self.s)
+        sec_on = (self.s.section or {}).get('mode', 'off') != 'off'
         self.view.set_section(self.s.section,
-                              clip_boxes_planes=clip_mod.box_planes(active[0]) if len(active) == 1 else None)
+                              clip_boxes_planes=clip_mod.box_planes(active[0])
+                              if len(active) == 1 and not sec_on else None)
         self._draw_section()
 
     def apply_visibility(self):
