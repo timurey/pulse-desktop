@@ -10,6 +10,7 @@ Usage:
     python offline_deskew.py <bag_directory_or_mcap_file> [output.npz]
 """
 
+import json
 import sys
 import numpy as np
 from pathlib import Path
@@ -22,8 +23,24 @@ ROTATION_CENTER = np.array([0.0, 0.0, -0.0108])
 INVERT_ROTATION = False
 ENCODER_TIME_OFFSET_MS = 0.0
 
-MOUNT_RPY_DEG = [0.0, 0.0, -1.6]
+MOUNT_RPY_DEG = [0.0, 0.0, -0.6]
 MOUNT_AXES = ['+x', '+y', '+z']
+
+# ── Tilt calibration (written by calibrate_tilt.py) ───────────────
+# TILT_CORRECTION is a 3×3 rotation matrix applied after reconstruction
+# to compensate for non-vertical rotation axis (cone artifact).
+# Identity means no correction. Rerun calibrate_tilt.py after any
+# bracket replacement that changes lidar tilt.
+_calib_path = Path(__file__).parent / 'calib.json'
+try:
+    _c = json.loads(_calib_path.read_text())
+    TILT_CORRECTION: np.ndarray = np.array(_c['R'], dtype=np.float64)
+    TILT_CORRECTION_DEG: float  = float(_c.get('tilt_deg', 0.0))
+    if 'mount_yaw_deg' in _c:
+        MOUNT_RPY_DEG[2] = float(_c['mount_yaw_deg'])
+except Exception:
+    TILT_CORRECTION     = np.eye(3)
+    TILT_CORRECTION_DEG = 0.0
 
 
 # ── Mount rotation matrix (ZYX Euler) ─────────────────────────────
@@ -206,6 +223,21 @@ def resolve_mcap_path(bag_path):
             return dst
 
     raise FileNotFoundError(f"No .mcap file found in {bag_path}")
+
+
+# ── Calibration snapshot reader ───────────────────────────────────
+def read_bag_calibration(bag_path):
+    """Read the /pulse/calibration JSON written at recording start.
+    Returns a dict, or {} if the topic is absent (old bag).
+    """
+    from mcap_ros2.reader import read_ros2_messages
+    mcap = resolve_mcap_path(bag_path)
+    for m in read_ros2_messages(str(mcap), topics=['/pulse/calibration']):
+        try:
+            return json.loads(m.ros_msg.data)
+        except Exception:
+            pass
+    return {}
 
 
 # ── Bag reader ────────────────────────────────────────────────────

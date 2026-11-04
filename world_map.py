@@ -25,6 +25,7 @@ from offline_deskew import (
     ROTATION_AXIS, ANGLE_OFFSET_DEG, ROTATION_CENTER,
     INVERT_ROTATION, ENCODER_TIME_OFFSET_MS,
     MOUNT_RPY_DEG, MOUNT_AXES,
+    TILT_CORRECTION, TILT_CORRECTION_DEG,
 )
 
 
@@ -157,10 +158,16 @@ def main():
 
     angles_unwrapped = np.unwrap(angle_values)
 
-    # ── Коррекция наклона платформы из акселерометра ──────────────
-    print("\nЧитаем IMU для коррекции наклона...")
-    R_tilt, tilt_deg = read_imu_tilt(bag_path)
-    use_tilt = tilt_deg > 0.1
+    # ── Коррекция наклона платформы ────────────────────────────────
+    # Берём откалиброванную матрицу из calib.json (запись calibrate_tilt.py).
+    # Если calibrate_tilt.py ещё не запускался — TILT_CORRECTION = eye(3).
+    use_tilt = TILT_CORRECTION_DEG > 0.1
+    R_tilt = TILT_CORRECTION
+    if use_tilt:
+        print(f"\nПрименяем калибровку наклона: {TILT_CORRECTION_DEG:.2f}°")
+    else:
+        print("\nCalib.json не найден — коррекция наклона не применяется")
+        print("  Запустите: python calibrate_tilt.py <bag>")
 
     # ── Обрабатываем каждый фрейм ─────────────────────────────────
     print(f"\nОбработка {len(clouds)} фреймов...")

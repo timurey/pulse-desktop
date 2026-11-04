@@ -21,11 +21,9 @@ bags/
 __pycache__/
 *.pyc
 .venv/
-
 # Local scratch
 build/
 cloudcompare/
-
 # macOS
 .DS_Store
 *.planes.json
@@ -35,3 +33,4 @@ cloudcompare/
 screenshots/
 .venv312/
 *.pulse
+calib.json
