@@ -258,3 +258,45 @@ class TestPlans(unittest.TestCase):
                 self.assertAlmostEqual(e.dxf.end.z, 0.0, places=9)
         texts = [e.dxf.text for e in msp if e.dxf.layer == 'PLAN_TEXT']
         self.assertTrue(any('Коридор = 3.000' in t for t in texts))
+
+
+class TestAreaOps(unittest.TestCase):
+    """Ф10: split_polygon / merge_polygons геометрия."""
+
+    SQ = [[0, 0, 0], [2, 0, 0], [2, 2, 0], [0, 2, 0]]
+
+    def test_split(self):
+        res = M.split_polygon(self.SQ, [1.0, -5.0, 0], [1.0, 5.0, 0])
+        self.assertIsNotNone(res)
+        a, b = res
+        self.assertEqual(len(a), 4)
+        self.assertEqual(len(b), 4)
+        for part in (a, b):
+            self.assertAlmostEqual(float(np.ptp(np.asarray(part)[:, 0])), 1.0, places=6)
+
+    def test_split_not_crossing(self):
+        self.assertIsNone(M.split_polygon(self.SQ, [5.0, -5.0, 0], [5.0, 5.0, 0]))
+
+    def test_split_concave_rejected(self):
+        L = [[0, 0, 0], [4, 0, 0], [4, 4, 0], [3, 1, 0], [2, 4, 0], [0, 4, 0]]
+        self.assertIsNone(M.split_polygon(L, [2.0, -5.0, 0], [2.0, 5.0, 0]))
+
+    def test_merge_common_edge(self):
+        B = [[0, 0, 0], [0, 2, 0], [-2, 2, 0], [-2, 0, 0]]
+        out = M.merge_polygons(self.SQ, B)
+        self.assertIsNotNone(out)
+        self.assertEqual(len(out), 6)                      # 4 + 4 − 2 общие вершины стыка
+        area = M.evaluate({'type': 'poly', 'pts': [list(p) for p in out], 'closed': True}, 0.0)
+        self.assertAlmostEqual(area['area'], 8.0, places=6)
+
+    def test_merge_no_common_edge(self):
+        B = [[10, 0, 0], [10, 2, 0], [8, 2, 0], [8, 0, 0]]
+        self.assertIsNone(M.merge_polygons(self.SQ, B))
+
+    def test_merge_symmetric(self):
+        B = [[0, 0, 0], [0, 2, 0], [-2, 2, 0], [-2, 0, 0]]
+        out1 = M.merge_polygons(self.SQ, B)
+        out2 = M.merge_polygons(B, self.SQ)
+        self.assertAlmostEqual(
+            M.evaluate({'type': 'poly', 'pts': [list(p) for p in out2], 'closed': True}, 0.0)['area'], 8.0)
+        self.assertEqual(len(out1), len(out2))

@@ -201,3 +201,93 @@ def collect_snap_targets(session, circles=True):
             for i in extra:
                 add(0.5 * (P[i] + P[(i + 1) % len(P)]), 'mid')
     return out
+
+
+# ── разрезание / объединение площадей (Ф10) ────────────────────────────────
+
+def split_polygon(pts, a, b, eps=1e-9):
+    """
+    Разрезать замкнутый контур прямой через точки a, b. → (контур 1, контур 2)
+    или None, если пересечений не ровно два (линия не режет или невыпуклый
+    случай с 4+ пересечениями).
+    """
+    P = np.asarray(pts, float)
+    n = len(P)
+    d = np.asarray(b, float) - np.asarray(a, float)
+    L = np.linalg.norm(d)
+    if L < 1e-12:
+        return None
+    # пересечение ищем в 2D-базисе плоскости контура (точки могут быть 3D)
+    nrm = np.cross(P[1] - P[0], P[min(2, n - 1)] - P[0])
+    Ln = np.linalg.norm(nrm)
+    if Ln < 1e-9:
+        return None
+    nrm /= Ln
+    u_ax = np.cross(nrm, [0, 0, 1.0])
+    if np.linalg.norm(u_ax) < 1e-6:
+        u_ax = np.cross(nrm, [0, 1.0, 0])
+    u_ax /= np.linalg.norm(u_ax)
+    v_ax = np.cross(nrm, u_ax)
+
+    def flat(q):
+        return np.array([np.asarray(q, float) @ u_ax, np.asarray(q, float) @ v_ax])
+
+    d2, a2 = flat(d), flat(a)
+    L2 = np.linalg.norm(d2)
+    P2 = np.array([flat(q) for q in P])
+    hits = []                                            # (номер ребра, точка на 3D-прямой)
+    for i in range(n):
+        e2 = P2[(i + 1) % n] - P2[i]
+        M = np.column_stack([d2, -e2])
+        det = np.linalg.det(M)
+        if abs(det) < 1e-12:
+            continue
+        t, u = np.linalg.solve(M, P2[i] - a2)
+        if -eps <= u <= 1 + eps:                         # точка на ребре (в базисе)
+            hits.append((i, np.asarray(a, float) + (t / L2 if L2 > 0 else 0) * d))
+    if len(hits) != 2:
+        return None
+    (i0, x0), (i1, x1) = hits
+    if i0 == i1 and abs(float((x1 - x0) @ d)) < 1e-6:
+        return None                                      # одно ребро дважды — касание
+    # два обхода контура между точками пересечения
+    def arc(i_from, x_from, i_to, x_to):
+        out = [x_from]
+        k = (i_from + 1) % n
+        while k != (i_to + 1) % n:
+            out.append(P[k])
+            k = (k + 1) % n
+        out.append(x_to)
+        return out
+    arc1 = arc(i0, x0, i1, x1)
+    arc2 = arc(i1, x1, i0, x0)
+    return [np.asarray(p, float) for p in arc1], [np.asarray(p, float) for p in arc2]
+
+
+def merge_polygons(p1, p2, tol=0.01):
+    """
+    Объединить два замкнутых контура с общим ребром (в противоположных
+    направлениях, вершины совпадают в пределах tol). → контур или None
+    (общего ребра нет — полный boolean без shapely не делается намеренно).
+    """
+    A = [np.asarray(p, float) for p in p1]
+    B = [np.asarray(p, float) for p in p2]
+    nA, nB = len(A), len(B)
+    for i in range(nA):
+        a0, a1 = A[i], A[(i + 1) % nA]
+        for j in range(nB):
+            b1, b2 = B[j], B[(j + 1) % nB]
+            # ребро A: a0→a1; в B — то же ребро в обратную сторону: b2→b1
+            if np.linalg.norm(a0 - b2) < tol and np.linalg.norm(a1 - b1) < tol:
+                out = [a1]                               # старт со второй вершины стыка
+                k = (i + 2) % nA                         # A: после a1 до a0 (a1 уже в out)
+                while k != i:
+                    out.append(A[k])
+                    k = (k + 1) % nA
+                out.append(a0)
+                k = (j + 2) % nB                         # B: после a0 до a1
+                while k != j:
+                    out.append(B[k])
+                    k = (k + 1) % nB
+                return out
+    return None

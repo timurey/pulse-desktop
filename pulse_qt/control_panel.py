@@ -55,6 +55,11 @@ class _MeasureRow(QFrame):
             txt.addWidget(W.label('примечание: ' + m['note'], 'Hint', wrap=True))
         top.addLayout(txt, 1)
         t = W.THEME
+        if m['type'] == 'poly' and m.get('closed'):
+            top.addWidget(W.tool(t.icon('mdi6.content-cut', 'ink3'), tip='Разрезать площадь линией (2 клика)',
+                                 icon_only=True, cb=lambda: panel.action.emit('measure_split', i)))
+            top.addWidget(W.tool(t.icon('mdi6.merge', 'ink3'), tip='Объединить с другой площадью (клик по её вершине)',
+                                 icon_only=True, cb=lambda: panel.action.emit('measure_merge', i)))
         top.addWidget(W.tool(t.icon('mdi6.alpha-h-circle-outline', 'ink3' if m.get('with_h') else 'line2'),
                              tip='Отметка H=±X.XXX первой точки в подписи', icon_only=True,
                              cb=lambda: panel.action.emit('measure_h', i)), 0, Qt.AlignTop)
@@ -91,6 +96,9 @@ class _MeasureEdit(QFrame):
         self.note_e = QLineEdit(m.get('note', ''))
         self.note_e.setPlaceholderText('Примечание')
         g.addWidget(self.note_e)
+        self.code_e = QLineEdit(m.get('code', ''))
+        self.code_e.setPlaceholderText('Код слоя (DXF: IZM_<код>_<тип>)')
+        g.addWidget(self.code_e)
         self.pts = []
         for k, p in enumerate(m.get('pts', [])):
             row = QHBoxLayout()
@@ -120,12 +128,14 @@ class _MeasureEdit(QFrame):
             return                                   # незаполненное поле — не применять
         if new_pts[0] == [list(map(float, p)) for p in m.get('pts', [])] \
                 and self.name_e.text() == m.get('name', '') \
-                and self.note_e.text() == m.get('note', ''):
+                and self.note_e.text() == m.get('note', '') \
+                and self.code_e.text() == m.get('code', ''):
             return                                   # ничего не поменялось
         panel.action.emit('measure_edit', {'index': self.index,
                                            'pts': new_pts[0],
                                            'name': self.name_e.text().strip(),
-                                           'note': self.note_e.text().strip()})
+                                           'note': self.note_e.text().strip(),
+                                           'code': self.code_e.text().strip()})
 
 
 class _BoxRow(QFrame):

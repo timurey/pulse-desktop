@@ -74,7 +74,7 @@ def csv_rows(session, z0=None):
                          '' if (not single and k > 1) else
                          ('' if value is None else f'{value:.3f}'),
                          units if (single or k == 1) else '',
-                         m.get('note', '')])
+                         m.get('note', ''), m.get('code', '')])
     return rows
 
 
@@ -82,7 +82,7 @@ def write_csv(session, path):
     """Замеры → CSV (';', utf-8-sig — Excel открывает без настроек)."""
     from fileio import native_path
     rows = csv_rows(session)
-    head = ['ID', 'Название', 'Тип', 'Вершина', 'X', 'Y', 'Z', 'Значение', 'Единицы', 'Примечание']
+    head = ['ID', 'Название', 'Тип', 'Вершина', 'X', 'Y', 'Z', 'Значение', 'Единицы', 'Примечание', 'Код']
     with native_path(path, 'w') as p:
         with open(p, 'w', encoding='utf-8-sig', newline='') as f:
             w = csv.writer(f, delimiter=';', lineterminator='\r\n')
@@ -108,16 +108,18 @@ def write_dxf(session, path, z0=None):
         value, units = _value_units(m, z0)
         P = [np.asarray(p, float) for p in m['pts']]
         t = m['type']
+        code = m.get('code', '')
+        lay = (lambda base: f'IZM_{code}_{base}' if code else f'IZM_{base}')   # Ф12: код слоя
         if t == 'height':
-            msp.add_point(P[0], dxfattribs={'layer': 'IZM_POINT'})
+            msp.add_point(P[0], dxfattribs={'layer': lay('POINT')})
         elif t == 'dist' and len(P) == 2:
-            msp.add_line(P[0], P[1], dxfattribs={'layer': 'IZM_DIST'})
+            msp.add_line(P[0], P[1], dxfattribs={'layer': lay('DIST')})
         elif t == 'plane' and len(P) == 1 and 'plane' in m:
             import measure
             foot = measure.point_plane(P[0], m['plane']['n'], m['plane']['c'])['foot']
-            msp.add_line(P[0], np.asarray(foot, float), dxfattribs={'layer': 'IZM_DIST'})
+            msp.add_line(P[0], np.asarray(foot, float), dxfattribs={'layer': lay('DIST')})
         elif t == 'poly' and len(P) >= 2:
-            layer = 'IZM_AREA' if m.get('closed') else 'IZM_LINE'
+            layer = lay('AREA' if m.get('closed') else 'LINE')
             msp.add_lwpolyline([(float(p[0]), float(p[1]), float(p[2])) for p in P],
                                dxfattribs={'layer': layer, 'closed': bool(m.get('closed'))})
         else:

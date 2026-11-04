@@ -1058,6 +1058,9 @@ class MainWindow(QMainWindow):
                      'secplane': 'Сечение: щёлкните по стене или полу — плоскость встанет параллельно ей',
                      'level': 'Горизонт по плоскости: щёлкните по горизонтальной поверхности '
                               '(пол коридора, площадка) — проект выровняется по ней',
+                     'split': 'Разрезание площади: щёлкните две точки линии разреза (снап помогает)',
+                     'merge': 'Объединение площадей: щёлкните по вершине второй площади '
+                              '(с общим ребром с первой)',
                      'cbox': 'Бокс отсечения: щёлкните по модели — центр нового бокса '
                              '(размер — как у последнего бокса; поля — в «Контроль» → «Боксы»)',
                      'fit': 'Элемент: щёлкните по поверхности облака — подгонится плоскость, сфера, '
@@ -1067,7 +1070,7 @@ class MainWindow(QMainWindow):
         if mode is not None and mode == self.measure_mode:
             mode = None
         want = {'zero': 'zero', 'secplane': 'section', 'fit': 'fit', 'level': 'zero',
-                'cbox': 'section'}.get(mode, 'measure')
+                'cbox': 'section', 'split': 'measure', 'merge': 'measure'}.get(mode, 'measure')
         if mode is not None and self.tool != want:
             self.open_tool(want)
         if mode in self.control.m_type.values:
@@ -1375,6 +1378,15 @@ class MainWindow(QMainWindow):
                 self.refresh_clip_boxes()
                 self.tree_panel.rebuild()
                 self.set_status('бокс изменён')
+        elif name == 'measure_split':
+            if 0 <= arg < len(self.s.measures) and self.s.measures[arg].get('closed'):
+                self._split_src = arg
+                self._mpts = []
+                self.set_measure_mode('split')
+        elif name == 'measure_merge':
+            if 0 <= arg < len(self.s.measures) and self.s.measures[arg].get('closed'):
+                self._merge_src = arg
+                self.set_measure_mode('merge')
         elif name == 'measures_csv':
             self.on_measures_export('csv')
         elif name == 'measures_dxf':
@@ -1399,6 +1411,10 @@ class MainWindow(QMainWindow):
                     m['note'] = arg['note']
                 else:
                     m.pop('note', None)
+                if arg.get('code'):
+                    m['code'] = arg['code']
+                else:
+                    m.pop('code', None)
                 self._draw_measures()
                 self.refresh_control()
                 self.set_status('замер изменён (Ctrl+Z — вернуть)')
@@ -1419,7 +1435,7 @@ class MainWindow(QMainWindow):
     def measure_click(self, x, y):
         """Щелчок по облаку в режиме замера (вызывается и из тестов)."""
         snap_kind = None
-        if self.snap_on and self.measure_mode in ('dist', 'height', 'plane', 'poly'):
+        if self.snap_on and self.measure_mode in ('dist', 'height', 'plane', 'poly', 'split', 'merge'):
             got = self.view.snap_pick(x, y, self.s)
             if got is None:
                 self.set_status('привязка не нашлась — кликните ближе к точке облака '
@@ -1440,6 +1456,14 @@ class MainWindow(QMainWindow):
             return self.level_click_at(name, p)
         if self.measure_mode == 'cbox':
             return self.cbox_click_at(name, p)
+        if self.measure_mode == 'split':
+            self._mpts.append(p.tolist())
+            if len(self._mpts) >= 2:
+                return self.measure_split_apply()
+            self.set_status('линия разреза: вторая точка', log=False)
+            return p
+        if self.measure_mode == 'merge':
+            return self.measure_merge_pick(p)
         if snap_kind:
             self.set_status(f'привязка: {self.SNAP_RU.get(snap_kind, snap_kind)}', log=False)
         return self.measure_point(p, name)
@@ -1936,6 +1960,71 @@ class MainWindow(QMainWindow):
             return
         self.set_status(f'план сохранён: {p}')
 
+    def measure_split_apply(self):
+        i = getattr(self, '_split_src', -1)
+        if not (0 <= i < len(self.s.measures)):
+            self.set_measure_mode(None, keep=True)
+            return None
+        res = measure.split_polygon(self.s.measures[i]['pts'], self._mpts[0], self._mpts[1])
+        self.set_measure_mode(None, keep=True)
+        self._mpts = []
+        if res is None:
+            self.set_status('линия не режет контур (нужно ровно два пересечения)')
+            return None
+        self.s.push_measure_undo()
+        m = self.s.measures[i]
+        name = m.get('name') or measure.TITLES['poly']
+        plan = m.get('plan')
+        self.s.measures[i] = {'type': 'poly', 'pts': [list(p) for p in res[0]],
+                              'closed': True, 'name': f'{name} (1)', 'note': m.get('note', '')}
+        self.s.measures.insert(i + 1, {'type': 'poly', 'pts': [list(p) for p in res[1]],
+                                       'closed': True, 'name': f'{name} (2)'})
+        if plan:
+            for mm in (self.s.measures[i], self.s.measures[i + 1]):
+                mm['plan'] = plan
+        self._draw_measures()
+        self.refresh_control()
+        self.set_status('площадь разрезана (Ctrl+Z — вернуть)')
+        return res
+
+    def measure_merge_pick(self, p_world):
+        i = getattr(self, '_merge_src', -1)
+        if not (0 <= i < len(self.s.measures)):
+            self.set_measure_mode(None, keep=True)
+            return None
+        # снап даёт точную вершину; без него — ближайшая вершина в 0.5 м
+        best, bd = None, 0.5
+        for k, m in enumerate(self.s.measures):
+            if k == i or m['type'] != 'poly' or not m.get('closed'):
+                continue
+            for q in m['pts']:
+                d = float(np.linalg.norm(np.asarray(q, float) - p_world))
+                if d < bd:
+                    best, bd = k, d
+        if best is None:
+            self.set_status('кликните по вершине второй замкнутой площади', log=False)
+            return None
+        res = measure.merge_polygons(self.s.measures[i]['pts'], self.s.measures[best]['pts'])
+        if res is None:
+            res = measure.merge_polygons(self.s.measures[best]['pts'], self.s.measures[i]['pts'])
+        self.set_measure_mode(None, keep=True)
+        if res is None:
+            self.set_status('у площадей нет общего ребра — объединение не выполняется')
+            return None
+        self.s.push_measure_undo()
+        name = self.s.measures[i].get('name') or measure.TITLES['poly']
+        plan = self.s.measures[i].get('plan') or self.s.measures[best].get('plan')
+        del self.s.measures[max(i, best)]
+        del self.s.measures[min(i, best)]
+        m = {'type': 'poly', 'pts': [list(p) for p in res], 'closed': True, 'name': name}
+        if plan:
+            m['plan'] = plan
+        self.s.measures.insert(min(i, best), m)
+        self._draw_measures()
+        self.refresh_control()
+        self.set_status('площади объединены (Ctrl+Z — вернуть)')
+        return p_world
+
     def on_measures_export(self, what):
         """Экспорт замеров: CSV (Excel) или 3D-DXF (метры, слои IZM_*)."""
         import measure_export
@@ -1957,8 +2046,9 @@ class MainWindow(QMainWindow):
 
     def on_undo(self):
         """Ctrl+Z: в режиме замеров — отмена замера (пустой стек не проваливается
-        в отмену чистки), иначе — отмена чистки."""
-        if self.measure_mode:
+        в отмену чистки); вне режима — чистка, а если её не было, но были правки
+        замеров (разрез/объединение/драг подписи) — замеры."""
+        if self.measure_mode or (not self.s.erase_undo and self.s.measure_undo):
             if self.s.undo_measure():
                 self._mpts, self._mplane = [], None
                 self.view.remove('mplane')
