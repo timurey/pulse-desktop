@@ -887,6 +887,35 @@ class Session:
         self.level = Rc @ self.level
         return info
 
+    def level_by_plane(self, n, c, set_zero=False):
+        """
+        Выравнивание горизонта по одной плоскости (например, полу коридора на
+        участке с уклоном, где автомат по всем плоскостям ошибается): поворот
+        общей системы, делающий нормаль n вертикальной (+Z). Позы сканов друг
+        относительно друга не меняются. n, c — плоскость в текущей общей системе
+        (n·x = c; у пола нормаль смотрит вверх, на сканер). set_zero — выставить
+        нулевую отметку по этой плоскости (её высота не меняется при повороте).
+        → info (наклон, который сняли).
+        """
+        n = np.asarray(n, float)
+        n = n / np.linalg.norm(n)
+        tilt = float(np.degrees(np.arccos(np.clip(n[2], -1, 1))))
+        z = np.array([0.0, 0.0, 1.0])
+        axis = np.cross(n, z)
+        L = np.linalg.norm(axis)
+        if L < 1e-12:
+            R = np.eye(3) if n[2] > 0 else \
+                np.diag([1.0, -1.0, -1.0])             # уже вертикальна (или вверх ногами)
+        else:
+            a = np.arccos(np.clip(n[2], -1, 1))
+            K = np.array([[0, -axis[2], axis[1]], [axis[2], 0, -axis[0]],
+                          [-axis[1], axis[0], 0]]) / L      # skew(unit(n × z))
+            R = np.eye(3) + np.sin(a) * K + (1 - np.cos(a)) * (K @ K)
+        self.level = R @ self.level
+        if set_zero:
+            self.zero = {'z': float(c), 'source': 'plane'}
+        return {'tilt_deg': tilt}
+
     def reset_level(self):
         self.level = np.eye(3)
 

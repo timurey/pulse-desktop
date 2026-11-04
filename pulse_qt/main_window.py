@@ -44,7 +44,7 @@ from .surface_panel import SurfacePanel
 from .ribbon import Ribbon
 from .control_panel import ControlPanel
 from .dock import Dock
-from .dialogs import ScannerImportDialog, BagImportDialog, AskDialog, SheetPreview
+from .dialogs import ScannerImportDialog, BagImportDialog, AskDialog, SheetPreview, LevelPlaneDialog
 from .tools import AutoPanel, CandPanel, QualityPanel, ExportPanel, PackPanel, FitPanel, DrawingPanel
 
 KIND_HUE = {'floor': (0.30, 0.75, 0.40), 'ceiling': (0.35, 0.55, 1.0), 'wall': (1.0, 0.62, 0.20),
@@ -338,6 +338,7 @@ class MainWindow(QMainWindow):
         self._mpts, self._mplane, self._mclick = [], None, None
         self.fit_kind = 'auto'                   # тип подгонки элемента (fits.py)
         self._el_labels = []                     # подписи элементов (рисуются с замерами)
+        self.level_ring = None                   # транспортир горизонта: {'a','b','L0','c','r','R'}
         self.zero_show = True
         self.z0 = None
         self.points_hidden = False               # «Поверхность»: показывать только сетки
@@ -545,6 +546,12 @@ class MainWindow(QMainWindow):
         g = rb.add_group(pg, 'Горизонт и план')
         g.big('mdi6.angle-acute', 'По\nгоризонту', self.on_level_project,
               'Выровнять весь проект по полу и стенам (сохраняется в проекте)')
+        g.small('mdi6.cursor-default-click-outline', 'Горизонт\nкликом', lambda: self.set_measure_mode('level'),
+                'Щелчок по горизонтальной поверхности (пол коридора, площадка): плоскость '
+                'подгонится, диалог подтверждения; галочка — нулевая отметка ±0.000 по ней. '
+                'Для участка с уклоном, где автомат по всем плоскостям ошибается')
+        self.b_lvlring = g.small('mdi6.rotate-orbit', 'Транспортир', self.toggle_level_ring,
+                                 'Ручной наклон проекта кольцами вокруг сцены (Esc — выйти)', checkable=True)
         g.small('mdi6.grid', 'План по стенам', self.on_align_plan)
         g.small('mdi6.rotate-left', 'Повернуть ◀', lambda: self.on_rotate_plan(1))
         g.small('mdi6.rotate-right', 'Повернуть ▶', lambda: self.on_rotate_plan(-1))
@@ -712,7 +719,7 @@ class MainWindow(QMainWindow):
         self._sync_ribbon()
 
     def _leave_tool(self, key):
-        if key in ('measure', 'fit') or (key in ('zero', 'section') and self.measure_mode in ('zero', 'secplane')):
+        if key in ('measure', 'fit') or (key in ('zero', 'section') and self.measure_mode in ('zero', 'secplane', 'level')):
             if self.measure_mode:
                 self.set_measure_mode(None, keep=True)
         if key == 'frame' and self.select_mode:
@@ -977,6 +984,7 @@ class MainWindow(QMainWindow):
         for k, b in self._rb_measure.items():
             b.setChecked(self.measure_mode == k)
         self.b_fit.setChecked(self.tool == 'fit' or self.measure_mode == 'fit')
+        self.b_lvlring.setChecked(self.level_ring is not None)
         self.b_zero.setChecked(self.zero_show)
         st = self.s.section or {}
         self.b_slice.setChecked(st.get('mode') == 'slice')
@@ -1021,13 +1029,15 @@ class MainWindow(QMainWindow):
                      'poly': 'Ломаная: щёлкайте точки; по первой — замкнуть, двойной щелчок / Enter — закончить',
                      'zero': 'Нулевой уровень: щёлкните точку облака — её высота станет ±0.000',
                      'secplane': 'Сечение: щёлкните по стене или полу — плоскость встанет параллельно ей',
+                     'level': 'Горизонт по плоскости: щёлкните по горизонтальной поверхности '
+                              '(пол коридора, площадка) — проект выровняется по ней',
                      'fit': 'Элемент: щёлкните по поверхности облака — подгонится плоскость, сфера, '
                             'цилиндр или окружность'}
 
     def set_measure_mode(self, mode, keep=False):
         if mode is not None and mode == self.measure_mode:
             mode = None
-        want = {'zero': 'zero', 'secplane': 'section', 'fit': 'fit'}.get(mode, 'measure')
+        want = {'zero': 'zero', 'secplane': 'section', 'fit': 'fit', 'level': 'zero'}.get(mode, 'measure')
         if mode is not None and self.tool != want:
             self.open_tool(want)
         if mode in self.control.m_type.values:
@@ -1047,7 +1057,8 @@ class MainWindow(QMainWindow):
             self._refresh_section_panel()
             self._draw_section()
         z = self.s.zero
-        src = {'floor': 'пол опорного скана', 'point': 'по точке облака', 'manual': 'задан числом'}
+        src = {'floor': 'пол опорного скана', 'point': 'по точке облака', 'manual': 'задан числом',
+               'plane': 'по плоскости (выравнивание горизонта)'}
         text = (src.get(z['source'], z['source']) if z else
                 ('пол опорного скана (по умолчанию)' if measure.default_zero(self.s) is not None
                  else 'пол не найден — уровень 0 общей системы'))
@@ -1204,6 +1215,8 @@ class MainWindow(QMainWindow):
         p = np.asarray(p, float)
         if self.measure_mode == 'fit':
             return self.fit_click_at(name, p)
+        if self.measure_mode == 'level':
+            return self.level_click_at(name, p)
         return self.measure_point(p, name)
 
     def measure_point(self, p, cloud=None):
@@ -1349,6 +1362,115 @@ class MainWindow(QMainWindow):
         bg.run(lambda: self.s.add_element(sc, p_canon, kind=kind, d_fixed=d),
                done=self._fit_done, error=self._bg_error)
         return p_world
+
+    def level_click_at(self, cloud, p_world):
+        """
+        Щелчок в режиме «Горизонт кликом»: берётся уже найденная плоскость
+        анализа (мгновенно, как у сечения) → диалог подтверждения.
+        """
+        sc = self._scan_of(cloud)
+        if sc is None or not sc.analyzed:
+            self.set_status('скан ещё анализируется — подождите окончания фонового анализа')
+            return None
+        T = self.s.Tc(sc)
+        p_canon = pr.transform(np.asarray(p_world, float)[None], np.linalg.inv(T))[0]
+        f = self.s.pick_feature(sc, p_canon, 'plane')
+        if f is None:
+            self.set_status('здесь нет найденной плоскости — щёлкните по полу/площадке; '
+                            'или подогните плоскость инструментом «Элемент» и выберите '
+                            '«Выровнять горизонт по элементу» в дереве')
+            return None
+        pl = next(q for q in sc.planes if q.id == f['index'])
+        n_w = T[:3, :3] @ np.asarray(f['normal'], float)
+        c_w = float(f['offset'] + n_w @ T[:3, 3])
+        if n_w[2] < 0:                                    # нормаль — вверх (клик по потолку тоже ок)
+            n_w, c_w = -n_w, -c_w
+        tilt = float(np.degrees(np.arccos(np.clip(n_w[2], -1, 1))))
+        d = LevelPlaneDialog(self, f, max(pl.rms * 1000, 0.1), pl.area, tilt)
+        if not d.exec():
+            self.set_status('выравнивание отменено', log=False)
+            return None
+        self._apply_level_plane(n_w, c_w, d.zero_checked())
+        return p_world
+
+    def level_by_element(self, el_id):
+        """Выровнять горизонт по подогнанному элементу-плоскости (меню дерева)."""
+        el = self.s.element_by_id(el_id)
+        if el is None or el['kind'] != 'plane':
+            self.set_status('нужен элемент-плоскость')
+            return
+        sc = self.s.by_id(el['scan'])
+        T = self.s.Tc(sc)
+        n_w = T[:3, :3] @ np.asarray(el['params']['n'], float)
+        c_w = float(n_w @ (T[:3, :3] @ np.asarray(el['center'], float) + T[:3, 3]))
+        if n_w[2] < 0:
+            n_w, c_w = -n_w, -c_w
+        tilt = float(np.degrees(np.arccos(np.clip(n_w[2], -1, 1))))
+        d = LevelPlaneDialog(self, el, el['sigma'] * 1000, el.get('area', 0), tilt)
+        if d.exec():
+            self._apply_level_plane(n_w, c_w, d.zero_checked())
+
+    def _apply_level_plane(self, n_w, c_w, set_zero):
+        """Диалог подтверждён: повернуть общую систему, обновить окно."""
+        info = self._with_plan_change(
+            lambda: self.s.level_by_plane(n_w, c_w, set_zero=set_zero))
+        self.set_measure_mode(None, keep=True)
+        self.redraw_all()
+        self.refresh_inspector()
+        self.refresh_control()
+        msg = f"горизонт по плоскости: поправка {info['tilt_deg']:.2f}° (сохраняется в проекте)"
+        if set_zero:
+            msg += f" · нулевая отметка по ней (z = {self.s.zero['z']:.3f})"
+        self.set_status(msg)
+
+    # ── транспортир горизонта ────────────────────────────────────────────
+    LEVEL_RING_MAX = 15.0                                  # ° — предел наклона кольцами
+
+    def toggle_level_ring(self):
+        """Транспортир горизонта: кольца вокруг центра сцены, тянутся мышью."""
+        if self.level_ring is not None:
+            self.level_ring = None
+            self.view.remove_prefix('lvl:')
+            self._banner()
+            return
+        if not self.s.placed():
+            self.set_status('нет размещённых сканов')
+            return
+        lo, hi = self._visible_bbox()
+        c = 0.5 * (lo + hi)
+        r = float(np.clip(0.18 * np.linalg.norm(hi - lo), 0.5, 10.0))
+        self.level_ring = {'a': 0.0, 'b': 0.0, 'L0': self.s.level.copy(),
+                           'c': c, 'r': r, 'R': np.eye(3)}
+        self._draw_rings('lvl:', self._protractor())
+        self._banner()
+        self.set_status('тяните кольца — наклон проекта; Shift — точнее; Esc — выйти')
+
+    def _level_ring_set(self, k, v):
+        g = self.level_ring
+        if g is None:
+            return
+        g[k] = float(np.clip(v, -self.LEVEL_RING_MAX, self.LEVEL_RING_MAX))
+        Ra = self._rot_axis(np.array([1.0, 0, 0]), g['a'])
+        Rb = self._rot_axis(np.array([0, 1.0, 0]), g['b'])
+        R = Rb @ Ra
+        # к актёрам применяем дельту от уже применённого поворота (полный R
+        # каждый раз пересчитывается от L0 — домножать его нельзя: углы удвоятся)
+        D_rel = np.eye(4)
+        D_rel[:3, :3] = R @ g.get('R', np.eye(3)).T
+        self.s.level = R @ g['L0']
+        self.view.apply_to_transforms(D_rel)                 # на лету, без перестройки
+        g['R'] = R
+        self.update_grid()
+        self._draw_measures()
+        self._draw_rings('lvl:', self._protractor())
+        self.set_status(f'наклон: X {g["a"]:+.2f}° · Y {g["b"]:+.2f}° (Esc — выйти)', log=False)
+
+    @staticmethod
+    def _rot_axis(axis, deg):
+        a = np.radians(deg)
+        k = np.asarray(axis, float)
+        K = np.array([[0, -k[2], k[1]], [k[2], 0, -k[0]], [-k[1], k[0], 0]])
+        return np.eye(3) + np.sin(a) * K + (1 - np.cos(a)) * (K @ K)
 
     def _fit_done(self, el):
         from .tools import element_stats
@@ -2516,6 +2638,8 @@ class MainWindow(QMainWindow):
                 self._element_tree_visible(key, not self.s.element_visible(el))
         elif name == 'el_rename':
             self.on_fit_action('rename', key[5:])
+        elif name == 'el_level':
+            self.level_by_element(key[5:])
         elif name == 'el_delete':
             self.on_fit_action('delete', key[5:])
         elif name in ('el_show_all', 'el_hide_all'):
@@ -3689,7 +3813,16 @@ class MainWindow(QMainWindow):
 
     # ── транспортиры: общие для опорной точки и сечения ──────────────────
     def _protractor(self):
-        """Активный набор колец: опорная точка (ручная стыковка) или сечение (вкладка «Контроль»)."""
+        """Активный набор колец: горизонт (транспортир), опорная точка (ручная
+        стыковка) или сечение (вкладка «Контроль»)."""
+        if self.level_ring is not None:
+            g = self.level_ring
+            ax = {'a': (np.array([1.0, 0, 0]), np.array([0, 1.0, 0]), np.array([0, 0, 1.0]),
+                        (0.36, 0.61, 1.0)),
+                  'b': (np.array([0, 1.0, 0]), np.array([1.0, 0, 0]), np.array([0, 0, 1.0]),
+                        (1.0, 0.62, 0.25))}
+            return {'owner': 'level', 'c': g['c'], 'r': g['r'], 'axes': ax,
+                    'ang': {'a': g['a'], 'b': g['b']}, 'set': self._level_ring_set}
         if self.mode == 'manual' and self.pivot is not None:
             return {'owner': 'pivot', 'c': self.pivot['c'], 'r': self.pivot['r'], 'axes': self.PIVOT_AXES,
                     'ang': self.pivot['ang'], 'set': lambda k, v: self._set_pivot_angles(**{k: v})}
@@ -4674,6 +4807,9 @@ class MainWindow(QMainWindow):
         self.run_bg('экспорт…', lambda p: self.s.export(str(v['path']), v['voxel'], p, v['frame'],
                                                         scan_ids=v['scan_ids']), done)
     def on_escape(self):
+        if self.level_ring is not None:
+            self.toggle_level_ring()
+            return
         if self.measure_mode:
             if self._mpts or self._mplane is not None:
                 self._mpts, self._mplane = [], None

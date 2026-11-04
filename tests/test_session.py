@@ -118,6 +118,28 @@ class TestSession(unittest.TestCase):
         self.assertTrue(s2.remove_element(el['id']))
         self.assertEqual([e['id'] for e in s2.elements], [el2['id']])
 
+    def test_level_by_plane(self):
+        """Горизонт кликом: наклонённый пол → project выровнен, ноль по плоскости."""
+        s = Session.from_scans(self.paths[:1])
+        A = s.scans[0]
+        el = s.add_element(A, self._canon_point(s, A, (1.0, 1.0, 0.0)), kind='plane')
+        self.assertIsNotNone(el)
+        T = s.Tc(A)
+        n_w = T[:3, :3] @ np.asarray(el['params']['n'])
+        c_w = float(n_w @ (T[:3, :3] @ np.asarray(el['center']) + T[:3, 3]))
+        info = s.level_by_plane(n_w, c_w, set_zero=True)
+        # плоскость теперь горизонтальна: нормаль в новой общей системе вертикальна
+        n2 = s.Tc(A)[:3, :3] @ np.asarray(el['params']['n'])
+        self.assertLess(np.linalg.norm(n2 - np.array([0, 0, 1.0])), 1e-9)
+        self.assertLess(info['tilt_deg'], 3.0)             # синтетика почти ровная
+        self.assertEqual(s.zero['source'], 'plane')
+        self.assertAlmostEqual(s.zero_z(), c_w, places=6)
+        # повторное выравнивание ничего не меняет (уже вертикально)
+        L1 = s.level.copy()
+        info2 = s.level_by_plane(n2, c_w)
+        self.assertLess(info2['tilt_deg'], 1e-6)
+        np.testing.assert_allclose(s.level, L1, atol=1e-7)
+
     def test_manual_planes(self):
         s = Session.from_scans(self.paths[:2])
         A, B = s.scans

@@ -558,3 +558,30 @@ class SheetPreview(_Modal):
         self.body.addWidget(self.svg, 1)
         self.b_ok.setText('Закрыть')
         self.resize(900, 720)
+
+
+class LevelPlaneDialog(_Modal):
+    """Выравнивание горизонта по кликнутой плоскости: сводка + галочка
+    «выставить нулевую отметку по этой плоскости»."""
+
+    def __init__(self, parent, info, sigma_mm, area, tilt_deg):
+        super().__init__(parent, 'Выровнять горизонт по плоскости', 'mdi6.angle-acute')
+        w, lay = _opts_panel()
+        lay.addWidget(W.label(
+            f'σ подгонки {sigma_mm:.0f} мм · площадь ~{area:.0f} м² · '
+            f'наклон к текущему горизонту {tilt_deg:.2f}°', 'KV_v', wrap=True))
+        lay.addWidget(W.label(
+            'Проект будет повёрнут так, чтобы эта плоскость стала горизонтальной. '
+            'Позы сканов друг относительно друга не изменятся. Подтвердите, что '
+            'щелчок пришёлся на горизонтальную поверхность (пол, площадку), а не '
+            'на землю с уклоном или пандус.', 'Hint', wrap=True))
+        self.zero_sw = W.Switch(False)
+        self.zero_sw.setToolTip('После выравнивания высота этой плоскости станет ±0.000')
+        lay.addWidget(W.hbox(QLabel('Выставить нулевую отметку (±0.000) по этой плоскости'),
+                             None, self.zero_sw))
+        self.body.addWidget(w, 1)
+        self.b_ok.setText('Выровнять')
+        self.resize(460, 240)
+
+    def zero_checked(self):
+        return self.zero_sw.isChecked()

@@ -306,6 +306,18 @@ class CloudView(QWidget):
             it.actor.SetVisibility(bool(vis))
             self.update_view()
 
+    def apply_to_transforms(self, D):
+        """Умножить матрицы всех объектов на D (4×4) на лету — без перестройки
+        (поворот общей системы транспортиром горизонта: облака, признаки, сетки).
+        Служебные слои с собственной геометрией в мире (контур сечения, кольца,
+        замеры) обновит перерисовка вызывающего."""
+        m = _vtk_matrix(np.asarray(D, float))
+        for it in self.items.values():
+            if it.T is not None:
+                it.T = np.asarray(D, float) @ it.T
+                it.actor.SetUserMatrix(_vtk_matrix(it.T))
+        self.update_view()
+
     def is_visible(self, name):
         it = self.items.get(name)
         return it is not None and bool(it.actor.GetVisibility())

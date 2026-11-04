@@ -394,6 +394,9 @@ class TreePanel(QFrame):
             else:
                 act('Показать / скрыть', 'el_toggle', 'mdi6.eye-outline')
                 act('Переименовать', 'el_rename', 'mdi6.pencil-outline')
+                el = self.session.element_by_id(key[5:]) if self.session else None
+                if el is not None and el.get('kind') == 'plane':
+                    act('Выровнять горизонт по элементу', 'el_level', 'mdi6.angle-acute')
                 m.addSeparator()
                 act('Удалить элемент', 'el_delete', 'mdi6.delete-outline')
             m.exec(self.tree.viewport().mapToGlobal(pos))
