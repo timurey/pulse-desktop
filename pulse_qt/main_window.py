@@ -1137,11 +1137,14 @@ class MainWindow(QMainWindow):
             if b.get('visible') and b.get('on'):
                 V, E = clip.box_wire(b['center'], b['size'], b.get('yaw_deg', 0.0))
                 self.view.set_lines(name, V, E, None, None, 1.5, (0.98, 0.62, 0.25), 0.9, on_top=True)
-                for k in range(3):
-                    for sg in (-1, 1):
-                        base, tip, r = clip.face_arrow(b, k, sg)
-                        self.view.set_arrow(f"cboxg:{b['id']}:{k}{sg}", base, tip, r,
-                                            (1.0, 0.85, 0.29))
+                if b['id'] == self.cbox_sel:             # ручки — только у выбранного бокса
+                    for k in range(3):
+                        for sg in (-1, 1):
+                            base, tip, r = clip.face_arrow(b, k, sg)
+                            self.view.set_arrow(f"cboxg:{b['id']}:{k}{sg}", base, tip, r,
+                                                self.CBOX_AXIS_COLORS[k])
+                else:
+                    self.view.remove_prefix(f"cboxg:{b['id']}")
             else:
                 self.view.remove(name)
                 self.view.remove_prefix(f"cboxg:{b['id']}")
@@ -1184,7 +1187,10 @@ class MainWindow(QMainWindow):
         self.set_status(f"{b['name']}: центр по клику (поля — в «Контроль» → «Боксы»)")
         return p_world
 
-    CBOX_HIT_PX = 9                                   # допуск захвата грани, экранных точек
+    CBOX_HIT_PX = 14                                  # допуск захвата ручки, экранных точек
+    CBOX_AXIS_COLORS = {0: (0.90, 0.25, 0.22),        # X — красная
+                        1: (0.35, 0.75, 0.35),        # Y — зелёная
+                        2: (0.30, 0.55, 0.98)}        # Z — синяя
 
     def _cbox_face_hit(self, x, y):
         """Объёмная стрелка-ручка под курсором: сэмплы вдоль всей стрелки
@@ -1268,7 +1274,7 @@ class MainWindow(QMainWindow):
                 for sg in (-1, 1):
                     base, tip, r = clip.face_arrow(b, k, sg)
                     self.view.set_arrow(f"cboxg:{b['id']}:{k}{sg}", base, tip, r,
-                                        (1.0, 0.85, 0.29))
+                                        self.CBOX_AXIS_COLORS[k])
         active = clip.active_boxes(self.s)
         sec_on = (self.s.section or {}).get('mode', 'off') != 'off'
         if len(active) == 1 and not sec_on:
@@ -2976,6 +2982,12 @@ class MainWindow(QMainWindow):
     # ── дерево ───────────────────────────────────────────────────────────
     def on_tree_select(self, key):
         self.tree_sel = key
+        if self.s.clip_boxes:                            # ручки — у выбранного бокса
+            sel = key[5:] if key and key.startswith('cbox:') else None
+            if sel != self.cbox_sel:
+                self.cbox_sel = sel
+                self.refresh_clip_boxes()
+                self.refresh_control()
         self.refresh_inspector()
         sc = self.s.by_id(key) if key else None
         if sc is not None and self.mode == 'clean':

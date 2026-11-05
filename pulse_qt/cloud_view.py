@@ -294,8 +294,9 @@ class CloudView(QWidget):
         return a
 
     def set_arrow(self, name, base, tip, radius, color, T=None):
-        """Объёмная стрелка (цилиндр + конус + шаровая база) от base к tip —
-        ручки боксов отсечения. Радиус в метрах; поверх облаков."""
+        """Объёмная стрелка по оси base→tip: цилиндр + конус (каждый
+        ориентирован по своей родной оси vtk) + шар-база. Радиус задаёт
+        толщину; рисуется поверх облаков."""
         import vtkmodules.vtkFiltersSources as src
         b = np.asarray(base, float)
         t = np.asarray(tip, float)
@@ -304,33 +305,38 @@ class CloudView(QWidget):
         if L < 1e-9:
             return None
         a = d / L
-        head = float(np.clip(0.35 * L, radius, 4.0 * radius))
+        head = float(np.clip(0.30 * L, 2.0 * radius, 6.0 * radius))
+        shaft = max(L - head, 1e-4)
+        # (источник, родная ось vtk, сдвиг центра вдоль a)
         cyl = src.vtkCylinderSource()
-        cyl.SetRadius(radius * 0.55)
-        cyl.SetHeight(max(L - head, 1e-4))
-        cyl.SetResolution(12)
+        cyl.SetRadius(radius * 0.6)
+        cyl.SetHeight(shaft)
+        cyl.SetResolution(20)
         cyl.CappingOn()
         cone = src.vtkConeSource()
         cone.SetRadius(radius)
         cone.SetHeight(head)
-        cone.SetResolution(16)
+        cone.SetResolution(24)
         sph = src.vtkSphereSource()
-        sph.SetRadius(radius * 1.15)
-        sph.SetThetaResolution(12)
-        sph.SetPhiResolution(8)
-        # локальная ось Y источников → мировое направление a (поворот Родрига)
-        z = np.array([0.0, 1.0, 0.0])
-        v = np.cross(z, a)
-        vn = np.linalg.norm(v)
-        ax_ = v / vn if vn > 1e-9 else np.array([1.0, 0, 0])
-        ang = float(np.arctan2(vn, float(z @ a)))
-        K = np.array([[0, -ax_[2], ax_[1]], [ax_[2], 0, -ax_[0]], [-ax_[1], ax_[0], 0]])
-        R = np.eye(3) + np.sin(ang) * K + (1 - np.cos(ang)) * (K @ K)
+        sph.SetRadius(radius * 1.1)
+        sph.SetThetaResolution(16)
+        sph.SetPhiResolution(10)
+        parts = [(cyl, np.array([0.0, 1.0, 0.0]), shaft / 2),
+                 (cone, np.array([1.0, 0.0, 0.0]), L - head / 2),
+                 (sph, np.zeros(3), 0.0)]
         V, F, off = [], [], 0
-        for src_, shift in ((cyl, (L - head) / 2), (cone, L - head + head / 2), (sph, 0.0)):
-            src_.Update()
-            pd = src_.GetOutput()
+        for s_, from_axis, shift in parts:
+            s_.Update()
+            pd = s_.GetOutput()
             P = np.array(pd.GetPoints().GetData(), float).reshape(-1, 3)
+            R = np.eye(3)
+            v = np.cross(from_axis, a)
+            vn = np.linalg.norm(v)
+            if vn > 1e-9:
+                v /= vn
+                ang = float(np.arctan2(vn, float(from_axis @ a)))
+                K = np.array([[0, -v[2], v[1]], [v[2], 0, -v[0]], [-v[1], v[0], 0]])
+                R = np.eye(3) + np.sin(ang) * K + (1 - np.cos(ang)) * (K @ K)
             Pw = P @ R.T + a * shift + b
             V.append(Pw)
             conn = np.array(pd.GetPolys().GetData(), np.int64)
@@ -347,7 +353,6 @@ class CloudView(QWidget):
 
     @staticmethod
     def _solid_mesh(V, F):
-        from vtkmodules.vtkCommonDataModel import vtkPolyData
         pts = vtkPoints()
         pts.SetData(numpy_to_vtk(np.ascontiguousarray(V, np.float64), deep=True))
         ca = vtkCellArray()

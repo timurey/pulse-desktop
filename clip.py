@@ -137,5 +137,5 @@ def face_arrow(box, k, s, shaft=0.28, r=None):
     size = np.abs(np.asarray(box['size'], float))
     L = shaft * max(size[i] for i in range(3) if i != kk)
     L = float(np.clip(L, 0.25, 1.5))
-    radius = float(np.clip(0.10 * L, 0.03, 0.09)) if r is None else float(r)
+    radius = float(np.clip(0.40 * L, 0.10, 0.30)) if r is None else float(r)
     return fc, fc + n * L, radius
