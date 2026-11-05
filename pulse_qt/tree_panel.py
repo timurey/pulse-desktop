@@ -34,14 +34,14 @@ class _Row(QWidget):
         lay.addWidget(self.eye)
         if color is not None:
             lay.addWidget(W.Swatch(color))
-        name = QLabel(text)
+        self.name = QLabel(text)
         if group:
-            name.setStyleSheet('font-weight: 500;')
+            self.name.setStyleSheet('font-weight: 500;')
         else:
-            name.setObjectName('Mono')
+            self.name.setObjectName('Mono')
         if not visible:
-            name.setStyleSheet(name.styleSheet() + f"color: {W.THEME.q('ink3').name()};")
-        lay.addWidget(name, 1)
+            self.name.setStyleSheet(self.name.styleSheet() + f"color: {W.THEME.q('ink3').name()};")
+        lay.addWidget(self.name, 1)
         if count is not None:
             c = QLabel(str(count))
             c.setObjectName('Hint')
@@ -475,6 +475,62 @@ class TreePanel(QFrame):
             r.setToolTip('Двойной щелчок — полёт к виду')
             self.tree.setItemWidget(it, 0, r)
         g.setExpanded(True)
+
+    def start_inline_rename(self, key, current):
+        """Редактор имени прямо в строке дерева (Enter/фокус — применить,
+        Esc — отменить). Результат — action 'rename_done' (key, текст)."""
+        it = self._items.get(key)
+        row = self.tree.itemWidget(it, 0) if it is not None else None
+        if row is None or not hasattr(row, 'name'):
+            return
+        from PySide6.QtWidgets import QLineEdit
+        self._editor = QLineEdit(current, row)
+        self._inline_key = key
+        self._editor.setObjectName('InlineRename')
+        g = row.name.geometry()
+        self._editor.setGeometry(g.adjusted(-2, -3, 6, 3))
+        self._editor.setMinimumWidth(max(g.width() + 8, 110))
+        self._editor.show()
+        self._editor.raise_()
+        self._editor.selectAll()
+        self._editor.setFocus()
+        self._editor.editingFinished.connect(self._inline_done)
+        self._editor.installEventFilter(self)
+
+    def _inline_done(self):
+        ed = getattr(self, '_editor', None)
+        if ed is None:
+            return
+        self._editor = None
+        text = ed.text().strip()
+        key = getattr(self, '_inline_key', None)
+        ed.deleteLater()
+        if key and text:
+            self.action.emit('rename_done', (key, text))
+
+    def end_inline_rename(self):
+        ed = getattr(self, '_editor', None)
+        if ed is not None:
+            self._editor = None
+            ed.blockSignals(True)
+            ed.deleteLater()
+
+    def _inline_cancel(self):
+        ed = getattr(self, '_editor', None)
+        if ed is not None:
+            self._editor = None
+            ed.deleteLater()
+
+    def eventFilter(self, obj, ev):
+        from PySide6.QtCore import QEvent
+        if obj is getattr(self, '_editor', None) and ev.type() == QEvent.KeyPress:
+            if ev.key() == Qt.Key_Escape:
+                self._inline_cancel()
+                return True
+            if ev.key() in (Qt.Key_Return, Qt.Key_Enter):
+                self._inline_done()
+                return True
+        return super().eventFilter(obj, ev)
 
     def _menu(self, pos):
         it = self.tree.itemAt(pos)

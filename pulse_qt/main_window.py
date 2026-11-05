@@ -21,7 +21,8 @@ from PySide6.QtCore import Qt, QTimer, QSettings
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (QMainWindow, QWidget, QFrame, QHBoxLayout, QVBoxLayout, QSplitter, QLabel, QSlider,
                                QStackedWidget, QProgressBar, QMenu, QFileDialog, QMessageBox, QApplication,
-                               QToolButton)
+                               QToolButton, QSplitterHandle)
+from PySide6.QtCore import Signal
 
 import plane_register as pr
 import manual_clean
@@ -298,6 +299,44 @@ class Viewport(QWidget):
         self._place()
 
 
+class _PanelHandle(QSplitterHandle):
+    """Разделитель-кнопка: рисует три риски, клик сворачивает/разворачивает
+    панель (главное окно подключает handleClicked)."""
+
+    def mouseReleaseEvent(self, ev):
+        if ev.button() == Qt.LeftButton and self.rect().contains(ev.position().toPoint()):
+            self.splitter().handleClicked.emit(self.splitter().indexOf(self))
+        super().mouseReleaseEvent(ev)
+
+    def mouseDoubleClickEvent(self, ev):
+        pass                                             # одиночный клик — достаточен
+
+    def paintEvent(self, ev):
+        super().paintEvent(ev)
+        from PySide6.QtGui import QPainter, QColor
+        p = QPainter(self)
+        c = QColor(128, 128, 128, 140)
+        w, h = self.width(), self.height()
+        p.setPen(Qt.NoPen)
+        if self.orientation() == Qt.Horizontal:
+            for i in (-1, 0, 1):
+                p.setBrush(QColor(c))
+                p.drawRoundedRect(w // 2 - 2, h // 2 + i * 7 - 2, 4, 4, 2, 2)
+        else:
+            for i in (-1, 0, 1):
+                p.setBrush(QColor(c))
+                p.drawRoundedRect(w // 2 + i * 7 - 2, h // 2 - 2, 4, 4, 2, 2)
+        p.end()
+
+
+class PanelSplitter(QSplitter):
+    """QSplitter, чьи разделители работают кнопками панелей (см. _PanelHandle)."""
+    handleClicked = Signal(int)
+
+    def createHandle(self):
+        return _PanelHandle(self.orientation(), self)
+
+
 class MainWindow(QMainWindow):
     def __init__(self, session=None, theme=None):
         super().__init__()
@@ -359,6 +398,8 @@ class MainWindow(QMainWindow):
         self._el_labels = []                     # подписи элементов (рисуются с замерами)
         self.level_ring = None                   # транспортир горизонта: {'a','b','L0','c','r','R'}
         self.snap_on = True                      # привязка замеров (B): вершины/центры важнее облака
+        self._panel_saved = {}                   # размеры панелей до сворачивания
+        self._panel_min = {}                     # минимумы панелей до сворачивания
         self.cbox_sel = None                     # выбранный бокс отсечения (панель)
         self._label_drag = None                  # драг подписи замера (Ф13)
         self._cbox_drag = None                   # драг грани бокса: {'id','axis','n','opp','c0','h0'}
@@ -376,6 +417,8 @@ class MainWindow(QMainWindow):
         self._qual_timer.timeout.connect(self._quality_areas)
         self.setWindowTitle('Pulse Scan')
         self._build()
+        self._restore_panels()
+        self.vp.view.cameraChanged.connect(lambda: self._place_panel_tabs())
         self._shortcuts()
         self._dirty_timer = QTimer(self)
         self._dirty_timer.timeout.connect(self._update_title)
@@ -398,8 +441,9 @@ class MainWindow(QMainWindow):
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(0)
         lay.addWidget(self._topbar())
-        self.split = QSplitter(Qt.Horizontal)
+        self.split = PanelSplitter(Qt.Horizontal)
         self.split.setChildrenCollapsible(False)
+        self.split.handleClicked.connect(lambda i: self.toggle_panel('left' if i == 1 else 'right'))
         self.tree_panel = TreePanel()
         self.tree_panel.session = self.s
         self.tree_panel.status_of = self.status_chip
@@ -412,8 +456,9 @@ class MainWindow(QMainWindow):
         self.tree_panel.layerToggled.connect(lambda k, v: self._sync_ribbon())
         self.tree_panel.setMinimumWidth(220)
         self.split.addWidget(self.tree_panel)
-        self.vsplit = QSplitter(Qt.Vertical)
+        self.vsplit = PanelSplitter(Qt.Vertical)
         self.vsplit.setChildrenCollapsible(False)
+        self.vsplit.handleClicked.connect(lambda i: self.toggle_panel('bottom'))
         self.vp = Viewport(self)
         self.view = self.vp.view
         self.view.mouse_hook = self._mouse_hook
@@ -472,12 +517,12 @@ class MainWindow(QMainWindow):
                   self.auto_panel, self.cand_panel, self.quality_panel, self.export_panel, self.drawing_panel,
                   self.pack_panel):
             self.right.addWidget(w)
-        rw = QFrame()
-        rw.setObjectName('PanelRight')
-        rl = QVBoxLayout(rw)
+        self.right_wrap = QFrame()
+        self.right_wrap.setObjectName('PanelRight')
+        rl = QVBoxLayout(self.right_wrap)
         rl.setContentsMargins(0, 0, 0, 0)
         rl.addWidget(self.right)
-        self.split.addWidget(rw)
+        self.split.addWidget(self.right_wrap)
         self.split.setStretchFactor(1, 1)
         self.split.setSizes([272, 900, 350])
         lay.addWidget(self.split, 1)
@@ -1417,11 +1462,7 @@ class MainWindow(QMainWindow):
         elif name == 'view_rename':
             v = self.s.view_by_id(key[5:])
             if v is not None:
-                d = AskDialog(self, 'Переименовать вид', [('Имя', 'text', v.get('name', ''), None)],
-                              'mdi6.pencil-outline', 'Переименовать')
-                if d.exec() and d.values()[0].strip():
-                    v['name'] = d.values()[0].strip()
-                    self.tree_panel.rebuild()
+                self.tree_panel.start_inline_rename(key, v.get('name', ''))
         elif name == 'view_delete':
             if self.s.remove_view(key[5:]):
                 self.tree_panel.rebuild()
@@ -1435,12 +1476,6 @@ class MainWindow(QMainWindow):
                 self.set_status(f"план «{pl['name']}» сохранён (глаз в ветви «Планы» — активировать)")
         elif name == 'plan_eye_on':
             self._activate_plan(key[5:])
-        elif name == 'plan_eye':
-            plan_id, on = arg
-            if on:
-                self._activate_plan(plan_id)
-            elif self.s.active_plan == plan_id:
-                self._deactivate_plan()
         elif name == 'plan_done':
             self._deactivate_plan()
         elif name == 'plan_dxf':
@@ -1453,12 +1488,7 @@ class MainWindow(QMainWindow):
         elif name == 'plan_rename':
             pl = self.s.plan_by_id(arg)
             if pl is not None:
-                d = AskDialog(self, 'Переименовать план', [('Имя', 'text', pl.get('name', ''), None)],
-                              'mdi6.pencil-outline', 'Переименовать')
-                if d.exec() and d.values()[0].strip():
-                    pl['name'] = d.values()[0].strip()
-                    self.tree_panel.rebuild()
-                    self.refresh_control()
+                self.tree_panel.start_inline_rename('plan:' + pl['id'], pl.get('name', ''))
         elif name == 'box_gather':
             self.add_box_gather()
         elif name == 'box_click':
@@ -1960,8 +1990,7 @@ class MainWindow(QMainWindow):
             a = v.addAction(title)
             a.setCheckable(True)
             a.setChecked(self.panel_visible(key))
-            a.toggled.connect(lambda on, k=key: self.toggle_panel(k) if
-                              getattr(self, self.PANELS[k][0]).isVisible() == on else None)
+            a.toggled.connect(lambda on, k=key: self.toggle_panel(k))
 
     def _statusbar(self):
         t = W.THEME
@@ -2165,18 +2194,85 @@ class MainWindow(QMainWindow):
               'right': ('right', 'Правая (панель инструмента)'),
               'bottom': ('dock', 'Нижняя (пары/циклы/…)')}
 
+    PANEL_GEOM = {'left': ('split', 0), 'right': ('split', 2), 'bottom': ('vsplit', 1)}
+
     def toggle_panel(self, key):
+        """Свернуть/развернуть панель размерами сплиттера: хэндл-кнопка на
+        границе остаётся на месте (клик по ней возвращает панель)."""
         name, _ = self.PANELS[key]
         w = getattr(self, name)
-        w.setVisible(not w.isVisible())
-        self.settings.setValue(f'panel/{key}', w.isVisible())
-        self._sync_ribbon()
+        spl, idx = self.PANEL_GEOM[key]
+        spl = getattr(self, spl)
+        if w.isVisible():
+            # минимумы панелей (330/120) не дают сплиттеру отдать их место
+            self._panel_min[key] = (w.minimumWidth(), w.minimumHeight())
+            w.setMinimumWidth(0)
+            w.setMinimumHeight(0)
+            w.setVisible(False)                          # панель исчезает целиком
+            sizes = spl.sizes()
+            sizes[idx] = 0
+            spl.setSizes(sizes)                          # место отдаётся 3D-виду
+            self.settings.setValue(f'panel/{key}', False)
+        else:
+            mw, mh = self._panel_min.get(key, (330, 120))
+            w.setMinimumWidth(mw)
+            w.setMinimumHeight(mh)
+            w.setVisible(True)
+            sizes = spl.sizes()
+            if sizes[idx] < 50:
+                sizes[idx] = 330 if idx != 1 else 210
+                spl.setSizes(sizes)
+            self.settings.setValue(f'panel/{key}', True)
+        self._place_panel_tabs()
 
     def _restore_panels(self):
         for key in self.PANELS:
             v = self.settings.value(f'panel/{key}')
-            if v is not None:
-                getattr(self, self.PANELS[key][0]).setVisible(v in (True, 'true'))
+            if v in (False, 'false'):
+                getattr(self, self.PANELS[key][0]).setVisible(False)
+        self._make_panel_tabs()
+
+    def _make_panel_tabs(self):
+        """Кнопки-«ушки» на границах 3D-вида (левая/правая панели) и в статусбаре
+        (нижняя): скрывают/показывают панели, всегда доступны для возврата."""
+        if hasattr(self, '_ptabs'):
+            return
+        t = W.THEME
+        self._ptabs = {}
+        for key, tip, ic in (('left', 'Дерево проекта (F2)', 'mdi6.chevron-right'),
+                             ('right', 'Панель инструмента (F3)', 'mdi6.chevron-left')):
+            b = QToolButton(self.vp)
+            b.setFixedSize(16, 56)
+            b.setObjectName('PanelTab')
+            b.setToolTip(tip)
+            b.clicked.connect(lambda _=False, k=key: self.toggle_panel(k))
+            b.show()
+            self._ptabs[key] = b
+        bb = QToolButton(self.st_text.parentWidget() if hasattr(self, 'st_text')
+                         else self.st_text)
+        bb.setObjectName('PanelTab')
+        bb.setFixedSize(28, 20)
+        bb.setIcon(t.icon('mdi6.dock-bottom', 'ink3'))
+        bb.setToolTip('Нижняя панель (F4)')
+        bb.clicked.connect(lambda: self.toggle_panel('bottom'))
+        bb.show()
+        self._ptabs['bottom'] = bb
+        self._place_panel_tabs()
+
+    def _place_panel_tabs(self):
+        tabs = getattr(self, '_ptabs', None)
+        if not tabs:
+            return
+        vp = self.vp
+        h = vp.height()
+        tabs['left'].move(0, max(0, h // 2 - 28))
+        tabs['right'].move(vp.width() - 16, max(0, h // 2 - 28))
+        tabs['left'].setArrowType(Qt.RightArrow if not self.tree_panel.isVisible() else Qt.LeftArrow)
+        tabs['right'].setArrowType(Qt.LeftArrow if not self.right.isVisible() else Qt.RightArrow)
+        for k in ('left', 'right'):
+            tabs[k].setVisible(vp.isVisible())
+        if hasattr(self, 'progress'):
+            tabs['bottom'].setVisible(True)
 
     def panel_visible(self, key):
         return getattr(self, self.PANELS[key][0]).isVisible()
@@ -3230,14 +3326,8 @@ class MainWindow(QMainWindow):
                 self.set_status(f'группа «{t.group(gid).name}» создана; сканы — перетаскиванием в неё')
         elif name == 'rename':
             sc = self.s.by_id(key) if key else None
-            if sc is not None:                       # скан: label, id не меняется
-                d = AskDialog(self, 'Переименовать скан',
-                              [('Имя', 'text', sc.label or short(sc.id), None)],
-                              'mdi6.pencil-outline', 'Переименовать')
-                if d.exec():
-                    self.s.rename_scan(sc.id, d.values()[0])
-                    self.tree_panel.rebuild()
-                    self.refresh_inspector()
+            if sc is not None:                       # скан: правка имени прямо в дереве
+                self.tree_panel.start_inline_rename(key, self.s.scan_title(key))
                 return
             g = t.group(key)
             if g is None or g is t.root:
@@ -3268,7 +3358,9 @@ class MainWindow(QMainWindow):
             if el is not None:
                 self._element_tree_visible(key, not self.s.element_visible(el))
         elif name == 'el_rename':
-            self.on_fit_action('rename', key[5:])
+            el = self.s.element_by_id(key[5:])
+            if el is not None:
+                self.tree_panel.start_inline_rename(key, el.get('name', ''))
         elif name == 'el_level':
             self.level_by_element(key[5:])
         elif name == 'el_delete':
@@ -3278,15 +3370,48 @@ class MainWindow(QMainWindow):
             if b is not None:
                 self._cbox_tree_visible(key, not b.get('on'))
                 self.tree_panel.rebuild()
+        elif name == 'rename_done':
+            key, text = key                                 # (key, текст) из inline-редактора
+            text = text.strip()
+            self.tree_panel.end_inline_rename()
+            if not text:
+                return
+            if key.startswith('elem:'):
+                self.s.rename_element(key[5:], text)
+                self.refresh_fit_panel()
+                self.draw_elements()
+            elif key.startswith('cbox:'):
+                b = self.s.box_by_id(key[5:])
+                if b is not None:
+                    b['name'] = text
+                    self.refresh_clip_boxes()
+            elif key.startswith('plan:'):
+                pl = self.s.plan_by_id(key[5:])
+                if pl is not None:
+                    pl['name'] = text
+                    self.refresh_control()
+            elif key.startswith('view:'):
+                v = self.s.view_by_id(key[5:])
+                if v is not None:
+                    v['name'] = text
+            elif self.s.by_id(key) is not None:
+                self.s.rename_scan(key, text)
+                self.refresh_inspector()
+            else:
+                g = self.s.tree.group(key)
+                if g is not None and g is not self.s.tree.root:
+                    self.s.tree.rename(g.id, text, g.kind)
+            self.tree_panel.rebuild()
+        elif name == 'plan_eye':
+            plan_id, on = arg
+            if on:
+                self._activate_plan(plan_id)
+            elif self.s.active_plan == plan_id:
+                self._deactivate_plan()
         elif name == 'cbox_rename':
             b = self.s.box_by_id(key[5:])
             if b is not None:
-                d = AskDialog(self, 'Переименовать бокс', [('Имя', 'text', b.get('name', ''), None)],
-                              'mdi6.pencil-outline', 'Переименовать')
-                if d.exec() and d.values()[0].strip():
-                    b['name'] = d.values()[0].strip()
-                    self.refresh_clip_boxes()
-                    self.tree_panel.rebuild()
+                self.tree_panel.start_inline_rename(key, b.get('name', ''))
         elif name == 'cbox_delete':
             if self.s.remove_box(key[5:]):
                 self.refresh_clip_boxes()
