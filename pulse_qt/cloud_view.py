@@ -337,6 +337,16 @@ class CloudView(QWidget):
                 ang = float(np.arctan2(vn, float(from_axis @ a)))
                 K = np.array([[0, -v[2], v[1]], [v[2], 0, -v[0]], [-v[1], v[0], 0]])
                 R = np.eye(3) + np.sin(ang) * K + (1 - np.cos(ang)) * (K @ K)
+            else:
+                # 180° (оси антипараллельны): поворот на π вокруг любой
+                # перпендикулярной оси — иначе конус остаётся смотрящим внутрь
+                perp = np.array([0.0, 0, 1.0]) if abs(from_axis[2]) < 0.9 \
+                    else np.array([1.0, 0, 0.0])
+                perp = perp - (perp @ from_axis) * from_axis
+                perp /= np.linalg.norm(perp)
+                K = np.array([[0, -perp[2], perp[1]], [perp[2], 0, -perp[0]],
+                              [-perp[1], perp[0], 0]])
+                R = np.eye(3) + 2 * (K @ K)              # sin π = 0, cos π = −1
             Pw = P @ R.T + a * shift + b
             V.append(Pw)
             conn = np.array(pd.GetPolys().GetData(), np.int64)
