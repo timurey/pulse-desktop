@@ -460,10 +460,18 @@ def projection_paper(session, paper='z', paper_el=None):
     if paper == 'elem':
         if paper_el is None or paper_el['kind'] != 'plane':
             raise ValueError('плоскость листа «по элементу» нужна плоскость')
-        n = np.asarray(paper_el['params']['n'], float)
-        origin = np.asarray(paper_el['center'], float)
-        u_ax, v_ax = plane_frame(n)
-        return u_ax, v_ax, n / np.linalg.norm(n), origin
+        # нормаль/центр элемента — в канон. системе его скана: переводим в общую
+        # (иначе у повёрнутых сканов лист «не совпадает сам с собой» и всё
+        # оказывается «параллельным листу» и пропускается)
+        sc = session.by_id(paper_el.get('scan'))
+        if sc is None or sc.pose is None:
+            raise ValueError('скан элемента не размещён')
+        T = session.Tc(sc)
+        n_w = T[:3, :3] @ np.asarray(paper_el['params']['n'], float)
+        origin = T[:3, :3] @ np.asarray(paper_el['center'], float) + T[:3, 3]
+        n_w = n_w / np.linalg.norm(n_w)
+        u_ax, v_ax = plane_frame(n_w)
+        return u_ax, v_ax, n_w, origin
     u_ax, v_ax = np.array([1.0, 0, 0]), np.array([0, 1.0, 0])
     return u_ax, v_ax, np.array([0.0, 0, 1.0]), np.zeros(3)
 
