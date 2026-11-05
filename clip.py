@@ -33,6 +33,52 @@ def box_wire(center, size, yaw_deg=0.0):
     return V, np.asarray(edges, np.int64)
 
 
+# ребро → локальная ось, вдоль которой оно бежит (индексы вершин из box_wire:
+# idx = 4*i_sx + 2*i_sy + i_sz; рёбра 0..3 — низ, 4..7 — верх, 8..11 — стойки)
+EDGE_AXIS = {0: 2, 1: 1, 2: 2, 3: 1, 4: 2, 5: 1, 6: 2, 7: 1,
+             8: 0, 9: 0, 10: 0, 11: 0}
+
+
+def edge_axis_world(box, edge_idx):
+    """Мировое направление ребра edge_idx (единичное)."""
+    a = np.zeros(3)
+    a[EDGE_AXIS[edge_idx]] = 1.0
+    yaw = np.radians(float(box.get('yaw_deg', 0.0)))
+    R = np.array([[np.cos(yaw), -np.sin(yaw), 0], [np.sin(yaw), np.cos(yaw), 0], [0, 0, 1]])
+    return R @ a
+
+
+def box_handles(box, seg=8):
+    """
+    Органы управления на рёбрах (стрелки-ручки): на середине каждого ребра —
+    двухсторонняя стрелка вдоль оси растяжения (размер по этой оси меняется
+    при тяге). → (точки, сегменты) для set_lines; направление ребра — мир.
+    """
+    c = np.asarray(box['center'], float)
+    d = np.abs(np.asarray(box['size'], float)) / 2.0
+    yaw = np.radians(float(box.get('yaw_deg', 0.0)))
+    R = np.array([[np.cos(yaw), -np.sin(yaw), 0], [np.sin(yaw), np.cos(yaw), 0], [0, 0, 1]])
+    V, E = box_wire(c, np.abs(np.asarray(box['size'], float)), float(box.get('yaw_deg', 0.0)))
+    pts, segs = [], []
+    for k, (i0, i1) in enumerate(E):
+        axis = EDGE_AXIS[k]
+        m = 0.5 * (V[i0] + V[i1])
+        a = np.zeros(3); a[axis] = 1.0
+        a = R @ a
+        hs = 0.3 * (2 * d[axis])                       # полудлина стрелки
+        head = 0.25 * hs
+        pts.extend([m - hs * a, m + hs * a])
+        segs.append([len(pts) - 2, len(pts) - 1])
+        for s_side in (-1, 1):                         # наконечники-«ласточки»
+            tip = m + s_side * hs * a
+            for sign in (-1, 1):
+                perp = np.roll(a, 1) * sign            # любая перпендикулярная
+                q = tip - head * (s_side * a) + head * 0.5 * perp
+                pts.extend([tip, q])
+                segs.append([len(pts) - 2, len(pts) - 1])
+    return np.asarray(pts, float), np.asarray(segs, np.int64)
+
+
 def box_planes(box):
     """Бокс → 6 плоскостей внутрь: [(n, c)] с n·x ≥ c внутри (для VTK clipping
     плоскость оставляет сторону, куда смотрит нормаль)."""

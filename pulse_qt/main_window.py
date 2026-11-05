@@ -361,6 +361,7 @@ class MainWindow(QMainWindow):
         self.snap_on = True                      # привязка замеров (B): вершины/центры важнее облака
         self.cbox_sel = None                     # выбранный бокс отсечения (панель)
         self._label_drag = None                  # драг подписи замера (Ф13)
+        self._cbox_drag = None                   # драг ребра бокса: {'id','axis','dir','center'}
         self.zero_show = True
         self.z0 = None
         self.points_hidden = False               # «Поверхность»: показывать только сетки
@@ -1136,12 +1137,16 @@ class MainWindow(QMainWindow):
             if b.get('visible') and b.get('on'):
                 V, E = clip.box_wire(b['center'], b['size'], b.get('yaw_deg', 0.0))
                 self.view.set_lines(name, V, E, None, None, 1.5, (0.98, 0.62, 0.25), 0.9, on_top=True)
+                H, HS = clip.box_handles(b)
+                self.view.set_lines(f"cboxg:{b['id']}", H, HS, None, None, 2.0,
+                                    (1.0, 0.85, 0.29), 1.0, on_top=True)
             else:
                 self.view.remove(name)
+                self.view.remove(f"cboxg:{b['id']}")
         if self._boxes_cpu and not light:
             self.redraw_all()                            # CPU-маска — пересоздать облака
-        if self.tool == 'control' and hasattr(self, 'control'):
-            self.refresh_control()
+        if hasattr(self, 'control'):
+            self.refresh_control()                       # список боксов и поля — всегда актуальны
 
     def add_box_gather(self):
         """Бокс по габариту видимых размещённых сканов."""
@@ -1176,6 +1181,86 @@ class MainWindow(QMainWindow):
         self.refresh_control()
         self.set_status(f"{b['name']}: центр по клику (поля — в «Контроль» → «Боксы»)")
         return p_world
+
+    CBOX_HIT_PX = 9                                   # допуск захвата ребра, экранных точек
+
+    def _cbox_edge_hit(self, x, y):
+        """Стрелка-ручка бокса под курсором (центр стрелки = середина ребра).
+        → (box, axis, mid) | None. Мид-точки стрелок видны при любой камере."""
+        import clip
+        best = None
+        for b in self.s.clip_boxes:
+            if not (b.get('visible') and b.get('on')):
+                continue
+            V, E = clip.box_wire(b['center'], b['size'], b.get('yaw_deg', 0.0))
+            mids = [(0.5 * (V[i0] + V[i1]), clip.EDGE_AXIS[k])
+                    for k, (i0, i1) in enumerate(E)]
+            sv, _, front = self.view.project(np.array([m for m, _ in mids]))
+            for (m, axis), (px, py), f in zip(mids, sv, front):
+                if not f:
+                    continue
+                d = float(np.hypot(px - x, py - y))
+                if d < self.CBOX_HIT_PX + 4 and (best is None or d < best[0]):
+                    best = (d, b, axis, m)
+        return None if best is None else (best[1], best[2], best[3])
+
+    def _cbox_drag_start(self, x, y):
+        """Захват ребра бокса (press). → True, если событие поглощено."""
+        hit = self._cbox_edge_hit(x, y)
+        if hit is None:
+            return False
+        b, axis, mid = hit
+        self.cbox_sel = b['id']
+        self._cbox_drag = {'id': b['id'], 'axis': axis,
+                           'dir': self._axis_dir(b, axis),
+                           'center': np.asarray(b['center'], float).copy()}
+        self.refresh_control()                           # поля выбранного бокса
+        self.set_status('тяните ребро — размер по оси; Shift — шаг 5 см', log=False)
+        return True
+
+    def _axis_dir(self, b, axis):
+        a = np.zeros(3); a[axis] = 1.0
+        yaw = np.radians(float(b.get('yaw_deg', 0.0)))
+        R = np.array([[np.cos(yaw), -np.sin(yaw), 0], [np.sin(yaw), np.cos(yaw), 0], [0, 0, 1]])
+        return R @ a
+
+    def _cbox_drag_move(self, x, y):
+        """Тяга ребра: расстояние луча курсора до оси ребра → размер по оси
+        (симметрично от центра; Shift — шаг 5 см)."""
+        g = self._cbox_drag
+        b = self.s.box_by_id(g['id'])
+        if b is None:
+            return True
+        o, dvec = self.view.ray(x, y)
+        a = g['dir']
+        w0 = o - g['center']
+        A = float(dvec @ a)
+        denom = 1.0 - A * A
+        if abs(denom) < 1e-6:
+            return True
+        D = float(dvec @ w0); E = float(a @ w0)
+        t = (E - A * D) / denom
+        size = max(0.05, 2.0 * abs(t))
+        if QApplication.keyboardModifiers() & Qt.ShiftModifier:
+            size = round(size / 0.05) * 0.05
+        b['size'][g['axis']] = float(size)
+        self._cbox_drag_refresh()
+        return True
+
+    def _cbox_drag_refresh(self):
+        """Лёгкое обновление при тяге: каркас + GPU-плоскости (облака на релизе)."""
+        import clip
+        b = self.s.box_by_id(self._cbox_drag['id'])
+        if b is not None and b.get('visible') and b.get('on'):
+            V, E = clip.box_wire(b['center'], b['size'], b.get('yaw_deg', 0.0))
+            self.view.set_lines(f"cbox:{b['id']}", V, E, None, None, 1.5, (0.98, 0.62, 0.25), 0.9, on_top=True)
+            H, HS = clip.box_handles(b)
+            self.view.set_lines(f"cboxg:{b['id']}", H, HS, None, None, 2.0,
+                                (1.0, 0.85, 0.29), 1.0, on_top=True)
+        active = clip.active_boxes(self.s)
+        sec_on = (self.s.section or {}).get('mode', 'off') != 'off'
+        if len(active) == 1 and not sec_on:
+            self.view.set_section(self.s.section, clip_boxes_planes=clip.box_planes(active[0]))
 
     def refresh_cbox_panel(self):
         self.control.set_boxes(self.s.clip_boxes, self.cbox_sel)
@@ -4600,6 +4685,22 @@ class MainWindow(QMainWindow):
             return True
         if kind == 'release' and getattr(self, '_label_drag', None) is not None:
             self._label_drag = None
+            return True
+        if kind == 'press' and ev.button() == Qt.LeftButton and not manual \
+                and not self.measure_mode and not self.select_mode \
+                and self._protractor() is None and self.s.clip_boxes:
+            if self._cbox_drag_start(x, y):
+                return True
+        if kind == 'move' and getattr(self, '_cbox_drag', None) is not None:
+            print('DBG hook move branch', flush=True)
+            return self._cbox_drag_move(x, y)
+        if kind == 'release' and getattr(self, '_cbox_drag', None) is not None:
+            b = self.s.box_by_id(self._cbox_drag['id'])
+            self._cbox_drag = None
+            self.refresh_clip_boxes()                    # облака/пикинг — после тяги
+            if b is not None:
+                self.set_status(f"{b.get('name', b['id'])}: размер "
+                                f"{b['size'][0]:.2f} × {b['size'][1]:.2f} × {b['size'][2]:.2f} м")
             return True
         if kind == 'press' and ev.button() == Qt.LeftButton:
             if manual and self.pivot_pick and mods & (Qt.ControlModifier | Qt.MetaModifier):

@@ -267,6 +267,9 @@ class _PlanRow(QFrame):
 
 class ControlPanel(_Panel):
     action = Signal(str, object)
+    # разделы по инструментам: у «Сечения» — боксы и планы (один workflow)
+    FOCUS = {'section': ('section', 'cbox', 'plans'),
+             'zero': ('zero',), 'measure': ('measure',)}
     MEASURES = [('расстояние', 'dist'), ('отметка', 'height'), ('до плоскости', 'plane'), ('ломаная', 'poly')]
 
     def __init__(self):

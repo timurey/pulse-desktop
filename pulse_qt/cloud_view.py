@@ -206,7 +206,7 @@ class CloudView(QWidget):
         return a
 
     # ── сечение ──────────────────────────────────────────────────────────
-    NO_SECTION = ('grid', 'meas:', 'pivot:', 'sect:', 'mplane')
+    NO_SECTION = ('grid', 'meas:', 'pivot:', 'sect:', 'mplane', 'cbox')
 
     def set_section(self, st, clip_boxes_planes=None):
         """Сечение (dict из section.py или None): плоскости отсечения на все облака
