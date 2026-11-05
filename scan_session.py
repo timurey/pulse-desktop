@@ -58,6 +58,7 @@ class Scan:
     def __init__(self, path, up='auto', pose=None, sid=None):
         self.path = str(Path(path).resolve())
         self.id = sid or Path(path).name
+        self.label = None           # отображаемое имя (rename в дереве); None — short(id)
         self.up = up
         self.pose = None if pose is None else np.asarray(pose, float)   # исходная -> исходная опорного
         self.visible = True
@@ -224,6 +225,7 @@ class Scan:
         return {'id': self.id, 'path': self.path, 'up': self.up,
                 'pose': None if self.pose is None else self.pose.tolist(),
                 'clean': self.clean,
+                'label': self.label,
                 'erase': [np.asarray(r).tolist() for r in self.erase],
                 'drop': np.asarray(self.drop).tolist(),
                 'source': self.source, **({'display': self.display} if self.display else {})}
@@ -262,6 +264,7 @@ class Session:
         for e in proj['scans']:
             sc = Scan(e['path'], e.get('up', 'auto'), e.get('pose'), e['id'])
             sc.clean = e.get('clean', True)
+            sc.label = e.get('label') or None
             sc.erase = [np.asarray(r, float) for r in e.get('erase', [])]
             sc.drop = np.asarray(e.get('drop', []), np.int64)
             sc.source = e.get('source')
@@ -400,6 +403,7 @@ class Session:
             used.add(sid)
             sc = Scan(src, e.get('up', 'auto'), None, sid)
             sc.clean = e.get('clean', True)
+            sc.label = e.get('label') or None
             sc.erase = [np.asarray(r, float) for r in e.get('erase', [])]
             sc.drop = np.asarray(e.get('drop', []), np.int64)
             sc.source = e.get('source')
@@ -1098,6 +1102,24 @@ class Session:
         if len(r) == 0:
             return np.zeros(0, np.int64)
         return np.flatnonzero(np.abs(r) <= k * max(float(el['sigma']), 1e-4))
+
+    # ── переименование скана ─────────────────────────────────────────────
+    def rename_scan(self, scan_id, label):
+        """Отображаемое имя скана (id и связи не меняются)."""
+        label = (label or '').strip()
+        sc = self.by_id(scan_id)
+        if sc is None:
+            return None
+        sc.label = label or None
+        return sc
+
+    def scan_title(self, scan_id):
+        """Имя для дерева/подписей: label или short(id)."""
+        from scan_tree import short as _short
+        sc = self.by_id(scan_id)
+        if sc is not None and sc.label:
+            return sc.label
+        return _short(scan_id)
 
     # ── боксы отсечения (clip.py) ────────────────────────────────────────
     def add_box(self, center, size=None, yaw_deg=0.0, name=None):

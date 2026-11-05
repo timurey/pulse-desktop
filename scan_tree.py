@@ -333,3 +333,10 @@ class Tree:
 
     def is_flat(self):
         return not any(isinstance(c, Group) for c in self.root.children)
+
+
+def short(sid):
+    """static_20260922_231157.e57 -> 231157 (короткое имя скана)."""
+    from pathlib import Path
+    stem = Path(sid).stem
+    return stem.split('_')[-1] if '_' in stem else stem

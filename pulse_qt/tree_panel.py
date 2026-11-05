@@ -5,17 +5,10 @@ from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QTreeWidget, QTreeWidgetItem,
                                QAbstractItemView, QLabel, QFrame, QMenu, QToolButton, QLineEdit)
 
-from scan_tree import Group
+from scan_tree import Group, short
 from . import widgets as W
 
 ROLE = Qt.UserRole
-
-
-def short(sid):
-    """static_20260922_231157.e57 -> 231157"""
-    from pathlib import Path
-    stem = Path(sid).stem
-    return stem.split('_')[-1] if '_' in stem else stem
 
 
 class _Row(QWidget):
@@ -276,9 +269,12 @@ class TreePanel(QFrame):
                              (it.flags() & ~Qt.ItemIsDragEnabled)) & ~Qt.ItemIsDropEnabled)
                 self._items[node.scan] = it
                 st = self.status_of(node.scan) if self.status_of else None
-                row = _Row(self, node.scan, short(node.scan), node.visible,
+                title = (self.session.scan_title(node.scan)
+                         if self.session else short(node.scan))
+                row = _Row(self, node.scan, title, node.visible,
                            color=self.color_of(node.scan) if self.color_of else None, chip=st)
-                row.setToolTip(node.scan)
+                row.setToolTip(node.scan + ('' if title == short(node.scan)
+                                            else f'  ({short(node.scan)})'))
                 tree.setItemWidget(it, 0, row)
 
         root = tree.invisibleRootItem()
@@ -577,6 +573,7 @@ class TreePanel(QFrame):
                 act('Удалить группу (содержимое — родителю)', 'delete_group', 'mdi6.folder-remove-outline')
                 act('Удалить группу вместе со сканами…', 'remove', 'mdi6.delete-outline')
             else:
+                act('Переименовать', 'rename', 'mdi6.pencil-outline')
                 act('Сделать опорным', 'make_ref', 'mdi6.anchor')
                 act('Ручная стыковка', 'manual', 'mdi6.vector-combine')
                 act('Уточнить стыковку (автоподгонка)', 'refine', 'mdi6.auto-fix')

@@ -485,6 +485,7 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(root)
         self.view.set_background(t.rgb('canvas'))
         self._mac_menubar()
+        self._restore_panels()
 
     def _topbar(self):
         """Лента: вкладки-этапы; на ленте команды, параметры и состояние — в правой панели."""
@@ -1953,6 +1954,14 @@ class MainWindow(QMainWindow):
         v.addAction('Показать всё', self.fit_all)
         v.addAction('Полёт', self.toggle_fly)
         v.addAction('Светлая / тёмная тема', self.toggle_theme)
+        v.addSeparator()
+        for key, title in (('left', 'Левая панель (F2)'), ('right', 'Правая панель (F3)'),
+                           ('bottom', 'Нижняя панель (F4)')):
+            a = v.addAction(title)
+            a.setCheckable(True)
+            a.setChecked(self.panel_visible(key))
+            a.toggled.connect(lambda on, k=key: self.toggle_panel(k) if
+                              getattr(self, self.PANELS[k][0]).isVisible() == on else None)
 
     def _statusbar(self):
         t = W.THEME
@@ -2151,6 +2160,27 @@ class MainWindow(QMainWindow):
             return
         self.set_status(f'замеры экспортированы: {p} ({len(self.s.measures)} шт.)')
 
+    # ── скрытие панелей (F2 левая, F3 правая, F4 нижняя) ─────────────────
+    PANELS = {'left': ('tree_panel', 'Левая (дерево)'),
+              'right': ('right', 'Правая (панель инструмента)'),
+              'bottom': ('dock', 'Нижняя (пары/циклы/…)')}
+
+    def toggle_panel(self, key):
+        name, _ = self.PANELS[key]
+        w = getattr(self, name)
+        w.setVisible(not w.isVisible())
+        self.settings.setValue(f'panel/{key}', w.isVisible())
+        self._sync_ribbon()
+
+    def _restore_panels(self):
+        for key in self.PANELS:
+            v = self.settings.value(f'panel/{key}')
+            if v is not None:
+                getattr(self, self.PANELS[key][0]).setVisible(v in (True, 'true'))
+
+    def panel_visible(self, key):
+        return getattr(self, self.PANELS[key][0]).isVisible()
+
     def on_undo(self):
         """Ctrl+Z: в режиме замеров — отмена замера (пустой стек не проваливается
         в отмену чистки); вне режима — чистка, а если её не было, но были правки
@@ -2177,6 +2207,9 @@ class MainWindow(QMainWindow):
                         ('Delete', self.on_erase), ('Backspace', self.on_erase),
                         ('Ctrl+Z', self.on_undo), ('Ctrl+G', self.group_selected),
                         ('B', self.toggle_snap),
+                        ('F2', lambda: self.toggle_panel('left')),
+                        ('F3', lambda: self.toggle_panel('right')),
+                        ('F4', lambda: self.toggle_panel('bottom')),
                         ('F1', self.show_manual),
                         ('Ctrl+Delete', lambda: self.remove_selected()),
                         ('Ctrl+Backspace', lambda: self.remove_selected()),
@@ -3196,6 +3229,16 @@ class MainWindow(QMainWindow):
                 self.tree_panel.select(gid)
                 self.set_status(f'группа «{t.group(gid).name}» создана; сканы — перетаскиванием в неё')
         elif name == 'rename':
+            sc = self.s.by_id(key) if key else None
+            if sc is not None:                       # скан: label, id не меняется
+                d = AskDialog(self, 'Переименовать скан',
+                              [('Имя', 'text', sc.label or short(sc.id), None)],
+                              'mdi6.pencil-outline', 'Переименовать')
+                if d.exec():
+                    self.s.rename_scan(sc.id, d.values()[0])
+                    self.tree_panel.rebuild()
+                    self.refresh_inspector()
+                return
             g = t.group(key)
             if g is None or g is t.root:
                 return

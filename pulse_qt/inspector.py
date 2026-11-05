@@ -282,7 +282,8 @@ class Inspector(_Panel):
             acts.append(('Сделать опорным', 'make_ref', 'mdi6.anchor'))
         if placed and not is_ref:
             acts.append(('Уточнить стыковку', 'refine', 'mdi6.auto-fix'))
-        acts += [('Ручная стыковка', 'manual', 'mdi6.vector-combine'),
+        acts += [('Переименовать', 'rename', 'mdi6.pencil-outline'),
+                 ('Ручная стыковка', 'manual', 'mdi6.vector-combine'),
                  ('Кандидаты позы', 'candidates', 'mdi6.target'),
                  ('Чистка скана', 'clean', 'mdi6.selection-drag'),
                  ('Встать в точку', 'fly_to', 'mdi6.airplane'),
