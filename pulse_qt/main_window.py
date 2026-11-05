@@ -361,7 +361,7 @@ class MainWindow(QMainWindow):
         self.snap_on = True                      # привязка замеров (B): вершины/центры важнее облака
         self.cbox_sel = None                     # выбранный бокс отсечения (панель)
         self._label_drag = None                  # драг подписи замера (Ф13)
-        self._cbox_drag = None                   # драг ребра бокса: {'id','axis','dir','center'}
+        self._cbox_drag = None                   # драг грани бокса: {'id','axis','n','opp','c0','h0'}
         self.zero_show = True
         self.z0 = None
         self.points_hidden = False               # «Поверхность»: показывать только сетки
@@ -1137,12 +1137,14 @@ class MainWindow(QMainWindow):
             if b.get('visible') and b.get('on'):
                 V, E = clip.box_wire(b['center'], b['size'], b.get('yaw_deg', 0.0))
                 self.view.set_lines(name, V, E, None, None, 1.5, (0.98, 0.62, 0.25), 0.9, on_top=True)
-                H, HS = clip.box_handles(b)
-                self.view.set_lines(f"cboxg:{b['id']}", H, HS, None, None, 2.0,
-                                    (1.0, 0.85, 0.29), 1.0, on_top=True)
+                for k in range(3):
+                    for sg in (-1, 1):
+                        base, tip, r = clip.face_arrow(b, k, sg)
+                        self.view.set_arrow(f"cboxg:{b['id']}:{k}{sg}", base, tip, r,
+                                            (1.0, 0.85, 0.29))
             else:
                 self.view.remove(name)
-                self.view.remove(f"cboxg:{b['id']}")
+                self.view.remove_prefix(f"cboxg:{b['id']}")
         if self._boxes_cpu and not light:
             self.redraw_all()                            # CPU-маска — пересоздать облака
         if hasattr(self, 'control'):
@@ -1182,68 +1184,76 @@ class MainWindow(QMainWindow):
         self.set_status(f"{b['name']}: центр по клику (поля — в «Контроль» → «Боксы»)")
         return p_world
 
-    CBOX_HIT_PX = 9                                   # допуск захвата ребра, экранных точек
+    CBOX_HIT_PX = 9                                   # допуск захвата грани, экранных точек
 
-    def _cbox_edge_hit(self, x, y):
-        """Стрелка-ручка бокса под курсором (центр стрелки = середина ребра).
-        → (box, axis, mid) | None. Мид-точки стрелок видны при любой камере."""
+    def _cbox_face_hit(self, x, y):
+        """Объёмная стрелка-ручка под курсором: сэмплы вдоль всей стрелки
+        (ствол + наконечник, ~10 точек) — попадать легко с любой стороны.
+        → (box, ось, знак, центр_грани_3d) | None."""
         import clip
         best = None
+        tol = self.CBOX_HIT_PX + 8
         for b in self.s.clip_boxes:
             if not (b.get('visible') and b.get('on')):
                 continue
-            V, E = clip.box_wire(b['center'], b['size'], b.get('yaw_deg', 0.0))
-            mids = [(0.5 * (V[i0] + V[i1]), clip.EDGE_AXIS[k])
-                    for k, (i0, i1) in enumerate(E)]
-            sv, _, front = self.view.project(np.array([m for m, _ in mids]))
-            for (m, axis), (px, py), f in zip(mids, sv, front):
-                if not f:
-                    continue
-                d = float(np.hypot(px - x, py - y))
-                if d < self.CBOX_HIT_PX + 4 and (best is None or d < best[0]):
-                    best = (d, b, axis, m)
-        return None if best is None else (best[1], best[2], best[3])
+            for axis in range(3):
+                for sign in (-1, 1):
+                    base, tip, _r = clip.face_arrow(b, axis, sign)
+                    S = base + (tip - base) * np.linspace(0, 1, 10)[:, None]
+                    sv, _, front = self.view.project(S)
+                    d = np.hypot(sv[:, 0] - x, sv[:, 1] - y)
+                    d[~front] = np.inf
+                    if not np.isfinite(d).all() and not np.isfinite(d).any():
+                        continue
+                    k = int(np.argmin(d))
+                    if d[k] < tol and (best is None or d[k] < best[0]):
+                        best = (float(d[k]), b, axis, sign, base)
+        return None if best is None else (best[1], best[2], best[3], best[4])
 
     def _cbox_drag_start(self, x, y):
-        """Захват ребра бокса (press). → True, если событие поглощено."""
-        hit = self._cbox_edge_hit(x, y)
+        """Захват стрелки-грани бокса (press). → True, если событие поглощено."""
+        hit = self._cbox_face_hit(x, y)
         if hit is None:
             return False
-        b, axis, mid = hit
-        self.cbox_sel = b['id']
-        self._cbox_drag = {'id': b['id'], 'axis': axis,
-                           'dir': self._axis_dir(b, axis),
-                           'center': np.asarray(b['center'], float).copy()}
-        self.refresh_control()                           # поля выбранного бокса
-        self.set_status('тяните ребро — размер по оси; Shift — шаг 5 см', log=False)
-        return True
-
-    def _axis_dir(self, b, axis):
-        a = np.zeros(3); a[axis] = 1.0
+        b, axis, sign, _fc = hit
         yaw = np.radians(float(b.get('yaw_deg', 0.0)))
         R = np.array([[np.cos(yaw), -np.sin(yaw), 0], [np.sin(yaw), np.cos(yaw), 0], [0, 0, 1]])
-        return R @ a
+        n = R[:, axis] * sign                          # нормаль грани наружу (мир)
+        h0 = abs(float(b['size'][axis])) / 2.0
+        c0 = np.asarray(b['center'], float).copy()
+        self.cbox_sel = b['id']
+        self._cbox_drag = {'id': b['id'], 'axis': axis, 'n': n,
+                           'opp': c0 - n * h0,          # противоположная грань — неподвижна
+                           'c0': c0, 'h0': h0}
+        self.refresh_control()                           # поля выбранного бокса
+        self.set_status('тяните грань — размер меняется только с этой стороны; '
+                        'Shift — шаг 5 см', log=False)
+        return True
 
     def _cbox_drag_move(self, x, y):
-        """Тяга ребра: расстояние луча курсора до оси ребра → размер по оси
-        (симметрично от центра; Shift — шаг 5 см)."""
+        """Тяга грани: расстояние вдоль нормали от НЕПОДВИЖНОЙ противоположной
+        грани до луча курсора → новая грань; размер = расстояние между гранями,
+        центр сдвигается на полприроста (противоположная стоит на месте).
+        Инверсия дальше противоположной грани — стоп на 0.05 м; Shift — шаг 5 см."""
         g = self._cbox_drag
         b = self.s.box_by_id(g['id'])
         if b is None:
             return True
         o, dvec = self.view.ray(x, y)
-        a = g['dir']
-        w0 = o - g['center']
-        A = float(dvec @ a)
+        n = g['n']
+        w0 = o - g['opp']
+        A = float(dvec @ n)
         denom = 1.0 - A * A
-        if abs(denom) < 1e-6:
+        if abs(denom) < 1e-6:                           # луч вдоль нормали — вырожденно
             return True
-        D = float(dvec @ w0); E = float(a @ w0)
-        t = (E - A * D) / denom
-        size = max(0.05, 2.0 * abs(t))
+        D = float(dvec @ w0); E = float(n @ w0)
+        s = (E - A * D) / denom                         # от противоположной грани до луча
+        size = max(0.05, s)                             # s — уже расстояние грань-грань
         if QApplication.keyboardModifiers() & Qt.ShiftModifier:
-            size = round(size / 0.05) * 0.05
+            size = max(0.05, round(size / 0.05) * 0.05)
+        h = size / 2.0
         b['size'][g['axis']] = float(size)
+        b['center'] = [float(v) for v in (g['c0'] + (h - g['h0']) * n)]
         self._cbox_drag_refresh()
         return True
 
@@ -1254,9 +1264,11 @@ class MainWindow(QMainWindow):
         if b is not None and b.get('visible') and b.get('on'):
             V, E = clip.box_wire(b['center'], b['size'], b.get('yaw_deg', 0.0))
             self.view.set_lines(f"cbox:{b['id']}", V, E, None, None, 1.5, (0.98, 0.62, 0.25), 0.9, on_top=True)
-            H, HS = clip.box_handles(b)
-            self.view.set_lines(f"cboxg:{b['id']}", H, HS, None, None, 2.0,
-                                (1.0, 0.85, 0.29), 1.0, on_top=True)
+            for k in range(3):
+                for sg in (-1, 1):
+                    base, tip, r = clip.face_arrow(b, k, sg)
+                    self.view.set_arrow(f"cboxg:{b['id']}:{k}{sg}", base, tip, r,
+                                        (1.0, 0.85, 0.29))
         active = clip.active_boxes(self.s)
         sec_on = (self.s.section or {}).get('mode', 'off') != 'off'
         if len(active) == 1 and not sec_on:
@@ -4692,7 +4704,6 @@ class MainWindow(QMainWindow):
             if self._cbox_drag_start(x, y):
                 return True
         if kind == 'move' and getattr(self, '_cbox_drag', None) is not None:
-            print('DBG hook move branch', flush=True)
             return self._cbox_drag_move(x, y)
         if kind == 'release' and getattr(self, '_cbox_drag', None) is not None:
             b = self.s.box_by_id(self._cbox_drag['id'])

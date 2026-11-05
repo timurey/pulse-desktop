@@ -96,6 +96,54 @@ class TestPlanesAndWire(unittest.TestCase):
         self.assertAlmostEqual(np.ptp(ys), 2.0, places=9)
 
 
+class TestFaces(unittest.TestCase):
+    def test_box_faces(self):
+        """6 граней: нормали единичные наружу, ⊥ остальным осям, центр = center + n·size/2."""
+        fs = clip.box_faces(BOX)
+        self.assertEqual(len(fs), 6)
+        c = np.asarray(BOX['center'], float)
+        size = np.asarray(BOX['size'], float)
+        order = [(0, -1), (0, 1), (1, -1), (1, 1), (2, -1), (2, 1)]
+        for (fc, n, ax, s), (eax, es) in zip(fs, order):
+            self.assertEqual((ax, s), (eax, es))
+            self.assertAlmostEqual(np.linalg.norm(n), 1.0, places=9)
+            e = np.zeros(3); e[ax] = float(es)
+            np.testing.assert_allclose(n, e, atol=1e-12)          # yaw=0 — оси мира
+            np.testing.assert_allclose(fc, c + n * size[ax] / 2, atol=1e-12)
+            for other in range(3):                                # ⊥ остальным осям
+                if other == ax:
+                    continue
+                o = np.zeros(3); o[other] = 1.0
+                self.assertAlmostEqual(float(n @ o), 0.0, places=9)
+
+    def test_box_faces_yaw(self):
+        """yaw 90°: нормаль грани +x локально смотрит в +y мира."""
+        b = dict(BOX, yaw_deg=90.0)
+        fc, n, ax, s = clip.box_faces(b)[1]                       # (ось 0, знак +1)
+        self.assertEqual((ax, s), (0, 1))
+        np.testing.assert_allclose(n, [0.0, 1.0, 0.0], atol=1e-12)
+        np.testing.assert_allclose(fc, np.asarray(b['center'], float) + n * b['size'][0] / 2,
+                                   atol=1e-12)
+
+    def test_face_handles(self):
+        """24 точки / 18 сегментов; стержень — из центра грани наружу, барбы симметричны."""
+        shaft, head = 0.25, 0.06                                 # дефолты face_handles
+        fs = clip.box_faces(BOX)
+        P, S = clip.face_handles(BOX)
+        self.assertEqual(len(P), 24)
+        self.assertEqual(len(S), 18)
+        for i, (fc, n, ax, s) in enumerate(fs):
+            base, tip, b1, b2 = P[4 * i:4 * i + 4]
+            np.testing.assert_allclose(base, fc, atol=1e-12)      # якорь — центр грани
+            L = shaft * 0.5 * max(BOX['size'][j] for j in range(3) if j != ax)
+            np.testing.assert_allclose(tip, fc + n * L, atol=1e-12)   # наружу от центра
+            np.testing.assert_allclose(b1 + b2, 2 * tip - 2 * head * n,
+                                       atol=1e-12)                # барбы симметричны
+            self.assertEqual(S[3 * i].tolist(), [4 * i, 4 * i + 1])
+            self.assertEqual(S[3 * i + 1].tolist(), [4 * i + 1, 4 * i + 2])
+            self.assertEqual(S[3 * i + 2].tolist(), [4 * i + 1, 4 * i + 3])
+
+
 class TestSessionBoxes(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

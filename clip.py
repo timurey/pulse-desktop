@@ -33,49 +33,44 @@ def box_wire(center, size, yaw_deg=0.0):
     return V, np.asarray(edges, np.int64)
 
 
-# ребро → локальная ось, вдоль которой оно бежит (индексы вершин из box_wire:
-# idx = 4*i_sx + 2*i_sy + i_sz; рёбра 0..3 — низ, 4..7 — верх, 8..11 — стойки)
-EDGE_AXIS = {0: 2, 1: 1, 2: 2, 3: 1, 4: 2, 5: 1, 6: 2, 7: 1,
-             8: 0, 9: 0, 10: 0, 11: 0}
-
-
-def edge_axis_world(box, edge_idx):
-    """Мировое направление ребра edge_idx (единичное)."""
-    a = np.zeros(3)
-    a[EDGE_AXIS[edge_idx]] = 1.0
-    yaw = np.radians(float(box.get('yaw_deg', 0.0)))
-    R = np.array([[np.cos(yaw), -np.sin(yaw), 0], [np.sin(yaw), np.cos(yaw), 0], [0, 0, 1]])
-    return R @ a
-
-
-def box_handles(box, seg=8):
-    """
-    Органы управления на рёбрах (стрелки-ручки): на середине каждого ребра —
-    двухсторонняя стрелка вдоль оси растяжения (размер по этой оси меняется
-    при тяге). → (точки, сегменты) для set_lines; направление ребра — мир.
-    """
+def box_faces(box):
+    """Грани бокса: [(центр_грани, нормаль_наружу_в_мире, ось, знак)] × 6.
+    Порядок как у box_planes: ось 0,1,2, внутри оси знак −1, +1."""
     c = np.asarray(box['center'], float)
     d = np.abs(np.asarray(box['size'], float)) / 2.0
+    a = np.radians(float(box.get('yaw_deg', 0.0)))
+    R = np.array([[np.cos(a), -np.sin(a), 0], [np.sin(a), np.cos(a), 0], [0, 0, 1]])
+    out = []
+    for k in range(3):
+        for s in (-1, 1):
+            n = R[:, k] * s                        # нормаль наружу (мир)
+            out.append((c + n * d[k], n, k, s))
+    return out
+
+
+def face_handles(box, shaft=0.25, head=0.06):
+    """
+    Стрелки-ручки граней: по одной на грань, из центра грани наружу (тяга
+    двигает только эту грань). Длина стержня — доля shaft от полугабарита
+    грани (большей стороны), наконечник head — фиксированный (м).
+    → (точки K×3, сегменты M×2) для set_lines. Порядок точек и сегментов —
+    порядок граней box_faces: по 4 точки и 3 сегмента на грань (стержень +
+    2 линии наконечника). Наконечник строится из стабильного перпендикуляра
+    в плоскости грани — выглядит стрелкой с любой стороны.
+    """
+    size = np.abs(np.asarray(box['size'], float))
     yaw = np.radians(float(box.get('yaw_deg', 0.0)))
     R = np.array([[np.cos(yaw), -np.sin(yaw), 0], [np.sin(yaw), np.cos(yaw), 0], [0, 0, 1]])
-    V, E = box_wire(c, np.abs(np.asarray(box['size'], float)), float(box.get('yaw_deg', 0.0)))
     pts, segs = [], []
-    for k, (i0, i1) in enumerate(E):
-        axis = EDGE_AXIS[k]
-        m = 0.5 * (V[i0] + V[i1])
-        a = np.zeros(3); a[axis] = 1.0
-        a = R @ a
-        hs = 0.3 * (2 * d[axis])                       # полудлина стрелки
-        head = 0.25 * hs
-        pts.extend([m - hs * a, m + hs * a])
-        segs.append([len(pts) - 2, len(pts) - 1])
-        for s_side in (-1, 1):                         # наконечники-«ласточки»
-            tip = m + s_side * hs * a
-            for sign in (-1, 1):
-                perp = np.roll(a, 1) * sign            # любая перпендикулярная
-                q = tip - head * (s_side * a) + head * 0.5 * perp
-                pts.extend([tip, q])
-                segs.append([len(pts) - 2, len(pts) - 1])
+    for fc, n, k, _s in box_faces(box):
+        L = shaft * 0.5 * max(size[i] for i in range(3) if i != k)
+        tip = fc + n * L
+        perp = np.cross(n, R[:, (k + 1) % 3])      # единичный, в плоскости грани
+        b1 = tip - n * head + perp * (0.6 * head)  # барбы симметричны
+        b2 = tip - n * head - perp * (0.6 * head)
+        pts.extend([fc, tip, b1, b2])
+        i = len(pts) - 4
+        segs.extend([[i, i + 1], [i + 1, i + 2], [i + 1, i + 3]])
     return np.asarray(pts, float), np.asarray(segs, np.int64)
 
 
@@ -131,3 +126,16 @@ def combined_mask(pts, session, section_keep=None):
         if in_any.all():
             break
     return keep & in_any
+
+
+def face_arrow(box, k, s, shaft=0.28, r=None):
+    """3D-стрелка-ручка грани (ось k, знак s): (base, tip, radius).
+    Длина — доля от полугабарита перпендикулярных осей; радиус — доля от длины
+    (крупные ручки на крупных боксах; clamp 3..25 см от габарита сцены задаёт
+    вызывающий через r)."""
+    fc, n, kk, ss = next(f for f in box_faces(box) if f[2] == k and f[3] == s)
+    size = np.abs(np.asarray(box['size'], float))
+    L = shaft * max(size[i] for i in range(3) if i != kk)
+    L = float(np.clip(L, 0.25, 1.5))
+    radius = float(np.clip(0.10 * L, 0.03, 0.09)) if r is None else float(r)
+    return fc, fc + n * L, radius
