@@ -2233,30 +2233,21 @@ class MainWindow(QMainWindow):
         self._make_panel_tabs()
 
     def _make_panel_tabs(self):
-        """Кнопки-«ушки» на границах 3D-вида (левая/правая панели) и в статусбаре
-        (нижняя): скрывают/показывают панели, всегда доступны для возврата."""
+        """Кнопки-«ушки» на границах 3D-вида: слева (дерево), справа (панель
+        инструмента) и снизу (нижняя панель) — скрывают/показывают панели."""
         if hasattr(self, '_ptabs'):
             return
-        t = W.THEME
         self._ptabs = {}
-        for key, tip, ic in (('left', 'Дерево проекта (F2)', 'mdi6.chevron-right'),
-                             ('right', 'Панель инструмента (F3)', 'mdi6.chevron-left')):
+        for key, tip, w_, h_ in (('left', 'Дерево проекта (F2)', 16, 56),
+                                 ('right', 'Панель инструмента (F3)', 16, 56),
+                                 ('bottom', 'Нижняя панель (F4)', 56, 16)):
             b = QToolButton(self.vp)
-            b.setFixedSize(16, 56)
+            b.setFixedSize(w_, h_)
             b.setObjectName('PanelTab')
             b.setToolTip(tip)
             b.clicked.connect(lambda _=False, k=key: self.toggle_panel(k))
             b.show()
             self._ptabs[key] = b
-        bb = QToolButton(self.st_text.parentWidget() if hasattr(self, 'st_text')
-                         else self.st_text)
-        bb.setObjectName('PanelTab')
-        bb.setFixedSize(28, 20)
-        bb.setIcon(t.icon('mdi6.dock-bottom', 'ink3'))
-        bb.setToolTip('Нижняя панель (F4)')
-        bb.clicked.connect(lambda: self.toggle_panel('bottom'))
-        bb.show()
-        self._ptabs['bottom'] = bb
         self._place_panel_tabs()
 
     def _place_panel_tabs(self):
@@ -2266,13 +2257,14 @@ class MainWindow(QMainWindow):
         vp = self.vp
         h = vp.height()
         tabs['left'].move(0, max(0, h // 2 - 28))
-        tabs['right'].move(vp.width() - 16, max(0, h // 2 - 28))
-        tabs['left'].setArrowType(Qt.RightArrow if not self.tree_panel.isVisible() else Qt.LeftArrow)
-        tabs['right'].setArrowType(Qt.LeftArrow if not self.right.isVisible() else Qt.RightArrow)
-        for k in ('left', 'right'):
+        tabs['right'].move(max(0, vp.width() - 16), max(0, h // 2 - 28))
+        tabs['bottom'].move(max(0, vp.width() // 2 - 28), max(0, vp.height() - 16))
+        # стрелка указывает, куда панель уедет при клике (и откуда вернётся)
+        tabs['left'].setArrowType(Qt.LeftArrow if self.tree_panel.isVisible() else Qt.RightArrow)
+        tabs['right'].setArrowType(Qt.RightArrow if self.right.isVisible() else Qt.LeftArrow)
+        tabs['bottom'].setArrowType(Qt.DownArrow if self.dock.isVisible() else Qt.UpArrow)
+        for k in ('left', 'right', 'bottom'):
             tabs[k].setVisible(vp.isVisible())
-        if hasattr(self, 'progress'):
-            tabs['bottom'].setVisible(True)
 
     def panel_visible(self, key):
         return getattr(self, self.PANELS[key][0]).isVisible()
