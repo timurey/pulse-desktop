@@ -180,6 +180,61 @@ def main():
     def step_surface_done():
         w.on_surface_action('points', True)
         w.set_mode('inspect')
+        QTimer.singleShot(200, step_cbox)
+
+    def step_cbox():
+        """Боксы отсечения и их удаление из дерева.
+
+        Один бокс — GPU-режим: каркас и 6 ручек обязаны исчезнуть вместе с боксом
+        (актёры остаются в сцене, если обходить только список живых боксов).
+        Два бокса — CPU-маска: после удаления последнего облака должны вернуться
+        к полному составу. Прокрутка дерева не должна падать в начало."""
+        def pts():
+            return sum(len(it.P) for n, it in w.view.items.items() if n.startswith('scan:'))
+        def cbox_actors():
+            return [n for n in w.view.items if n.startswith('cbox')]
+        base = pts()
+
+        b1 = w.s.add_box([0, 0, 0], [3.0, 3.0, 3.0])
+        w.cbox_sel = b1['id']
+        w.refresh_clip_boxes()
+        w.tree_panel.rebuild()
+        app.processEvents()
+        one = sorted(cbox_actors())
+        w.on_tree_action('cbox_delete', 'cbox:' + b1['id'])
+        app.processEvents()
+        gpu_ok = len(one) == 7 and not cbox_actors() and w.cbox_sel is None and not sess.clip_boxes
+
+        b2 = w.s.add_box([0, 0, 0], [3.0, 3.0, 3.0])
+        b3 = w.s.add_box([5.0, 0, 0], [3.0, 3.0, 3.0])
+        w.cbox_sel = b2['id']
+        w.refresh_clip_boxes()
+        w.tree_panel.rebuild()
+        app.processEvents()
+        cut, actors = pts(), cbox_actors()
+        shot('05d_cbox')
+        tree, sb = w.tree_panel.tree, w.tree_panel.tree.verticalScrollBar()
+        tree.setFixedHeight(140)                          # чтобы прокрутка точно была
+        app.processEvents()
+        sb.setValue(sb.maximum())
+        scrolled = sb.value()
+        w.tree_panel.select_keys([f'cbox:{b2["id"]}', f'cbox:{b3["id"]}'])
+        w.remove_selected()
+        app.processEvents()
+        kept = sb.value()
+        tree.setMinimumHeight(0)
+        tree.setMaximumHeight(16777215)
+        ok = (gpu_ok and len(actors) > 1 and cut < base and not cbox_actors()
+              and not sess.clip_boxes and w.cbox_sel is None and pts() == base
+              and (scrolled == 0 or kept > 0))
+        msg = (f'1 бокс: актёров {len(one)} → {len(cbox_actors())}; 2 бокса: точек {cut} из {base}, '
+               f'актёров {len(actors)} → {len(cbox_actors())}, точек {pts()}, прокрутка {scrolled}→{kept} '
+               f'— {"ок" if ok else "ОШИБКА"}')
+        log.append(f'05d_cbox: {msg}')
+        print(f'[{time.time() - t0:5.1f}s] 05d_cbox.png  |  {msg}', flush=True)
+        if not ok:
+            finish(1)
+            return
         QTimer.singleShot(200, step_import)
 
     def step_import():

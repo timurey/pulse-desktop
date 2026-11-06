@@ -403,6 +403,7 @@ class MainWindow(QMainWindow):
         self._panel_on = dict.fromkeys(('left', 'right', 'bottom'), True)   # панели свёрнуты?
         self._view_actions = {}                    # «Вид» → чекбоксы панелей
         self.cbox_sel = None                     # выбранный бокс отсечения (панель)
+        self._cbox_ids = set()                   # боксы, нарисованные в сцене (для удаления)
         self._label_drag = None                  # драг подписи замера (Ф13)
         self._cbox_drag = None                   # драг грани бокса: {'id','axis','n','opp','c0','h0'}
         self.zero_show = True
@@ -1172,6 +1173,7 @@ class MainWindow(QMainWindow):
         сечении), иначе CPU-маска при перерисовке; каркасы. light — без
         перерисовки облаков (сечение двигалось, боксы не менялись)."""
         import clip
+        was_cpu = getattr(self, '_boxes_cpu', False)
         active = clip.active_boxes(self.s)
         sec_on = (self.s.section or {}).get('mode', 'off') != 'off'
         gpu = len(active) == 1 and not sec_on
@@ -1180,6 +1182,14 @@ class MainWindow(QMainWindow):
         # CPU-фильтр пикинга — при любом числе боксов (GPU-плоскости режут только рендер)
         self.view.box_planes_mask_fn = (lambda P: clip.combined_mask(P, self.s)) if active else None
         self.view.set_section(self.s.section, clip_boxes_planes=planes)
+        alive = {b['id'] for b in self.s.clip_boxes}
+        for gone in getattr(self, '_cbox_ids', set()) - alive:
+            # удалённый бокс в списке уже не числится — убрать его каркас и ручки из сцены
+            self.view.remove(f'cbox:{gone}')
+            self.view.remove_prefix(f'cboxg:{gone}')
+        self._cbox_ids = alive
+        if self.cbox_sel not in alive:
+            self.cbox_sel = None
         for b in self.s.clip_boxes:
             name = f"cbox:{b['id']}"
             if b.get('visible') and b.get('on'):
@@ -1196,8 +1206,8 @@ class MainWindow(QMainWindow):
             else:
                 self.view.remove(name)
                 self.view.remove_prefix(f"cboxg:{b['id']}")
-        if self._boxes_cpu and not light:
-            self.redraw_all()                            # CPU-маска — пересоздать облака
+        if (self._boxes_cpu or was_cpu) and not light:
+            self.redraw_all()                            # CPU-маска появилась или снята — пересобрать облака
         if hasattr(self, 'control'):
             self.refresh_control()                       # список боксов и поля — всегда актуальны
 
@@ -1505,9 +1515,7 @@ class MainWindow(QMainWindow):
                 self.tree_panel.rebuild()
         elif name == 'box_delete':
             if self.s.remove_box(arg):
-                if self.cbox_sel == arg:
-                    self.cbox_sel = None
-                self.refresh_clip_boxes()
+                self.refresh_clip_boxes()                # снимает и выбор удалённого бокса
                 self.tree_panel.rebuild()
         elif name == 'box_edit':
             b = self.s.box_by_id(arg['id'])
@@ -3242,12 +3250,14 @@ class MainWindow(QMainWindow):
         self.set_status(f'{what} → «{where}»' + ('' if index is None else f', позиция {index + 1}'))
 
     def remove_selected(self, key=None):
-        """Удалить из проекта выделенные сканы (и сканы выделенных групп вместе с группами)."""
+        """Удалить из проекта выделенные сканы (и сканы выделенных групп вместе с
+        группами); если выделены только боксы отсечения — удалить их (это вид, не данные)."""
         t = self.s.tree
         keys = self.tree_panel.selected_keys()
+        cboxes = [k[5:] for k in self.tree_panel.selected_cboxes()]
         if key is not None and key not in keys:
             keys = [key]
-        if not keys:
+        if not keys and not cboxes:
             self.set_status('выделите сканы в дереве')
             return
         ids, groups = [], []
@@ -3260,6 +3270,10 @@ class MainWindow(QMainWindow):
                 ids.append(k)
         ids = list(dict.fromkeys(ids))
         if not ids and not groups:
+            n = sum(1 for bid in cboxes if self.s.remove_box(bid))
+            self.refresh_clip_boxes()
+            self.tree_panel.rebuild()
+            self.set_status(f'удалено боксов отсечения: {n}' if n else 'выделите сканы в дереве')
             return
         names = ', '.join(short(i) for i in ids[:6]) + (' …' if len(ids) > 6 else '')
         gtxt = f" и групп: {len(groups)}" if groups else ''

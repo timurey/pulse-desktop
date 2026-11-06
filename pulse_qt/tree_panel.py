@@ -198,6 +198,11 @@ class TreePanel(QFrame):
         return [k for k in self._items if k in sel
                 and not k.startswith(('mesh:', 'elem:', 'cbox:', 'plan:', 'view:'))]
 
+    def selected_cboxes(self):
+        """Выделенные боксы отсечения (ключи вида 'cbox:<id>') в порядке дерева."""
+        sel = {it.data(0, ROLE) for it in self.tree.selectedItems()}
+        return [k for k in self._items if k in sel and k.startswith('cbox:')]
+
     def select_keys(self, keys):
         self.tree.clearSelection()
         for k in keys:
@@ -294,7 +299,10 @@ class TreePanel(QFrame):
         tree.setDragEnabled(not flt)                # с фильтром порядок в списке неполный
         self.expand_next = set()
         tree.blockSignals(False)
-        tree.verticalScrollBar().setValue(scroll)   # иначе глаз в конце списка роняет просмотр в начало
+        # максимум прокрутки считается по строкам с виджетами, а их раскладка отложена:
+        # без пересчёта setValue обрезается старым максимумом и просмотр падает в начало
+        tree.executeDelayedItemsLayout()
+        tree.verticalScrollBar().setValue(scroll)
         self.empty.setVisible(not s.scans)
         self.tree.setVisible(bool(s.scans))
 
