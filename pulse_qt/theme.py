@@ -8,6 +8,7 @@
 import math
 from pathlib import Path
 
+from PySide6.QtCore import Qt, QPointF
 from PySide6.QtGui import QColor, QFontDatabase, QFont, QIcon
 
 FONT_DIR = Path(__file__).resolve().parent / 'fonts'
@@ -104,6 +105,30 @@ class Theme:
     def icon(self, name, color='ink2', active='accent'):
         return icon(name, self.q(color), self.q(active))
 
+    def chevron(self, direction, px=8, color='ink2', hover='ink'):
+        """Стрелка-шеврон фиксированного размера: 'left' / 'right' / 'up' / 'down'
+        (кнопки-«ушки» панелей). Рисуем сами: у нативной стрелки Qt размер растёт
+        вместе с кнопкой, поэтому в широком нижнем ушке она получалась огромной."""
+        from PySide6.QtGui import QPixmap, QPainter, QPen, QPolygonF
+        k = 3                                    # запас разрешения под HiDPI
+        pts = {'left': ((6, 1), (2, 4), (6, 7)), 'right': ((2, 1), (6, 4), (2, 7)),
+               'up': ((1, 6), (4, 2), (7, 6)), 'down': ((1, 2), (4, 6), (7, 2))}[direction]
+
+        def sheet(name):
+            pm = QPixmap(px * k, px * k)
+            pm.fill(Qt.transparent)
+            p = QPainter(pm)
+            p.setRenderHint(QPainter.Antialiasing)
+            p.setPen(QPen(self.q(name), 1.4 * k, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            p.drawPolyline(QPolygonF([QPointF(x * k, y * k) for x, y in pts]))
+            p.end()
+            pm.setDevicePixelRatio(k)
+            return pm
+
+        ic = QIcon(sheet(color))
+        ic.addPixmap(sheet(hover), QIcon.Active)
+        return ic
+
     def apply_palette(self, app):
         """Палитра Qt под тему: выделение и фон там, куда таблица стилей не достаёт."""
         from PySide6.QtGui import QPalette
@@ -159,6 +184,7 @@ QToolButton:checked {{ background: {c['accentbg']}; color: {c['accent']}; }}
 QToolButton:disabled {{ color: {c['ink3']}; }}
 QToolButton::menu-indicator {{ image: none; width: 0; }}
 QToolButton#IconBtn {{ padding: 0; min-width: 30px; max-width: 30px; min-height: 30px; max-height: 30px; }}
+QToolButton#PanelTab {{ padding: 0; min-width: 0; min-height: 0; }}
 QToolButton[menuarrow="true"] {{ padding-right: 4px; }}
 
 #Panel {{ background: {c['bg1']}; }}

@@ -17,7 +17,7 @@ import time
 from pathlib import Path
 
 import numpy as np
-from PySide6.QtCore import Qt, QTimer, QSettings
+from PySide6.QtCore import Qt, QTimer, QSettings, QSize
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (QMainWindow, QWidget, QFrame, QHBoxLayout, QVBoxLayout, QSplitter, QLabel, QSlider,
                                QStackedWidget, QProgressBar, QMenu, QFileDialog, QMessageBox, QApplication,
@@ -400,6 +400,8 @@ class MainWindow(QMainWindow):
         self.snap_on = True                      # привязка замеров (B): вершины/центры важнее облака
         self._panel_saved = {}                   # размеры панелей до сворачивания
         self._panel_min = {}                     # минимумы панелей до сворачивания
+        self._panel_on = dict.fromkeys(('left', 'right', 'bottom'), True)   # панели свёрнуты?
+        self._view_actions = {}                    # «Вид» → чекбоксы панелей
         self.cbox_sel = None                     # выбранный бокс отсечения (панель)
         self._label_drag = None                  # драг подписи замера (Ф13)
         self._cbox_drag = None                   # драг грани бокса: {'id','axis','n','opp','c0','h0'}
@@ -1991,6 +1993,15 @@ class MainWindow(QMainWindow):
             a.setCheckable(True)
             a.setChecked(self.panel_visible(key))
             a.toggled.connect(lambda on, k=key: self.toggle_panel(k))
+            self._view_actions[key] = a
+
+    def _sync_view_menu(self):
+        """Галки «Вид → панели» за состоянием панелей: ушко и F2/F3/F4 его не меняют."""
+        for key, a in getattr(self, '_view_actions', {}).items():
+            if a.isChecked() != self.panel_visible(key):
+                a.blockSignals(True)
+                a.setChecked(self.panel_visible(key))
+                a.blockSignals(False)
 
     def _statusbar(self):
         t = W.THEME
@@ -2191,59 +2202,81 @@ class MainWindow(QMainWindow):
 
     # ── скрытие панелей (F2 левая, F3 правая, F4 нижняя) ─────────────────
     PANELS = {'left': ('tree_panel', 'Левая (дерево)'),
-              'right': ('right', 'Правая (панель инструмента)'),
+              'right': ('right', 'Панель инструмента'),
               'bottom': ('dock', 'Нижняя (пары/циклы/…)')}
+
+    # виджет, который лежит в сплиттере: у правой панели это обёртка right_wrap,
+    # скрывать надо и её — иначе стек спрячется, а обёртка останется пустой плашкой
+    PANEL_SLOT = {'left': 'tree_panel', 'right': 'right_wrap', 'bottom': 'dock'}
 
     PANEL_GEOM = {'left': ('split', 0), 'right': ('split', 2), 'bottom': ('vsplit', 1)}
 
     def toggle_panel(self, key):
-        """Свернуть/развернуть панель размерами сплиттера: хэндл-кнопка на
-        границе остаётся на месте (клик по ней возвращает панель)."""
-        name, _ = self.PANELS[key]
-        w = getattr(self, name)
+        self._set_panel(key, not self.panel_visible(key))
+
+    def _set_panel(self, key, on, save=True):
+        """Свернуть/развернуть панель размерами сплиттера: ушко на границе
+        остаётся на месте (клик по нему возвращает панель)."""
+        w = getattr(self, self.PANELS[key][0])          # содержимое панели
+        slot = getattr(self, self.PANEL_SLOT[key])      # её место в сплиттере
         spl, idx = self.PANEL_GEOM[key]
         spl = getattr(self, spl)
-        if w.isVisible():
-            # минимумы панелей (330/120) не дают сплиттеру отдать их место
-            self._panel_min[key] = (w.minimumWidth(), w.minimumHeight())
-            w.setMinimumWidth(0)
-            w.setMinimumHeight(0)
-            w.setVisible(False)                          # панель исчезает целиком
-            sizes = spl.sizes()
-            sizes[idx] = 0
-            spl.setSizes(sizes)                          # место отдаётся 3D-виду
-            self.settings.setValue(f'panel/{key}', False)
-        else:
+        self._panel_on[key] = on
+        if on:
             mw, mh = self._panel_min.get(key, (330, 120))
             w.setMinimumWidth(mw)
             w.setMinimumHeight(mh)
+            slot.setVisible(True)
             w.setVisible(True)
             sizes = spl.sizes()
             if sizes[idx] < 50:
                 sizes[idx] = 330 if idx != 1 else 210
                 spl.setSizes(sizes)
-            self.settings.setValue(f'panel/{key}', True)
+        else:
+            # минимумы панелей (330/120) не дают сплиттеру отдать их место
+            mw, mh = w.minimumWidth(), w.minimumHeight()
+            if mw or mh:                       # при повторном сворачивании не затираем нулями
+                self._panel_min[key] = (mw, mh)
+            w.setMinimumWidth(0)
+            w.setMinimumHeight(0)
+            w.setVisible(False)                          # панель исчезает целиком
+            slot.setVisible(False)                       # вместе с местом в сплиттере
+            sizes = spl.sizes()
+            sizes[idx] = 0
+            spl.setSizes(sizes)                          # место отдаётся 3D-виду
+        if save:
+            self.settings.setValue(f'panel/{key}', on)
+        self._sync_view_menu()
         self._place_panel_tabs()
 
     def _restore_panels(self):
         for key in self.PANELS:
             v = self.settings.value(f'panel/{key}')
             if v in (False, 'false'):
-                getattr(self, self.PANELS[key][0]).setVisible(False)
+                # тем же путём, что и F3: иначе правая панель остаётся пустой плашкой
+                self._set_panel(key, False, save=False)
+        self._sync_view_menu()          # меню «Вид» строится до восстановления панелей
         self._make_panel_tabs()
 
     def _make_panel_tabs(self):
         """Кнопки-«ушки» на границах 3D-вида: слева (дерево), справа (панель
-        инструмента) и снизу (нижняя панель) — скрывают/показывают панели."""
+        инструмента) и снизу (нижняя панель) — скрывают/показывают панели.
+        Стрелки рисуем сами (Theme.chevron) одного размера: у нативной стрелки Qt
+        размер зависит от размера кнопки, и в широком нижнем ушке она была огромной."""
         if hasattr(self, '_ptabs'):
             return
+        t = W.THEME
         self._ptabs = {}
+        # направление стрелки: (панель видна — уедет к краю окна, панель скрыта — вернётся внутрь)
+        dirs = {'left': ('left', 'right'), 'right': ('right', 'left'), 'bottom': ('down', 'up')}
+        self._ptab_icons = {k: (t.chevron(a), t.chevron(b)) for k, (a, b) in dirs.items()}
         for key, tip, w_, h_ in (('left', 'Дерево проекта (F2)', 16, 56),
                                  ('right', 'Панель инструмента (F3)', 16, 56),
                                  ('bottom', 'Нижняя панель (F4)', 56, 16)):
             b = QToolButton(self.vp)
             b.setFixedSize(w_, h_)
             b.setObjectName('PanelTab')
+            b.setIconSize(QSize(8, 8))
             b.setToolTip(tip)
             b.clicked.connect(lambda _=False, k=key: self.toggle_panel(k))
             b.show()
@@ -2259,15 +2292,16 @@ class MainWindow(QMainWindow):
         tabs['left'].move(0, max(0, h // 2 - 28))
         tabs['right'].move(max(0, vp.width() - 16), max(0, h // 2 - 28))
         tabs['bottom'].move(max(0, vp.width() // 2 - 28), max(0, vp.height() - 16))
-        # стрелка указывает, куда панель уедет при клике (и откуда вернётся)
-        tabs['left'].setArrowType(Qt.LeftArrow if self.tree_panel.isVisible() else Qt.RightArrow)
-        tabs['right'].setArrowType(Qt.RightArrow if self.right.isVisible() else Qt.LeftArrow)
-        tabs['bottom'].setArrowType(Qt.DownArrow if self.dock.isVisible() else Qt.UpArrow)
+        # стрелка ушка показывает, куда панель двинется при клике: открытая уезжает
+        # к краю окна, скрытая — возвращается в сторону 3D-вида
         for k in ('left', 'right', 'bottom'):
+            shown, hidden = self._ptab_icons[k]
+            tabs[k].setIcon(shown if self.panel_visible(k) else hidden)
             tabs[k].setVisible(vp.isVisible())
 
     def panel_visible(self, key):
-        return getattr(self, self.PANELS[key][0]).isVisible()
+        """Свёрнута ли панель (не isVisible: до показа окна isVisible() ложно)."""
+        return self._panel_on.get(key, True)
 
     def on_undo(self):
         """Ctrl+Z: в режиме замеров — отмена замера (пустой стек не проваливается
