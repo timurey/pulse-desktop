@@ -252,6 +252,11 @@ class Session:
         self.active_plan = None      # id активного плана (None — обзор, замеры без фильтра)
         self.views = []              # сохранённые позиции камеры (Ф14): {'id', 'name', 'eye', 'target', 'up'}
         self.elements = []           # элементы (fits.py), в канон. системе своих сканов
+        self.photos = []             # фото для окраски (photos.py): {'id', 'name', 'path' (абсолютный),
+                                     #   'w', 'h', 'f35', 'f35_src', 'pose' (якорный канон), 'pairs', 'hs', 'visible'}
+        self.photos_missing = []     # имена фото, файл которых не найден при открытии проекта
+        self._photo_cache = {}       # photo_rgb: ключ фингерпринта → (rgb, painted)
+        self._photo_imgs = {}        # декодированные фото для окраски: (path, mtime, size) → H×W×3
         self._units = {}             # запечённые группы: gid → BakedGroup (по полю baked в дереве)
         self.last_conflicts = []     # связи, отключённые последним «Принять позу» (reject_conflicts)
         self.lock = threading.RLock()
@@ -282,6 +287,16 @@ class Session:
         s.active_plan = proj.get('active_plan')
         s.views = proj.get('views', [])
         s.elements = proj.get('elements', [])
+        s.photos, s.photos_missing = [], []
+        for e in proj.get('photos', []):
+            p = dict(e)
+            p['path'] = sp.abs_path(p.get('path', ''), path)
+            p.setdefault('pairs', [])
+            p.setdefault('hs', {})
+            p.setdefault('visible', True)
+            if not Path(p['path']).exists():
+                s.photos_missing.append(p.get('name') or Path(p['path']).name)
+            s.photos.append(p)
         s.apply_visibility()
         s.sync_filters()
         s.project_path = str(path)
@@ -340,8 +355,8 @@ class Session:
                     sc.cache_dirty = False
         return len(caches)
 
-    def _project_dict(self, path, scan_paths=None):
-        """Содержимое project.json; пути сканов — относительно файла проекта path."""
+    def _project_dict(self, path, scan_paths=None, photo_paths=None):
+        """Содержимое project.json; пути сканов и фото — относительно файла проекта path."""
         auto = [e for e in self.edges if e.get('method') != 'manual']
         manual = [e for e in self.edges if e.get('method') == 'manual']
         proj = {'frame': self.frame, 'created': time.strftime('%Y-%m-%d %H:%M:%S'),
@@ -353,11 +368,18 @@ class Session:
                 'plans': _jsonable(self.plans), 'active_plan': self.active_plan,
                 'views': _jsonable(self.views),
                 'elements': _jsonable(self.elements),
+                'photos': _jsonable(self.photos),
                 'pairs': [_jsonable(e) for e in auto],
                 'manual_edges': [_jsonable(e) for e in manual]}
         for e in proj['scans']:
             src = (scan_paths or {}).get(e['id'], e['path'])
             e['path'] = sp.rel_path(src, path)
+        for p in proj['photos']:
+            src = (photo_paths or {}).get(p['id'])
+            if src is None:
+                pp = Path(p['path'])
+                src = pp if pp.is_absolute() else sp.abs_path(p['path'], self.project_path or path)
+            p['path'] = sp.rel_path(src, path)
         return proj
 
     def import_project(self, path, bake=False, progress=None):
@@ -532,9 +554,25 @@ class Session:
                     if side.exists():
                         shutil.copy2(side, new)
                 mapping[sc.id] = str(dst)
+            # фото для окраски — в photos/ рядом с проектом; отсутствующие пропускаются
+            photo_map = {}
+            if self.photos:
+                pdir = root / 'photos'
+                pdir.mkdir(parents=True, exist_ok=True)
+                for p in self.photos:
+                    src = Path(p['path'])
+                    if not src.exists():
+                        continue
+                    stem, n = src.stem, 2
+                    while stem.lower() in used:
+                        stem, n = f'{src.stem}_{n}', n + 1
+                    used.add(stem.lower())
+                    dst = pdir / (stem + src.suffix)
+                    shutil.copy2(src, dst)
+                    photo_map[p['id']] = str(dst)
             say(0.85, 'проект и кеш анализа')
             pfile = root / f'{name}.pulse'
-            proj = self._project_dict(pfile, mapping)
+            proj = self._project_dict(pfile, mapping, photo_map)
             proj['scans'] = [e for e in proj['scans'] if e['id'] in mapping]
             caches = {sc.id: sc.to_cache() for sc in self.scans if sc.analyzed and sc.id in mapping}
             keep = self.project_path if (self.project_path and project_store.is_archive(self.project_path)
@@ -868,6 +906,7 @@ class Session:
 
     def set_Tc(self, scan, Tc):
         scan.pose = homog(self.ref.R_up).T @ homog(self.level).T @ np.asarray(Tc) @ homog(scan.R_up)
+        self._photo_cache = {}                                 # поза скана изменилась
 
     # ── горизонт ─────────────────────────────────────────────────────────
     @staticmethod
@@ -886,6 +925,7 @@ class Session:
         """
         T = np.asarray(T, float)
         ns, ws = self._plane_normals(scan, T[:3, :3])
+        self._photo_cache = {}
         Rc, info = pr.level_correction(ns, ws)
         T2 = T.copy()
         T2[:3, :3] = Rc @ T[:3, :3]
@@ -903,6 +943,7 @@ class Session:
             ws += w
         Rc, info = pr.level_correction(ns, ws)
         self.level = Rc @ self.level
+        self._photo_cache = {}
         return info
 
     def level_by_plane(self, n, c, set_zero=False):
@@ -932,10 +973,12 @@ class Session:
         self.level = R @ self.level
         if set_zero:
             self.zero = {'z': float(c), 'source': 'plane'}
+        self._photo_cache = {}
         return {'tilt_deg': tilt}
 
     def reset_level(self):
         self.level = np.eye(3)
+        self._photo_cache = {}
 
     @staticmethod
     def _wall_direction(scans_T, min_area=1.0):
@@ -962,11 +1005,13 @@ class Session:
         if th is None:
             return None
         self.level = pr.rot_z(-th) @ self.level
+        self._photo_cache = {}
         return float(np.degrees(-th))
 
     def rotate_plan(self, deg):
         """Тонкий поворот всего плана вокруг вертикали (общая система)."""
         self.level = pr.rot_z(np.radians(deg)) @ self.level
+        self._photo_cache = {}
 
     def snap_yaw_to_walls(self, moving, T, others=None, max_deg=45.0):
         """
@@ -993,7 +1038,12 @@ class Session:
         for e in self.edges:
             parts += [e['A'], e['B'], e.get('user'), e.get('method')]
         parts += [None if self.zero is None else round(self.zero['z'], 6), len(self.measures),
-                  len(self.elements)]
+                  len(self.elements), len(self.photos)]
+        for p in self.photos:
+            parts += [p.get('id'), p.get('name'), p.get('pose') is not None,
+                      None if p.get('f35') is None else round(float(p['f35']), 3),
+                      bool(p.get('visible', True)),
+                      json.dumps(p.get('hs') or {}, sort_keys=True)]
         parts.append(json.dumps(self.tree.to_json(), sort_keys=True, ensure_ascii=False))
         st = self.section or {}
         parts += [st.get('mode'), st.get('base'), round(st.get('c', 0), 4), st.get('a'), st.get('b'),
@@ -1102,6 +1152,196 @@ class Session:
         if len(r) == 0:
             return np.zeros(0, np.int64)
         return np.flatnonzero(np.abs(r) <= k * max(float(el['sigma']), 1e-4))
+
+    # ── фото для окраски (photos.py) ─────────────────────────────────────
+    @property
+    def photos_dir(self):
+        """Каталог фото: рядом с файлом проекта (или с первым сканом, если проект ещё
+        не сохранялся)."""
+        base = Path(self.project_path).resolve().parent if self.project_path else \
+            (Path(self.scans[0].path).parent if self.scans else Path.cwd())
+        return base / 'photos'
+
+    def add_photo(self, path):
+        """Добавить фото: копия в photos_dir (коллизия имён — суффикс _2), размер и
+        фокусное из EXIF. Панорама 360° (ph.is_pano: XMP GPano/кадр 2:1) →
+        proj='pano360', без фокусного. → запись фото (dict)."""
+        import shutil
+        import photos as ph
+        src = Path(path).resolve()
+        d = self.photos_dir
+        d.mkdir(parents=True, exist_ok=True)
+        d = d.resolve()
+        stem, n = src.stem, 2
+        dst = d / src.name
+        while dst.exists():
+            dst = d / f'{stem}_{n}{src.suffix}'
+            n += 1
+        shutil.copy2(src, dst)
+        w, h = ph.image_size(dst)
+        pano = ph.is_pano(dst)
+        f35 = None if pano else ph.exif_focal(dst)
+        p = {'id': self._next_photo_id(), 'name': src.name, 'path': str(dst),
+             'w': int(w), 'h': int(h),
+             'proj': 'pano360' if pano else 'pinhole',
+             'f35': f35,
+             'f35_src': 'exif' if f35 is not None else None,
+             'pose': None, 'pairs': [], 'hs': {}, 'visible': True}
+        self.photos.append(p)
+        return p
+
+    def set_photo_proj(self, pid, proj):
+        """Сменить тип кадра ('pinhole' | 'pano360'): поза несовместима —
+        сбрасывается (вместе с ручками поверхностей), пары остаются (координаты
+        пар от проекции не зависят). → фото или None."""
+        import photos as ph
+        p = self.photo_by_id(pid)
+        if p is None or proj not in ('pinhole', 'pano360'):
+            return None
+        p['proj'] = proj
+        p['pose'] = None
+        p['hs'] = {}
+        if proj == 'pano360':
+            p['f35'] = None
+            p['f35_src'] = None
+        else:
+            f = Path(p['path'])
+            p['f35'] = ph.exif_focal(str(f)) if f.exists() else None
+            p['f35_src'] = 'exif' if p['f35'] is not None else None
+        self._photo_cache = {}
+        return p
+
+    def _next_photo_id(self):
+        n = 0
+        for p in self.photos:
+            try:
+                n = max(n, int(str(p.get('id', ''))[2:]))
+            except ValueError:
+                pass
+        return f'ph{n + 1}'
+
+    def photo_by_id(self, pid):
+        return next((p for p in self.photos if p.get('id') == pid), None)
+
+    def rename_photo(self, pid, name):
+        p = self.photo_by_id(pid)
+        if p is not None:
+            p['name'] = str(name)
+        return p
+
+    def remove_photo(self, pid):
+        """Удалить фото из проекта (файл на диске не трогается); кеш окраски сбрасывается."""
+        n = len(self.photos)
+        self.photos = [p for p in self.photos if p.get('id') != pid]
+        self._photo_cache = {}
+        return len(self.photos) < n
+
+    def photo_fingerprint_items(self):
+        """[(id, abspath, mtime, size, pose, f35, visible, json hs)] для ph.fingerprint
+        (ключ кеша окраски); у отсутствующего файла mtime/size = None."""
+        out = []
+        for p in self.photos:
+            f = Path(p['path'])
+            if f.exists():
+                st = f.stat()
+                mt, sz = st.st_mtime, st.st_size
+            else:
+                mt = sz = None
+            out.append((p['id'], str(f), mt, sz, p.get('pose'), p.get('f35'),
+                        bool(p.get('visible', True)), json.dumps(p.get('hs') or {}, sort_keys=True),
+                        p.get('proj') or 'pinhole'))
+        return out
+
+    def _photo_usable(self, p):
+        """Фото пригодно для окраски: есть поза, видно и файл на месте; фокусное —
+        только для пинхоля (у панорамы 360° его нет)."""
+        ok = (p.get('pose') is not None and bool(p.get('visible', True))
+              and Path(p['path']).exists())
+        if (p.get('proj') or 'pinhole') == 'pano360':
+            return ok
+        return ok and bool(p.get('f35'))
+
+    def _photo_entries(self):
+        """entries для ph.colorize по всем пригодным фото: {'img', 'T', 'f35', 'surfaces'}.
+
+        Поверхности — плоскости-элементы с ручками в hs фото: маска пикселей внутри
+        проекции выпуклой оболочки инлайнеров, origin/нормаль — в якорном каноне
+        (канон. система опорного скана).
+        """
+        import photos as ph
+        import fits
+        ref_ok = self.ref is not None and self.ref.pose is not None
+        entries = []
+        for p in self.photos:
+            if not self._photo_usable(p):
+                continue
+            f = Path(p['path'])
+            st = f.stat()
+            key = (str(f), st.st_mtime, st.st_size)
+            img = self._photo_imgs.get(key)
+            if img is None:
+                img = ph.load_image(str(f), ph.REND_PX)
+                self._photo_imgs[key] = img
+            h, w = img.shape[:2]
+            pose = np.asarray(p['pose'], float)
+            surfaces = []
+            if ref_ok and (p.get('proj') or 'pinhole') != 'pano360':
+                T_ref_inv = np.linalg.inv(self.Tc(self.ref))
+                for el_id in (p.get('hs') or {}):
+                    el = self.element_by_id(el_id)
+                    if el is None or el.get('kind') != 'plane':
+                        continue
+                    sc_el = self.by_id(el.get('scan'))
+                    if sc_el is None or sc_el.pose is None:
+                        continue
+                    idx = self.element_inliers(sc_el, el)
+                    if len(idx) < 3:
+                        continue
+                    n = np.asarray(el['params']['n'], float)
+                    B = np.column_stack(fits.plane_axes(n))
+                    center = np.asarray(el['center'], float)
+                    hull = ph.convex_hull_2d((np.asarray(sc_el.down)[idx] - center) @ B)
+                    if len(hull) < 3:
+                        continue
+                    off = (hull.min(0) + hull.max(0)) / 2      # охват инлайнеров, не extent
+                    M = T_ref_inv @ self.Tc(sc_el)             # канон. скана элемента → якорный канон
+                    Rm = M[:3, :3]
+                    uv_h, _, ok_h = ph.project(
+                        pr.transform(center + (hull - off) @ B.T, M), pose, p['f35'], w, h)
+                    if int(ok_h.sum()) < 3:                    # фото не покрывает поверхность
+                        continue
+                    surfaces.append({'mask': ph.plane_mask(uv_h[ok_h], w, h),
+                                     'origin': pr.transform((center + off @ B.T).reshape(1, 3), M)[0],
+                                     'n': Rm @ n,
+                                     'sigma': max(float(el['sigma']), 1e-4)})
+            if (p.get('proj') or 'pinhole') == 'pano360':
+                entries.append({'img': img, 'T': pose, 'proj': 'pano360'})
+            else:
+                entries.append({'img': img, 'T': pose, 'f35': float(p['f35']),
+                                'surfaces': surfaces})
+        return entries
+
+    def photo_rgb(self, sc):
+        """Цвет точек массива sc._display (канон. система скана) по привязанным фото:
+        (rgb N×3 uint8, painted N bool) или None, если красить нечем. Кеш по фингерпринту
+        фото и содержимому _display."""
+        import photos as ph
+        disp = getattr(sc, '_display', None)
+        if disp is None or not len(disp) or self.ref is None or self.ref.pose is None \
+                or sc.pose is None or not any(self._photo_usable(p) for p in self.photos):
+            return None
+        key = (ph.fingerprint(self.photo_fingerprint_items()), len(disp),
+               round(float(np.asarray(disp, float).sum()), 3))
+        if key in self._photo_cache:
+            return self._photo_cache[key]
+        Ta = np.linalg.inv(self.Tc(self.ref)) @ self.Tc(sc)    # канон. скана → якорный канон
+        entries = self._photo_entries()
+        if not entries:
+            return None
+        rgb, painted = ph.colorize(pr.transform(np.asarray(disp, float), Ta), entries)
+        out = (rgb, painted)
+        self._photo_cache[key] = out
+        return out
 
     # ── переименование скана ─────────────────────────────────────────────
     def rename_scan(self, scan_id, label):
@@ -1478,6 +1718,7 @@ class Session:
         units = self.units()
         names = [u.id for u in units]
         edges = self._unit_edges(self.active_edges())
+        self._photo_cache = {}                                 # позы сканов изменятся
         fu = self.unit_of(self.frame)
         poses = sp.spanning_poses(names, edges, fu.id)
         if len(edges) > len(poses) - 1 and len(poses) > 1:
@@ -2023,16 +2264,24 @@ class Session:
         self.erase_undo = [r for r in self.erase_undo if r]
 
     # ── экспорт ──────────────────────────────────────────────────────────
-    def export(self, path, voxel=0.02, progress=None, frame='ref', scan_ids=None):
+    def export(self, path, voxel=0.02, progress=None, frame='ref', scan_ids=None, colors=False):
         """
         frame='ref'    - исходная система опорного скана (как в файле опорного скана);
         frame='common' - общая система: Z вверх, с поправкой горизонта проекта.
+        colors=True    - окраска по привязанным фото (photos.py): цвета считаются на
+                         полном разрешении, даунсемпл ведёт и точки, и цвета; непокрашенные
+                         точки — чёрные. Без пригодных фото цвета не пишутся.
         """
         import open3d as o3d
-        parts = []
+        import photos as ph
+        parts, cparts = [], []
         placed = [s for s in self.placed() if scan_ids is None or s.id in scan_ids]
         if not placed:
             raise ValueError('нет размещённых сканов для экспорта')
+        with_colors = colors and self.ref is not None and \
+            any(self._photo_usable(p) for p in self.photos)
+        entries = self._photo_entries() if with_colors else []
+        with_colors = bool(entries)
         for i, s in enumerate(placed):
             if progress:
                 progress(i / len(placed), f"склейка {s.id}")
@@ -2042,19 +2291,45 @@ class Session:
                 pts = planes.load_points(s.path)
             if s.erase or len(s.drop) or s.calc_filter:        # ручная чистка, обрезка (канон. система)
                 pts = pts[s.keep_mask(pts @ s.R_up.T)]
+            if with_colors:
+                # файл → якорный канон; цвета — на полном разрешении (до даунсемпла)
+                Ta = np.linalg.inv(self.Tc(self.ref)) @ self.Tc(s) @ homog(s.R_up)
+                P_full_a = pr.transform(pts, Ta)
+                P_down_a = pr.transform(s.down, np.linalg.inv(self.Tc(self.ref)) @ self.Tc(s))
+                rgb_d, painted_d = ph.colorize(P_down_a, entries)
+                rgb_f, _ = ph.join_colors(P_full_a, P_down_a, rgb_d, painted_d)
+                pc = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pts))
+                pc.colors = o3d.utility.Vector3dVector(np.asarray(rgb_f, float) / 255.0)
+                if voxel > 0:
+                    pc = pc.voxel_down_sample(voxel)           # даунсемпл ведёт и точки, и цвета
+                parts.append(pr.transform(np.asarray(pc.points), Ta))
+                cparts.append(np.asarray(pc.colors))
+            else:
+                pc = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pts))
+                if voxel > 0:
+                    pc = pc.voxel_down_sample(voxel)
+                T = s.pose if frame == 'ref' else self.Tc(s) @ homog(s.R_up)
+                parts.append(pr.transform(np.asarray(pc.points), T))
+        pts = np.vstack(parts)
+        cols = None
+        if with_colors:
+            cols = np.clip(np.round(np.vstack(cparts) * 255.0), 0, 255).astype(np.uint8)
+            pc = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pts))
+            pc.colors = o3d.utility.Vector3dVector(np.asarray(cols, float) / 255.0)
+            if voxel > 0:
+                pc = pc.voxel_down_sample(voxel)
+            pts = np.asarray(pc.points)
+            cols = np.clip(np.round(np.asarray(pc.colors) * 255.0), 0, 255).astype(np.uint8)
+            # якорный канон → запрошенная система
+            pts = pr.transform(pts, homog(self.ref.R_up).T if frame == 'ref' else self.Tc(self.ref))
+        else:
             pc = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pts))
             if voxel > 0:
                 pc = pc.voxel_down_sample(voxel)
-            T = s.pose if frame == 'ref' else self.Tc(s) @ homog(s.R_up)
-            parts.append(pr.transform(np.asarray(pc.points), T))
-        pts = np.vstack(parts)
-        pc = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pts))
-        if voxel > 0:
-            pc = pc.voxel_down_sample(voxel)
-        pts = np.asarray(pc.points)
+            pts = np.asarray(pc.points)
         path = Path(path)
         import fileio
-        fileio.write_cloud(path, pts)
+        fileio.write_cloud(path, pts, colors=cols)
         if progress:
             progress(1.0, f"{path.name}: {len(pts):,} точек")
         return len(pts)

@@ -300,6 +300,8 @@ class ExportPanel(ToolPanel):
         self.frame.addItem('выровненная система: Z вверх (рекомендуется)', 'common')
         self.frame.addItem('исходная система опорного скана', 'ref')
         p.add(W.field('Система координат', self.frame))
+        self.colors = QCheckBox('цвета по фото (непокрытые точки — чёрные)')
+        p.add(self.colors)
         self.path = QLineEdit()
         b = W.tool(W.THEME.icon('mdi6.folder-outline'), tip='Выбрать…', cb=self._browse, icon_only=True)
         p.add(W.field('Файл', W.hbox(self.path, b, spacing=4)))
@@ -334,14 +336,18 @@ class ExportPanel(ToolPanel):
             p = p.with_suffix('.' + self.fmt.value())
         i = self.what.currentIndex()
         return {'path': p, 'voxel': self.voxel.value(), 'frame': self.frame.currentData(),
+                'colors': self.colors.isChecked(),
                 'scan_ids': self.scopes[i][1] if 0 <= i < len(self.scopes) else None}
 
     def state(self):
-        return {'fmt': self.fmt.value(), 'voxel': self.voxel.value(), 'frame': self.frame.currentData()}
+        return {'fmt': self.fmt.value(), 'voxel': self.voxel.value(), 'frame': self.frame.currentData(),
+                'colors': self.colors.isChecked()}
 
     def restore(self, d):
         if 'fmt' in d:
             self.fmt.set_value(d['fmt'])
+        if 'colors' in d:
+            self.colors.setChecked(bool(d['colors']))
         if 'voxel' in d:
             self.voxel.setValue(float(d['voxel']))
         i = self.frame.findData(d.get('frame'))

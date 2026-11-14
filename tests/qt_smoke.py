@@ -235,7 +235,229 @@ def main():
         if not ok:
             finish(1)
             return
-        QTimer.singleShot(200, step_import)
+        QTimer.singleShot(200, step_photo)
+
+    def step_photo():
+        """Фото: добавление, пары через окно снимка + 3D, привязка, окраска-слой, дерево.
+
+        Снимок — синтетический рендер облака с известной позы, поэтому поза
+        обязана восстановиться: σ ≈ 0 (проверяем по числу пар и наличию pose)."""
+        import photos as ph_
+        import planes as pl_
+        import numpy as np
+        from PIL import Image as Img
+        np_ = np
+
+        win, hn, f35 = 900, 700, 24
+        ref = sess.ref
+        Pw = pr.transform(np_.asarray(pl_.load_points(ref.path)[::61] @ ref.R_up.T, float),
+                          sess.Tc(ref))
+        lo, hi = Pw.min(axis=0), Pw.max(axis=0)
+        c0 = (lo + hi) / 2
+        eye = c0 + np_.array([1.0, -1.0, 0.45]) * float(np_.linalg.norm(hi - lo))
+        Ttrue = ph_.T_of(ph_.look_R(c0 - eye, (0, 0, 1)), eye)
+        uv, zz, okp = ph_.project(Pw, Ttrue, f35, win, hn)
+        sel = np_.where(okp)[0]
+        img = np_.full((hn, win, 3), 235, np_.uint8)
+        img[np_.clip(uv[sel, 1].astype(int), 0, hn - 1),
+            np_.clip(uv[sel, 0].astype(int), 0, win - 1)] = np_.array([90, 60, 140], np_.uint8)
+        path = out / 'photo_test.jpg'
+        Img.fromarray(img).save(path, quality=94)
+        # 6 точек пар: экстремумы по осям (как характерные углы)
+        idx = []
+        for ax in range(3):
+            for sg in (-1, 1):
+                idx.append(int(sel[np_.argmax((Pw[sel] - c0)[:, ax] * sg)]))
+        pairs_uv, pairs_p = uv[idx], Pw[idx]
+
+        old_get = dialogs.QFileDialog.getOpenFileNames
+        dialogs.QFileDialog.getOpenFileNames = staticmethod(lambda *a, **k: ([str(path)], ''))
+        try:
+            w.on_photo_action('add', None)
+        finally:
+            dialogs.QFileDialog.getOpenFileNames = old_get
+        app.processEvents()
+        p = sess.photos[-1] if sess.photos else None
+        added = p is not None and __import__('pathlib').Path(p['path']).exists()
+        copied = p['path'] if p is not None else ''
+        w._photo_cur = p['id'] if p else None
+        w.on_photo_action('f35', float(f35))
+        w.photo_panel.cb_magnet.setChecked(False)   # синтетические пары идеальны — магнит не нужен
+        w.set_measure_mode('photo')
+        for (u, v), q in zip(pairs_uv, pairs_p):
+            w._photo_canvas_event('press', u, v)       # клик по окну фото
+            w._photo_canvas_event('release', u, v)     # отпускание (клик без протяжки)
+            w.photo_click_at('scan:' + ref.id, q)      # клик по 3D-виду
+        npairs = len(p.get('pairs') or []) if p else 0
+        w._photo_bind()
+
+        def after_bind():
+            pose_ok = p is not None and p.get('pose') is not None
+            if pose_ok:
+                T2 = sess.Tc(ref) @ np_.asarray(p['pose'], float)
+                pose_err = ph_.rot_err_deg(T2[:3, :3], Ttrue[:3, :3])
+            else:
+                pose_err = 1e9
+            w.photo_paint_set(True)
+
+            def after_paint():
+                r = sess.photo_rgb(sess.placed()[0]) if sess.placed() else None
+                painted = int(r[1].sum()) if r is not None else 0
+                layer_on = w._photo_paint and w.tree_panel.switches['photo'].isChecked()
+                w.on_tree_visible('photo:*', False)
+                hidden = all(not q_['visible'] for q_ in sess.photos)
+                w.on_tree_visible('photo:*', True)
+                shown = all(q_['visible'] for q_ in sess.photos)
+                from PySide6.QtWidgets import QMessageBox
+                old_q = QMessageBox.question
+                QMessageBox.question = staticmethod(lambda *a, **k: QMessageBox.Yes)
+                try:
+                    w._photo_cur = p['id']
+                    w.on_tree_action('photo_delete', 'photo:' + p['id'])   # меню дерева
+                finally:
+                    QMessageBox.question = old_q
+                gone = not sess.photos
+                w.photo_paint_set(False)
+                app.processEvents()
+                try:                                    # за собой: копия фото в photos/
+                    _cp = __import__('pathlib').Path(copied)
+                    _cp.unlink(missing_ok=True)
+                    _cp.parent.rmdir()                  # пустой каталог photos/ не оставляем
+                except Exception:                       # noqa: BLE001
+                    pass
+                shot('05e_photo')
+                ok = added and npairs >= 4 and pose_ok and pose_err < 1.0 and painted > 0 \
+                    and layer_on and hidden and shown and gone
+                msg = (f'фото добавлено {added}, пар {npairs}, поза {pose_ok} '
+                       f'(ошибка {pose_err:.2f}°), окрашено точек {painted}, слой {layer_on}, '
+                       f'глаз {hidden and shown}, удалено {gone} — {"ок" if ok else "ОШИБКА"}')
+                log.append(f'05e_photo: {msg}')
+                print(f'[{time.time() - t0:5.1f}s] 05e_photo.png  |  {msg}', flush=True)
+                if not ok:
+                    finish(1)
+                    return
+                QTimer.singleShot(200, step_photo_pano)
+
+            wait(lambda: not w.busy and not getattr(w, '_photo_warm_busy', False), after_paint, 120)
+
+        wait(lambda: not w.busy, after_bind, 120)
+
+    def step_photo_pano():
+        """Панорама 360°: автодетект (кадр 2:1), пары без фокусного, обе привязки
+        («камера у сканера» с выбором скана И 6-DOF без центра), окраска.
+
+        Снимок — equirect-рендер облака с позы ровно на сканере опорного скана,
+        поэтому центр «у сканера» — истина и поза обязана восстановиться."""
+        import photos as ph_
+        import planes as pl_
+        from PIL import Image as Img
+
+        win, hn = 1200, 600
+        ref = sess.ref
+        Pw = pr.transform(np.asarray(pl_.load_points(ref.path)[::61] @ ref.R_up.T, float),
+                          sess.Tc(ref))
+        c0 = (Pw.min(axis=0) + Pw.max(axis=0)) / 2
+        C = np.asarray(sess.Tc(ref), float)[:3, 3]      # сканер опорного скана (общая система)
+        Ttrue = ph_.T_of(ph_.rotvec_R(np.array([0.05, -0.04, 0.8])), C)
+        uv, _, _ = ph_.project_pano(Pw, Ttrue, win, hn)
+        img = np.full((hn, win, 3), 235, np.uint8)
+        img[np.clip(uv[:, 1].astype(int), 0, hn - 1),
+            np.clip(uv[:, 0].astype(int), 0, win - 1)] = np.array([60, 130, 90], np.uint8)
+        path = out / 'photo_pano_test.jpg'
+        Img.fromarray(img).save(path, quality=94)      # кадр 2:1 → автодетект 360°
+        idx = []                                       # 6 характерных точек пар
+        for ax in range(3):
+            for sg in (-1, 1):
+                idx.append(int(np.argmax((Pw - c0)[:, ax] * sg)))
+        pairs_uv, pairs_p = uv[idx], Pw[idx]
+
+        old_get = dialogs.QFileDialog.getOpenFileNames
+        dialogs.QFileDialog.getOpenFileNames = staticmethod(lambda *a, **k: ([str(path)], ''))
+        try:
+            w.on_photo_action('add', None)
+        finally:
+            dialogs.QFileDialog.getOpenFileNames = old_get
+        app.processEvents()
+        p = sess.photos[-1] if sess.photos else None
+        w._photo_cur = p['id'] if p else None
+        pano_ok = p is not None and p.get('proj') == 'pano360'
+        no_focal = p is not None and not p.get('f35')
+        sec_hidden = pano_ok and w.photo_panel.sec_focal.isHidden() \
+            and w.photo_panel.sec_align.isHidden() \
+            and not w.photo_panel.row_scanner.isHidden()
+        combo_ok = pano_ok and w.photo_panel.scanner_scan.currentData() == ref.id
+        w.photo_panel.cb_magnet.setChecked(False)      # синтетические пары идеальны
+        if w.measure_mode:                             # после шага photo режим мог остаться
+            w.set_measure_mode(None, keep=True)        # включённым, а это toggle
+        w.set_measure_mode('photo')
+        for (u, v), q in zip(pairs_uv, pairs_p):
+            w._photo_canvas_event('press', u, v)
+            w._photo_canvas_event('release', u, v)
+            w.photo_click_at('scan:' + ref.id, q)
+        npairs = len(p.get('pairs') or []) if p else 0
+        w._photo_bind()                                # путь 1: «у сканера» (по умолчанию)
+
+        def pose_check():
+            if p is None or p.get('pose') is None:
+                return False, 1e9, 1e9
+            T2 = sess.Tc(ref) @ np.asarray(p['pose'], float)
+            return (True, ph_.rot_err_deg(T2[:3, :3], Ttrue[:3, :3]),
+                    float(np.linalg.norm(T2[:3, 3] - Ttrue[:3, 3])))
+
+        def after_bind1():
+            ok1, err1, cerr1 = pose_check()
+            p['pose'] = None                           # путь 2: 6-DOF без центра
+            w.photo_panel.cb_scanner.setChecked(False)
+            w._photo_bind()
+
+            def after_bind2():
+                ok2, err2, cerr2 = pose_check()
+                w.photo_paint_set(True)
+
+                def after_paint():
+                    r = sess.photo_rgb(sess.placed()[0]) if sess.placed() else None
+                    painted = int(r[1].sum()) if r is not None else 0
+                    from PySide6.QtWidgets import QMessageBox
+                    old_q = QMessageBox.question
+                    QMessageBox.question = staticmethod(lambda *a, **k: QMessageBox.Yes)
+                    try:
+                        w._photo_cur = p['id']
+                        w.on_tree_action('photo_delete', 'photo:' + p['id'])
+                    finally:
+                        QMessageBox.question = old_q
+                    gone = not sess.photos
+                    w.photo_paint_set(False)
+                    w.set_measure_mode(None, keep=True)    # за собой погасить режим пар
+                    app.processEvents()
+                    try:                                    # за собой: копия фото в photos/
+                        _cp = Path(p['path'])
+                        _cp.unlink(missing_ok=True)
+                        _cp.parent.rmdir()
+                    except Exception:                       # noqa: BLE001
+                        pass
+                    shot('05f_photo_pano')
+                    ok = pano_ok and no_focal and sec_hidden and combo_ok and npairs >= 3 \
+                        and ok1 and err1 < 1.0 and cerr1 < 0.05 \
+                        and ok2 and err2 < 1.0 and cerr2 < 0.3 \
+                        and painted > 0 and gone
+                    msg = (f'детект 360° {pano_ok}, без фокусного {no_focal}, секции скрыты '
+                           f'{sec_hidden}, скан в списке {combo_ok}, пар {npairs}; '
+                           f'у сканера: поза {ok1} (поворот {err1:.2f}°, центр {cerr1:.2f} м); '
+                           f'6-DOF: поза {ok2} (поворот {err2:.2f}°, центр {cerr2:.2f} м); '
+                           f'окрашено {painted}, удалено {gone} — {"ок" if ok else "ОШИБКА"}')
+                    log.append(f'05f_photo_pano: {msg}')
+                    print(f'[{time.time() - t0:5.1f}s] 05f_photo_pano.png  |  {msg}', flush=True)
+                    if not ok:
+                        finish(1)
+                        return
+                    QTimer.singleShot(200, step_import)
+
+                wait(lambda: not w.busy and not getattr(w, '_photo_warm_busy', False),
+                     after_paint, 120)
+
+            wait(lambda: not w.busy, after_bind2, 120)
+
+        wait(lambda: not w.busy, after_bind1, 120)
 
     def step_import():
         import bag_reconstruct as br

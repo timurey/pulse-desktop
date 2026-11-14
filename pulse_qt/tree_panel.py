@@ -109,6 +109,7 @@ class TreePanel(QFrame):
               ('grid', 'Сетка 1 м', 'mdi6.grid', True),
               ('points', 'Точки сканов', 'mdi6.dots-grid', True),
               ('mesh', 'Поверхность', 'mdi6.vector-triangle', True),
+              ('photo', 'Фото (окраска)', 'mdi6.image-multiple', False),
               ('quality', 'Качество совмещения', 'mdi6.texture-box', False)]
 
     def __init__(self):
@@ -196,7 +197,7 @@ class TreePanel(QFrame):
         """Выделенные узлы дерева проекта (без строк сеток и элементов) в порядке дерева."""
         sel = {it.data(0, ROLE) for it in self.tree.selectedItems()}
         return [k for k in self._items if k in sel
-                and not k.startswith(('mesh:', 'elem:', 'cbox:', 'plan:', 'view:'))]
+                and not k.startswith(('mesh:', 'elem:', 'cbox:', 'plan:', 'view:', 'photo:'))]
 
     def selected_cboxes(self):
         """Выделенные боксы отсечения (ключи вида 'cbox:<id>') в порядке дерева."""
@@ -291,6 +292,7 @@ class TreePanel(QFrame):
         self._add_boxes(root, expanded, first)
         self._add_plans(root, expanded, first)
         self._add_views(root, expanded, first)
+        self._add_photos(root, expanded, first)
         if cur in self._items:
             tree.setCurrentItem(self._items[cur])
         for k in sel:
@@ -484,6 +486,44 @@ class TreePanel(QFrame):
             self.tree.setItemWidget(it, 0, r)
         g.setExpanded(True)
 
+    PHOTOS = 'photo:*'                             # ключ ветви фото
+
+    def _add_photos(self, root, expanded, first):
+        """Ветвь «Фото»: снимки для окраски; глаз — участвует в окраске и показе."""
+        photos = getattr(self.session, 'photos', []) or []
+        if not photos:
+            return
+        fixed = (Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+        g = QTreeWidgetItem(root)
+        g.setData(0, ROLE, self.PHOTOS)
+        g.setData(0, ROLE + 1, False)
+        g.setFlags(fixed)
+        g.setSizeHint(0, QSize(10, 30))
+        self._items[self.PHOTOS] = g
+        missing = set(getattr(self.session, 'photos_missing', []) or [])
+        any_vis = any(bool(p.get('visible', True)) for p in photos)
+        row = _Row(self, self.PHOTOS, 'Фото', any_vis, group=True, count=len(photos))
+        row.setToolTip('Снимки для окраски облака. Глаз — участвует в окраске; '
+                       'меню — окно, переименовать, удалить')
+        self.tree.setItemWidget(g, 0, row)
+        for p in photos:
+            key = 'photo:' + p['id']
+            it = QTreeWidgetItem(g)
+            it.setData(0, ROLE, key)
+            it.setFlags(fixed)
+            it.setSizeHint(0, QSize(10, 30))
+            self._items[key] = it
+            name = p.get('name', p['id'])
+            if p.get('name') in missing:
+                name += ' (файл не найден)'
+            r = _Row(self, key, name, bool(p.get('visible', True)))
+            tip = 'привязано' if p.get('pose') is not None else 'не привязано'
+            if p.get('f35'):
+                tip += f' · {float(p["f35"]):.0f} мм'
+            r.setToolTip(tip + '. Двойной щелчок — окно снимка')
+            self.tree.setItemWidget(it, 0, r)
+        g.setExpanded(True)
+
     def start_inline_rename(self, key, current):
         """Редактор имени прямо в строке дерева (Enter/фокус — применить,
         Esc — отменить). Результат — action 'rename_done' (key, текст)."""
@@ -577,6 +617,19 @@ class TreePanel(QFrame):
                 act('Переименовать', 'cbox_rename', 'mdi6.pencil-outline')
                 m.addSeparator()
                 act('Удалить бокс', 'cbox_delete', 'mdi6.delete-outline')
+            m.exec(self.tree.viewport().mapToGlobal(pos))
+            return
+        if key is not None and key.startswith('photo:'):
+            if key == self.PHOTOS:
+                act('Показать все', 'photo_show_all', 'mdi6.eye-outline')
+                act('Скрыть все', 'photo_hide_all', 'mdi6.eye-off-outline')
+            else:
+                act('Окно фото', 'photo_open', 'mdi6.image')
+                act('Привязать / пары', 'photo_edit', 'mdi6.vector-point')
+                act('Переименовать', 'photo_rename', 'mdi6.pencil-outline')
+                act('Участвует в окраске', 'photo_toggle', 'mdi6.eye-outline')
+                m.addSeparator()
+                act('Удалить фото', 'photo_delete', 'mdi6.delete-outline')
             m.exec(self.tree.viewport().mapToGlobal(pos))
             return
         if key is not None and key.startswith('elem:'):

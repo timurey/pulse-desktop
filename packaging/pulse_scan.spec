@@ -35,7 +35,8 @@ hiddenimports = (
     # модули логики подгружаются лениво (import внутри функций)
     + ['planes', 'plane_register', 'openings', 'reflections', 'manual_clean', 'scan_tree', 'project_store',
        'scan_project', 'scan_session', 'bag_reconstruct', 'offline_deskew', 'scanner_client', 'quality',
-       'dynamic', 'surface', 'measure', 'section', 'calibration', 'view_cube', 'world_map']
+       'dynamic', 'surface', 'measure', 'section', 'calibration', 'view_cube', 'world_map',
+       'photos', 'cv2']
 )
 
 # неиспользуемые части Qt, VTK и прочего — меньше размер

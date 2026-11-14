@@ -34,3 +34,6 @@ screenshots/
 .venv312/
 *.pulse
 calib.json
+
+# копии фото проектов (рядом с .pulse)
+photos/

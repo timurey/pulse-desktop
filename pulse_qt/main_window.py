@@ -48,6 +48,7 @@ from .control_panel import ControlPanel
 from .dock import Dock
 from .dialogs import ScannerImportDialog, BagImportDialog, AskDialog, SheetPreview, LevelPlaneDialog
 from .tools import AutoPanel, CandPanel, QualityPanel, ExportPanel, PackPanel, FitPanel, DrawingPanel
+from .photo_panel import PhotoPanel, PhotoDialog
 
 KIND_HUE = {'floor': (0.30, 0.75, 0.40), 'ceiling': (0.35, 0.55, 1.0), 'wall': (1.0, 0.62, 0.20),
             'other': (0.6, 0.6, 0.6)}
@@ -406,6 +407,17 @@ class MainWindow(QMainWindow):
         self._cbox_ids = set()                   # боксы, нарисованные в сцене (для удаления)
         self._label_drag = None                  # драг подписи замера (Ф13)
         self._cbox_drag = None                   # драг грани бокса: {'id','axis','n','opp','c0','h0'}
+        # фото (photos.py): окно, выбранное фото, ожидающая 3D-точка пары,
+        # режим совмещения поверхности, флаг окраски
+        self._photo_dlg = None
+        self._photo_cur = None
+        self._photo_pending = None               # (u, v) фото-точка пары — ждёт клика по 3D
+        self._photo_pair_drag = None             # индекс пары, которую тянут на фото
+        self._photo_pair_cand = None             # кандидат: клик по крестику (решит протяжка)
+        self._photo_pt_drag = None               # {'pid', 'i'} — маркер пары, который тянут в 3D
+        self._photo_h = None                     # режим совмещения: {'el', 'corners', 'grab', ...}
+        self._photo_paint = False                # окраска облака включена (слой «Фото»)
+        self._photo_warm_busy = False
         self.zero_show = True
         self.z0 = None
         self.points_hidden = False               # «Поверхность»: показывать только сетки
@@ -439,6 +451,10 @@ class MainWindow(QMainWindow):
     # ── построение окна ──────────────────────────────────────────────────
     def _build(self):
         t = W.THEME
+        # пересборка (toggle_theme) удаляет старые виджеты: guard'ы и ссылки на них
+        # обязаны сброситься, иначе _place_panel_tabs двигает удалённые кнопки
+        self._ptabs = None
+        self._ptab_icons = {}
         root = QWidget()
         lay = QVBoxLayout(root)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -511,14 +527,15 @@ class MainWindow(QMainWindow):
         self.export_panel = ExportPanel()
         self.pack_panel = PackPanel()
         self.drawing_panel = DrawingPanel()
+        self.photo_panel = PhotoPanel()
         for key, w in (('auto', self.auto_panel), ('cand', self.cand_panel), ('quality', self.quality_panel),
                        ('export', self.export_panel), ('pack', self.pack_panel),
-                       ('drawing', self.drawing_panel)):
+                       ('drawing', self.drawing_panel), ('photo', self.photo_panel)):
             w.action.connect(lambda name, arg, key=key: self.on_tool_action(key, name, arg))
             w.closed.connect(self.close_tool)
         for w in (self.inspector, self.manual, self.clean, self.surface_panel, self.control, self.fit_panel,
                   self.auto_panel, self.cand_panel, self.quality_panel, self.export_panel, self.drawing_panel,
-                  self.pack_panel):
+                  self.pack_panel, self.photo_panel):
             self.right.addWidget(w)
         self.right_wrap = QFrame()
         self.right_wrap.setObjectName('PanelRight')
@@ -711,6 +728,9 @@ class MainWindow(QMainWindow):
         g = rb.add_group(pg, 'Документы')
         g.big('mdi6.file-document-outline', 'Чертёж\nсечения', tool('drawing'),
               'Чертёж по срезу: план / разрез / развёртка, осевые линии, проёмы; SVG, DXF, PNG' + SH)
+        g.big('mdi6.image-multiple', 'Фото', tool('photo'),
+              'Привязка фото к облаку (пары точек или совмещение поверхности) '
+              'и окраска точек пикселями снимка' + SH)
         g.big('mdi6.camera-outline', 'Скриншот', self.save_screenshot, 'Скриншот окна и 3D-вида (F12)')
         rb.finish()
         self._rb_toggles = rb_
@@ -745,6 +765,7 @@ class MainWindow(QMainWindow):
              'surface': ('result', 'surface', 'surface_panel', None),
              'export': ('result', 'tool', 'export_panel', None),
              'drawing': ('result', 'tool', 'drawing_panel', None),
+             'photo': ('result', 'tool', 'photo_panel', None),
              'pack': ('project', 'tool', 'pack_panel', None)}
     RUNNABLE = ('auto', 'cand', 'quality', 'dyn', 'surface', 'export', 'drawing', 'pack')
 
@@ -799,6 +820,8 @@ class MainWindow(QMainWindow):
                 (key in ('zero', 'section') and self.measure_mode in ('zero', 'secplane', 'level', 'cbox')):
             if self.measure_mode:
                 self.set_measure_mode(None, keep=True)
+        if key == 'photo':
+            self._photo_leave()
         if key == 'frame' and self.select_mode:
             self.toggle_select(keep=True)
 
@@ -848,6 +871,8 @@ class MainWindow(QMainWindow):
             self.refresh_tool()
         elif key == 'drawing' and name in ('preview', 'svg', 'dxf', 'png'):
             self.on_drawing_save(name)
+        elif key == 'photo':
+            self.on_photo_action(name, arg)
 
     # ── чертёж сечения (drawing.py) ──────────────────────────────────────
     def _drawing_sheet(self):
@@ -924,6 +949,1027 @@ class MainWindow(QMainWindow):
             return
         self.set_status(f'чертёж сохранён: {p}')
 
+    # ── фото: панель, пары точек, совмещение поверхности, окраска ────────
+    # каждому фото — свой цвет (одинаковый в 3D, на снимке и в панели);
+    # активное фото рисуется ярко, остальные приглушённо
+    PHOTO_COLORS = ((1.00, 0.78, 0.20), (0.35, 0.75, 1.00), (0.45, 0.95, 0.45),
+                    (1.00, 0.45, 0.80), (1.00, 0.55, 0.25), (0.70, 0.65, 1.00),
+                    (0.20, 0.90, 0.80), (1.00, 0.90, 0.35))
+
+    def _photo_color(self, pid, rgb255=False):
+        """Цвет фото по номеру id (ph3 → 3-й цвет): удаление соседей его не меняет."""
+        try:
+            i = max(0, int(str(pid)[2:]) - 1)
+        except ValueError:
+            i = next((k for k, q in enumerate(self.s.photos) if q.get('id') == pid), 0)
+        c = self.PHOTO_COLORS[i % len(self.PHOTO_COLORS)]
+        return tuple(int(round(x * 255)) for x in c) if rgb255 else c
+
+    def _photo_color_map(self):
+        """{id: (r,g,b) 0..255} — для панели и снимка."""
+        return {q['id']: self._photo_color(q['id'], rgb255=True) for q in self.s.photos}
+    def refresh_photo_panel(self):
+        """Панель «Фото» по текущему сеансу (список, пары, плоскости, статусы)."""
+        cur = self._photo_cur
+        if cur is not None and self.s.photo_by_id(cur) is None:
+            cur = None
+        if cur is None and self.s.photos:
+            cur = self.s.photos[0]['id']
+        self._photo_cur = cur
+        p = self.s.photo_by_id(cur) if cur else None
+        pano = p is not None and (p.get('proj') or 'pinhole') == 'pano360'
+        self.photo_panel.set_photos(self.s.photos, cur, self.s.photos_missing,
+                                    self._photo_color_map())
+        self.photo_panel.set_pano_mode(pano)
+        if self.s.ref is not None:
+            self.photo_panel.set_scans(
+                [(sc.id, self.s.scan_title(sc.id)) for sc in self.s.placed()],
+                self.s.ref.id)
+        self.photo_panel.set_f35_enabled(p is not None and not pano)
+        if p is not None:
+            self.photo_panel.set_f35(p.get('f35'), p.get('f35_src'), self._photo_f35_note(p))
+            self.photo_panel.set_pairs(p.get('pairs') or [])
+        else:
+            self.photo_panel.set_pairs([])
+        planes = [e for e in self.s.elements if e.get('kind') == 'plane']
+        act = (self._photo_h or {}).get('el')
+        if act is None and p is not None and p.get('hs'):
+            act = next(iter(p['hs']), None)
+        self.photo_panel.set_elements(planes, act)
+        self.photo_panel.set_pair_mode(self.measure_mode == 'photo')
+        self.photo_panel.set_align_mode(bool(self._photo_h))
+        self.photo_panel.set_paint(self._photo_paint)
+        self._draw_photo_points()
+        self._photo_dialog_refresh()
+
+    def _photo_f35_note(self, p):
+        """Подсказка под полем фокусного: что известно и чего ждать."""
+        pairs = p.get('pairs') or []
+        if p.get('f35_src') == 'exif':
+            return 'из EXIF снимка'
+        if p.get('f35_src') == 'auto':
+            return 'подобрано по парам — проверьте по проекции'
+        if len(pairs) >= 4:
+            return ('впишите или «Подобрать по парам»; для одной плоскости фокусное '
+                    'влиять не будет, для глубины — критично')
+        return ('впишите значение (26–28 мм у основной камеры телефона; '
+                'широкий угол — 14–16) или привяжите пары и нажмите «Подобрать по парам»')
+
+    def on_photo_action(self, name, arg):
+        """Действия панели «Фото»."""
+        cur = self._photo_cur
+        if name == 'add':
+            paths = QFileDialog.getOpenFileNames(
+                self, 'Добавить фото', str(Path.home()),
+                'Фотографии (*.jpg *.jpeg *.png *.tif *.tiff *.bmp)')[0]
+            if not paths:
+                return
+            added = 0
+            for q in paths:
+                try:
+                    p = self.s.add_photo(q)
+                except Exception as e:                        # noqa: BLE001
+                    self.set_status(f'фото не добавилось: {Path(q).name}: {e}')
+                    continue
+                self._photo_cur = p['id']
+                added += 1
+            if added:
+                self.s._photo_cache = {}
+                self.refresh_photo_panel()
+                self.tree_panel.rebuild()
+                self._update_title()
+                self.set_status(f'добавлено фото: {added}; фокусное — из EXIF или впишите')
+        elif name == 'select':
+            self._photo_cur = arg
+            self._photo_h = None
+            self.refresh_photo_panel()
+        elif name == 'window':
+            pid = arg if isinstance(arg, str) else cur
+            if pid:
+                self._photo_cur = pid
+                self._photo_open_window()
+                self.refresh_photo_panel()
+        elif name == 'del':
+            p = self.s.photo_by_id(arg if isinstance(arg, str) else cur)
+            if p is None:
+                return
+            from PySide6.QtWidgets import QMessageBox
+            r = QMessageBox.question(self, 'Удалить фото', f'Удалить «{p.get("name")}» из проекта?'
+                                     '\nФайл на диске останется.', QMessageBox.Yes | QMessageBox.No)
+            if r != QMessageBox.Yes:
+                return
+            self.s.remove_photo(p['id'])
+            if self._photo_cur == p['id']:
+                self._photo_cur = None
+            self.refresh_photo_panel()
+            self.tree_panel.rebuild()
+            self._update_title()
+            self._photo_warm()
+        elif name == 'pair_mode':
+            self.set_measure_mode('photo' if not self.measure_mode else None)
+            self.refresh_photo_panel()
+        elif name == 'pair_del':
+            p = self.s.photo_by_id(cur)
+            if p is not None and 0 <= int(arg) < len(p.get('pairs') or []):
+                p['pairs'].pop(int(arg))
+                self.s._photo_cache = {}
+                self.refresh_photo_panel()
+                self._update_title()
+        elif name == 'bind':
+            self._photo_bind()
+        elif name == 'proj':
+            p = self.s.photo_by_id(cur)
+            if p is not None and arg in ('pinhole', 'pano360'):
+                self.s.set_photo_proj(p['id'], arg)
+                self.refresh_photo_panel()
+                self._photo_warm()
+                self.set_status('тип кадра изменён; поза сброшена — привяжите заново')
+        elif name == 'f35':
+            p = self.s.photo_by_id(cur)
+            if p is not None and (p.get('proj') or 'pinhole') != 'pano360':
+                p['f35'] = float(arg)
+                p['f35_src'] = 'manual'
+                self.s._photo_cache = {}
+                self._update_title()
+                self._photo_warm()
+                self.refresh_photo_panel()
+        elif name == 'f35_fit':
+            p = self.s.photo_by_id(cur)
+            if p is not None and (p.get('proj') or 'pinhole') != 'pano360':
+                self._photo_fit_focal()
+        elif name == 'el_sel':
+            self._photo_h_set_el(arg)
+            if self._photo_h is not None:                 # выбрал поверхность — слой сразу на фото
+                self._photo_open_window()
+                self.photo_panel.set_align_mode(True)
+        elif name == 'align':
+            self._photo_align_toggle()
+        elif name == 'refine_edges':
+            self._photo_h_refine_edges()
+        elif name == 'apply_h':
+            self._photo_h_apply()
+        elif name == 'paint':
+            self.photo_paint_set(not self._photo_paint)
+
+    def _photo_leave(self):
+        """Выход из панели «Фото»: снять режим, ожидание пары и слои."""
+        if self._photo_pending is not None:
+            self._photo_pending = None
+        self._photo_h = None
+        if self.measure_mode == 'photo':
+            self.set_measure_mode(None, keep=True)
+        self.view.remove_prefix('photo:')
+
+    def _photo_open_window(self):
+        """Окно снимка (немодальное; повторно то же — поднять)."""
+        p = self.s.photo_by_id(self._photo_cur) if self._photo_cur else None
+        if p is None:
+            self.set_status('выберите фото в списке')
+            return
+        if p.get('name') in self.s.photos_missing:
+            self.set_status('файл фото не найден рядом с проектом')
+            return
+        if self._photo_dlg is None:
+            self._photo_dlg = PhotoDialog(self)
+            self._photo_dlg.canvas.canvas_event.connect(self._photo_canvas_event)
+        d = self._photo_dlg
+        d.set_photo(p['path'], p.get('w') or 1, p.get('h') or 1)
+        d.setWindowTitle(f'Фото — {p.get("name", "")}')
+        d.show()
+        d.raise_()
+        self._photo_dialog_refresh()
+
+    def _photo_dialog_refresh(self):
+        """Слои и подсказка окна фото: пары/совмещение поверхностей."""
+        d = self._photo_dlg
+        p = self.s.photo_by_id(self._photo_cur) if self._photo_cur else None
+        if d is None or p is None or not d.isVisible():
+            return
+        wires = []
+        pairs = p.get('pairs') or []                     # пары активного фото (для подсказки)
+        for q in self.s.photos:                         # пары всех фото: свои цвета, чужие — бледно
+            qp = q.get('pairs') or []
+            if not qp:
+                continue
+            active = q['id'] == p['id']
+            c = self._photo_color(q['id'], rgb255=True)
+            alpha = 255 if active else 120
+            wires.append(('crosses', [[z['u'], z['v']] for z in qp], c,
+                          11 if active else 8, alpha))
+        if self._photo_h:
+            wires += self._photo_h_wires(p)
+            d.set_hint('Тащите ручки: середины рёбер — масштаб и положение, углы — перспектива. '
+                       'Одним щелчком ручка переносится в точку щелчка. Руки и контур можно '
+                       'вывести за пределы кадра — фото может покрывать часть поверхности.')
+        elif self.measure_mode == 'photo':
+            if (p.get('proj') or 'pinhole') == 'pano360':
+                need = 3 if self.photo_panel.at_scanner() else 4
+                hint = (f'Кликните характерную точку на панораме (угол, проём), затем ту же '
+                        f'точку в 3D-виде. Нужно не меньше {need} пар по разным стенам, '
+                        f'подальше от пола и потолка (полюса панорамы).')
+            else:
+                hint = ('Кликните характерную точку на фото (угол, проём), затем ту же точку '
+                        'в 3D-виде. Нужно не меньше 4 пар, лучше — на разных плоскостях.')
+            if self._photo_pending is not None:
+                hint = 'Точка фото принята — щёлкните ту же точку в 3D-виде'
+            d.set_hint(hint)
+        else:
+            if (p.get('proj') or 'pinhole') == 'pano360':
+                d.set_hint(f'пар {len(pairs)} · панорама 360°')
+            else:
+                d.set_hint(f'пар {len(pairs)} · фокусное {p.get("f35") or "—"} мм'
+                           f'{" (" + p["f35_src"] + ")" if p.get("f35_src") else ""}')
+        d.canvas.set_wires(wires)
+
+    def _photo_canvas_event(self, kind, u, v):
+        """Мышь на фото: точка пары, ручки поверхности."""
+        p = self.s.photo_by_id(self._photo_cur) if self._photo_cur else None
+        if p is None:
+            return
+        if self._photo_h:
+            return self._photo_h_event(kind, u, v)
+        if self.measure_mode != 'photo':
+            return
+        pairs = p.get('pairs') or []
+        if kind == 'press':
+            i = self._photo_pair_at(p, u, v)              # кандидат на правку: решит протяжка
+            self._photo_pair_cand = None if i is None else {'i': i, 'u': u, 'v': v}
+            self._photo_pair_drag = None
+            if i is not None:
+                return                                   # пока не тянем — клик может быть новой точкой
+            uu, vv = self._photo_snap(p, float(u), float(v))
+            self._photo_pending = (uu, vv)
+            self._photo_dialog_refresh()
+            self.set_status('точка фото принята — щёлкните ту же точку в 3D-виде')
+            return
+        if kind == 'move':
+            c = getattr(self, '_photo_pair_cand', None)
+            if c is not None and self._photo_pair_drag is None:
+                # протяжка началась: правка вместо создания новой точки
+                if np.hypot(u - c['u'], v - c['v']) > 3.0 * self._photo_widget_scale():
+                    self._photo_pair_drag = c['i']
+                    self._photo_pending = None
+                    self.set_status(f'правка пары {c["i"] + 1}: точка фото следует за курсором')
+                else:
+                    return
+            if self._photo_pair_drag is not None:
+                i = self._photo_pair_drag
+                if 0 <= i < len(pairs):
+                    pairs[i]['u'], pairs[i]['v'] = float(u), float(v)
+                    self._photo_dialog_refresh()
+                return
+            return
+        c = getattr(self, '_photo_pair_cand', None)
+        self._photo_pair_cand = None
+        if kind == 'release' and self._photo_pair_drag is None and c is not None:
+            # клик без протяжки по крестику — обычная новая точка пары (магнит)
+            uu, vv = self._photo_snap(p, float(u), float(v))
+            self._photo_pending = (uu, vv)
+            self._photo_dialog_refresh()
+            self.set_status('точка фото принята — щёлкните ту же точку в 3D-виде')
+            return
+        if kind == 'release' and self._photo_pair_drag is not None:
+            i = self._photo_pair_drag
+            self._photo_pair_drag = None
+            if 0 <= i < len(pairs) and self.photo_panel.magnet_on():
+                uu, vv = self._photo_snap(p, float(u), float(v))   # одна поправка на отпускании
+                pairs[i]['u'], pairs[i]['v'] = uu, vv
+            self.s._photo_cache = {}
+            self.refresh_photo_panel()
+            self._update_title()
+            self.set_status(f'пара {i + 1} поправлена — «Привязать» пересчитает позу')
+
+    def _photo_pt_at(self, x, y, px=12.0):
+        """Маркер пары активного фото под курсором 3D → {'pid', 'i'}."""
+        p = self.s.photo_by_id(self._photo_cur) if self._photo_cur else None
+        if p is None or self.s.ref is None:
+            return None
+        pairs = p.get('pairs') or []
+        if not pairs:
+            return None
+        Q = np.array([[q['x'], q['y'], q['z']] for q in pairs], float)
+        uv, _depth, front = self.view.project(pr.transform(Q, self.s.Tc(self.s.ref)))
+        d = np.where(front, np.hypot(uv[:, 0] - x, uv[:, 1] - y), 1e9)
+        i = int(np.argmin(d))
+        return {'pid': p['id'], 'i': i} if d[i] <= px else None
+
+    def _photo_pt_move(self, x, y):
+        """Тяга маркера пары по облаку: точка пары следует за лучом курсора."""
+        g = self._photo_pt_drag
+        if not g:
+            return
+        p = self.s.photo_by_id(g['pid'])
+        if p is None or self.s.ref is None:
+            return
+        hit = self.view.pick_point(x, y, names={n for n in self.view.items if n.startswith('scan:')})
+        if hit is None:
+            return                                       # мимо облака — точка не двигается
+        Ta = np.linalg.inv(self.s.Tc(self.s.ref))
+        q = pr.transform(np.asarray(hit[1], float)[None], Ta)[0]
+        pairs = p.get('pairs') or []
+        if g['i'] < len(pairs):
+            pairs[g['i']].update({'x': float(q[0]), 'y': float(q[1]), 'z': float(q[2])})
+            self._draw_photo_points()                    # быстрый слой — без полной перерисовки
+
+    def _photo_pair_at(self, p, u, v, px=14.0):
+        """Индекс пары активного фото под курсором (крестик в радиусе px экранных)."""
+        pairs = p.get('pairs') or []
+        if not pairs:
+            return None
+        scale = self._photo_widget_scale()
+        tol = px * scale
+        d = [np.hypot(q['u'] - u, q['v'] - v) for q in pairs]
+        i = int(np.argmin(d))
+        return i if d[i] <= tol else None
+
+    def _photo_gray(self, p):
+        """Серое изображение фото для магнита клика (кеш по файлу)."""
+        import photos as ph
+        f = Path(p['path'])
+        try:
+            st = f.stat()
+            key = (str(f), st.st_mtime, st.st_size)
+        except OSError:
+            return None, 1.0
+        c = getattr(self, '_photo_gray_cache', None)
+        if c is not None and c[0] == key:
+            return c[1], c[2]
+        try:
+            img = ph.load_image(p['path'], 1800)
+        except Exception:                                  # noqa: BLE001
+            return None, 1.0
+        gray = np.asarray(img, float).mean(axis=2).astype(np.uint8)
+        scale = img.shape[1] / max(int(p.get('w') or 1), 1)
+        self._photo_gray_cache = (key, gray, scale)
+        return gray, scale
+
+    def _photo_snap(self, p, u, v):
+        """Магнит клика по фото: точка к ближайшему углу краёв (суб-пиксель).
+
+        Включается чекбоксом «магнит OpenCV»; вне кадра и без cv2 — как есть.
+        """
+        import photos as ph
+        if not ph.HAS_CV2 or not self.photo_panel.magnet_on():
+            return u, v
+        w, hh = int(p.get('w') or 1), int(p.get('h') or 1)
+        if not (0 <= u < w and 0 <= v < hh):
+            return u, v
+        gray, scale = self._photo_gray(p)
+        if gray is None:
+            return u, v
+        su, sv = ph.snap_point(gray, u * scale, v * scale)
+        return su / max(scale, 1e-9), sv / max(scale, 1e-9)
+
+    def photo_click_at(self, cloud, p_world):
+        """Щелчок по 3D в режиме фото: пара к ожидающей точке снимка."""
+        p = self.s.photo_by_id(self._photo_cur) if self._photo_cur else None
+        if p is None:
+            self.set_status('сначала выберите фото в панели «Фото»')
+            return None
+        if self._photo_pending is None:
+            self.set_status('сначала щёлкните точку на фото в окне снимка')
+            return None
+        if self.s.ref is None:
+            return None
+        Ta = np.linalg.inv(self.s.Tc(self.s.ref))              # общая система → якорный канон
+        q = pr.transform(np.asarray(p_world, float)[None], Ta)[0]
+        u, v = self._photo_pending
+        p.setdefault('pairs', []).append({'u': u, 'v': v, 'x': float(q[0]),
+                                          'y': float(q[1]), 'z': float(q[2])})
+        self._photo_pending = None
+        self.s._photo_cache = {}
+        self.refresh_photo_panel()
+        self._update_title()
+        n = len(p['pairs'])
+        if (p.get('proj') or 'pinhole') == 'pano360':
+            need = 3 if self.photo_panel.at_scanner() else 4
+        else:
+            need = 4
+        self.set_status(f'пара {n}: фото ({u:.0f}, {v:.0f}) ↔ ({q[0]:.2f}, {q[1]:.2f}, {q[2]:.2f})'
+                        + (' — можно «Привязать»' if n >= need else f'; нужно ещё {need - n}'))
+        return q
+
+    def _photo_bind(self):
+        """Поза камеры из пар (BG): репроекция и σ в панели."""
+        p = self.s.photo_by_id(self._photo_cur) if self._photo_cur else None
+        if p is None:
+            self.set_status('выберите фото')
+            return
+        pairs = p.get('pairs') or []
+        pano = (p.get('proj') or 'pinhole') == 'pano360'
+        at_scanner = pano and self.photo_panel.at_scanner()
+        if len(pairs) < (3 if at_scanner else 4):
+            self.set_status('для привязки нужно не менее '
+                            + ('3 пар (камера у сканера)' if at_scanner else '4 пар'))
+            return
+        if pano:
+            uv = np.array([[q['u'], q['v']] for q in pairs], float)
+            P = np.array([[q['x'], q['y'], q['z']] for q in pairs], float)
+            w, h = int(p.get('w') or 1), int(p.get('h') or 1)
+            center = None
+            if at_scanner and self.s.ref is not None:
+                # центр = сканер выбранного скана в якорном каноне (не только опорного)
+                sc = self.s.by_id(self.photo_panel.scanner_scan_id()) or self.s.ref
+                center = (np.linalg.inv(self.s.Tc(self.s.ref)) @ self.s.Tc(sc))[:3, 3]
+
+            def job_pano(_progress):
+                import photos as ph
+                return ph.solve_pano(uv, P, w, h, center=center)
+
+            self.set_status('привязка панорамы…')
+            self.run_bg('Привязка панорамы', job_pano,
+                        done=lambda r: self._photo_bind_done(p, r))
+            return
+        if len(pairs) < 4:
+            self.set_status('для привязки нужно не менее 4 пар')
+            return
+        if not p.get('f35'):
+            self.set_status('сначала фокусное: EXIF/впишите/«Подобрать по парам»')
+            return
+        uv = np.array([[q['u'], q['v']] for q in pairs], float)
+        P = np.array([[q['x'], q['y'], q['z']] for q in pairs], float)
+        f35, w, h = float(p['f35']), int(p.get('w') or 1), int(p.get('h') or 1)
+        hint = None
+        if self.s.ref is not None and getattr(self.s.ref, '_display', None) is not None:
+            hint = np.asarray(self.s.ref._display)[::max(1, len(self.s.ref._display) // 4000)]
+
+        def job(_progress):
+            import photos as ph
+            T, sg = ph.solve(uv, P, f35, w, h, hint=hint)
+            return T, sg
+
+        self.set_status('привязка фото…')
+        self.run_bg('Привязка фото', job, done=lambda r: self._photo_bind_done(p, r))
+
+    def _photo_bind_done(self, p, r):
+        import photos as ph
+        T, sg = r if r is not None else (None, None)
+        if T is None:
+            advice = ph.z_advice_pano() if (p.get('proj') or 'pinhole') == 'pano360' \
+                else ph.z_advice()
+            self.photo_panel.set_bind_status('не сходится: ' + advice)
+            self.set_status('привязка не удалась — ' + advice)
+            return
+        p['pose'] = np.asarray(T, float).tolist()
+        self.s._photo_cache = {}
+        self.refresh_photo_panel()
+        self._update_title()
+        self.photo_panel.set_bind_status(f'поза установлена, σ = {sg:.1f} px')
+        self.set_status(f'поза фото установлена: σ {sg:.1f} px; «Окрасить облака» — слой «Фото»')
+        self._photo_warm()
+        self._update_title()
+
+    def _photo_fit_focal(self):
+        """Подбор фокусного по парам (BG)."""
+        p = self.s.photo_by_id(self._photo_cur) if self._photo_cur else None
+        if p is None or len(p.get('pairs') or []) < 4:
+            self.set_status('для подбора фокусного нужно ≥4 пар')
+            return
+        uv = np.array([[q['u'], q['v']] for q in p['pairs']], float)
+        P = np.array([[q['x'], q['y'], q['z']] for q in p['pairs']], float)
+        w, h = int(p.get('w') or 1), int(p.get('h') or 1)
+        hint = None
+        if self.s.ref is not None and getattr(self.s.ref, '_display', None) is not None:
+            hint = np.asarray(self.s.ref._display)[::max(1, len(self.s.ref._display) // 4000)]
+
+        def job(_progress):
+            import photos as ph
+            return ph.estimate_focal(uv, P, w, h, hint=hint)
+
+        self.set_status('подбор фокусного…')
+        self.run_bg('Фокусное', job, done=lambda r: self._photo_focal_done(p, r))
+
+    def _photo_focal_done(self, p, r):
+        if not r:
+            self.set_status('фокусное по парам не подбирается: пары на одной плоскости — '
+                            'добавьте пару на другой поверхности, или впишите значение')
+            return
+        f35, sg = r
+        p['f35'], p['f35_src'] = float(f35), 'auto'
+        self.s._photo_cache = {}
+        self.refresh_photo_panel()
+        self._update_title()
+        self.set_status(f'фокусное подобрано: {f35:.0f} мм, σ {sg:.1f} px — проверьте по проекции '
+                        'облака (кладка/перспектива)')
+
+    # ── совмещение поверхности ───────────────────────────────────────────
+    def _photo_align_toggle(self):
+        """Вход/выход из режима совмещения поверхности (слой с ручками на фото)."""
+        if self._photo_h:
+            self._photo_save_hs()
+            self._photo_h = None
+            self.photo_panel.set_align_mode(False)
+            self._photo_dialog_refresh()
+            return
+        p = self.s.photo_by_id(self._photo_cur) if self._photo_cur else None
+        if p is None:
+            self.set_status('выберите фото')
+            return
+        el_id = self.photo_panel.el.currentData()
+        el = self.s.element_by_id(el_id) if el_id else None
+        if el is None or el.get('kind') != 'plane':
+            self.set_status('выберите плоскость-поверхность (подгоняется инструментом «Элемент»)')
+            return
+        self._photo_h_set_el(el_id)
+        if self._photo_h is not None:
+            self._photo_open_window()
+            self.photo_panel.set_align_mode(True)
+
+    def _photo_h_set_el(self, el_id):
+        """Сделать поверхность активной в режиме совмещения (не выходя из него)."""
+        import photos as ph
+        p = self.s.photo_by_id(self._photo_cur) if self._photo_cur else None
+        if p is None or el_id is None:
+            return
+        el = self.s.element_by_id(el_id)
+        if el is None or el.get('kind') != 'plane':
+            return
+        shape = self._photo_surface_shape(el)
+        if shape is None:
+            self.set_status('по элементу не найти инлайнеров — переподгоните поверхность')
+            return
+        hull, inl, origin, u_ax, v_ax = shape['hull'], shape['inl'], shape['origin'], \
+            shape['u'], shape['v']
+        half, n_w = shape['half'], shape['n']
+        local4 = ph.rect8(float(half[0]), float(half[1]))[::2]
+        saved = (p.get('hs') or {}).get(el_id)
+        if saved is not None:
+            handles = np.asarray(saved, float)
+        elif p.get('pose') is not None:
+            uv, _, ok = self._photo_project(el)
+            if uv is not None and int(np.sum(ok)) >= 3:
+                lo, hi = uv[ok].min(axis=0), uv[ok].max(axis=0)
+                handles = ph.rect8_from_uv(lo, hi).astype(float)
+            else:
+                handles = ph.rect8_default(p.get('w') or 1, p.get('h') or 1)
+        else:
+            handles = ph.rect8_default(p.get('w') or 1, p.get('h') or 1)
+        self._photo_h = {'el': el_id, 'hull': hull, 'inl': inl, 'origin': origin,
+                         'u': u_ax, 'v': v_ax, 'n': n_w, 'half': half, 'local4': local4,
+                         'handles': handles, 'grab': None,
+                         'press': None, 'grab_mids': ()}
+        self._photo_dialog_refresh()
+        self.photo_panel.set_h_status(f'поверхность: {el.get("name") or el_id} — '
+                                      'тяните ручки до совпадения с фото')
+        self._photo_h_show()
+
+    def _photo_surface_shape(self, el):
+        """Форма поверхности для слоя: (hull ядра, точки, origin, u_ax, v_ax).
+
+        Рамку и масштаб задаёт **плотное ядро** инлайнеров (перцентили 2–98 %):
+        у «фасада В» охват 33.6×14.8 м включает тонкие крылья, и рамка по полному
+        охвату растягивалась вдвое против видимой стены (проверено на реальном
+        фото — пользователь видел «сжатый» блок). Фактура (слой) — все инлайнеры,
+        крылья видны хвостами.
+        """
+        import fits
+        import photos as ph
+        sc_el = self.s.by_id(el.get('scan'))
+        if sc_el is None or sc_el.pose is None or self.s.ref is None:
+            return None
+        idx = self.s.element_inliers(sc_el, el)
+        if len(idx) < 3:
+            return None
+        n = np.asarray(el['params']['n'], float)
+        u_ax, v_ax = fits.plane_axes(n)
+        B = np.column_stack([u_ax, v_ax])
+        center = np.asarray(el['center'], float)
+        Q = np.asarray(sc_el.down, float)[idx]                 # система СВОЕГО скана
+        loc = (Q - center) @ B
+        lo = np.percentile(loc, 2, axis=0)
+        hi = np.percentile(loc, 98, axis=0)
+        core = loc[np.all((loc >= lo) & (loc <= hi), axis=1)]
+        if len(core) < 3:
+            core = loc
+        hull = ph.convex_hull_2d(core)
+        if len(hull) < 3:
+            return None
+        off = (lo + hi) / 2                                   # центр плотного ядра
+        half = np.maximum((hi - lo) / 2, 1e-3)
+        M = np.linalg.inv(self.s.Tc(self.s.ref)) @ self.s.Tc(sc_el)
+        Rm = M[:3, :3]
+        origin = pr.transform((center + off @ B.T)[None], M)[0]
+        # ручки-прямоугольник = ядро; hull (для заливки/контура) центрируем по нему
+        hull_c = hull - off
+        step = max(1, len(loc) // 2500)
+        return {'hull': hull_c, 'inl': (loc - off)[::step], 'origin': origin,
+                'u': Rm @ u_ax, 'v': Rm @ v_ax, 'half': half, 'n': Rm @ n}
+
+    def _photo_project(self, el):
+        """Проекция ключевых точек поверхности через ТЕКУЩУЮ позу фото."""
+        import photos as ph
+        p = self.s.photo_by_id(self._photo_cur) if self._photo_cur else None
+        shape = self._photo_surface_shape(el)
+        if p is None or shape is None or p.get('pose') is None or not p.get('f35'):
+            return None, None, None
+        hull, origin = shape['hull'], shape['origin']
+        Q = (origin[None] + hull[:, 0:1] * shape['u'][None] + hull[:, 1:2] * shape['v'][None])
+        return ph.project(Q, np.asarray(p['pose'], float), float(p['f35']),
+                          int(p.get('w') or 1), int(p.get('h') or 1))
+
+    def _photo_h_wires(self, p):
+        """Слои режима совмещения: заливка оболочки, фактура точек, ручки."""
+        h = self._photo_h
+        if not h:
+            return []
+        import photos as ph
+        handles = h['handles']
+        # гомография «локальные координаты поверхности → пиксели» по 4 углам
+        corners = handles[::2]
+        Hm = ph.dlt_h(h['local4'], corners) if len(corners) == 4 else None
+        wires = []
+        if Hm is not None:
+            hull_px = ph.apply_h(Hm, h['hull'])
+            wires.append(('fill', hull_px, (80, 145, 255), 45))
+            wires.append(('dots', ph.apply_h(Hm, h['inl']), (80, 145, 255), 150, 2))
+            wires.append(('line', hull_px, (80, 145, 255), 1, True))
+        wires.append(('handles', handles, (255, 190, 60), 8))
+        # подпись «углы/рёбра» не нужна: ручки одинаковы, поведение — по типу ручки
+        return wires
+
+    def _photo_h_show(self):
+        """Перерисовать слой на фото (быстрый путь — без пересборки фото)."""
+        d = self._photo_dlg
+        p = self.s.photo_by_id(self._photo_cur) if self._photo_cur else None
+        if d is None or p is None:
+            return
+        pairs = p.get('pairs') or []
+        wires = [('crosses', [[q['u'], q['v']] for q in pairs], (255, 200, 60), 9)] if pairs else []
+        wires += self._photo_h_wires(p)
+        d.canvas.set_wires(wires)
+
+    def _photo_h_event(self, kind, u, v):
+        """Ручки поверхности: клик переносит ближайшую, драг тянет (без авто-сдвигов)."""
+        h = self._photo_h
+        if not h:
+            return
+        # _photo_widget_scale = пикселей ОРИГИНАЛА на экранный пиксель, поэтому
+        # порог 35 экранных px — это 35 * scale в пикселях оригинала (деление
+        # давало 1–7 px: попасть в ручку было практически невозможно)
+        tol = 35.0 * self._photo_widget_scale()
+        hn = np.asarray(h['handles'], float)
+        if kind == 'press':
+            d = np.hypot(hn[:, 0] - u, hn[:, 1] - v)
+            i = int(np.argmin(d))
+            if d[i] <= tol:
+                h['grab'] = i
+                h['press'] = (float(u), float(v))
+                h['grab_mids'] = tuple(sorted(range(1, 8, 2), key=lambda j: d[j])[:2]) \
+                    if i % 2 == 0 else ()
+            return
+        if kind == 'move' and h.get('grab') is not None:
+            self._photo_h_drag(u, v)
+            return
+        if kind == 'release':
+            h['grab'] = None
+            h['press'] = None
+            self._photo_save_hs()
+            self._photo_dialog_refresh()
+
+    def _photo_widget_scale(self):
+        """Пикселей оригинала на экранный пиксель (для порогов ручек)."""
+        d = self._photo_dlg
+        if d is None or not d.canvas.has_photo():
+            return 1.0
+        return 1.0 / max(d.canvas._k, 1e-6)
+
+    def _photo_h_drag(self, u, v):
+        """Драг ручки по утверждённой семантике (середина — ребро, угол — перспектива)."""
+        h = self._photo_h
+        i = h['grab']
+        hn = np.array(h['handles'], float)
+        if h['press'] is not None:
+            u0, v0 = h['press']
+            du, dv = u - u0, v - v0
+            h['press'] = (float(u), float(v))
+        else:
+            du, dv = 0.0, 0.0
+        if i % 2 == 0:                                  # угол: сам + две ближайшие середины Δ/2
+            hn[i] += (du, dv)
+            for j in h['grab_mids']:
+                hn[j] += (du / 2.0, dv / 2.0)
+        else:                                           # середина ребра: всё ребро на Δ
+            j = i // 2                                  # ребро между углами j и (j+1)%4
+            a, b = 2 * j, 2 * ((j + 1) % 4)
+            hn[a] += (du, dv)
+            hn[b] += (du, dv)
+            hn[i] += (du, dv)
+        h['handles'] = hn
+        self._photo_h_show()
+
+    def _photo_save_hs(self):
+        """Сохранить положения ручек в проект (hs) — без пересчёта позы."""
+        h = self._photo_h
+        p = self.s.photo_by_id(self._photo_cur) if self._photo_cur else None
+        if not h or p is None:
+            return
+        p.setdefault('hs', {})[h['el']] = np.round(np.asarray(h['handles'], float), 2).tolist()
+        self._update_title()
+
+    def _photo_h_apply(self):
+        """Поза из выровненной поверхности: перебор симметрий и кандидатов, выбор
+        по видимым инлайнерам с z > EPS_Z (порог по числу, не по доле)."""
+        import photos as ph
+        h = self._photo_h
+        p = self.s.photo_by_id(self._photo_cur) if self._photo_cur else None
+        if not h or p is None:
+            self.set_status('включите «Совместить по фото» и выровняйте слой')
+            return
+        if not p.get('f35'):
+            self.set_status('укажите фокусное: от него зависит глубина и масштаб позы')
+            return
+        w, hh = int(p.get('w') or 1), int(p.get('h') or 1)
+        f35 = float(p['f35'])
+        local4 = np.asarray(h['local4'], float)
+        corners = np.asarray(h['handles'], float)[::2]
+        inl_w = (h['origin'][None] + h['inl'][:, 0:1] * h['u'][None]
+                 + h['inl'][:, 1:2] * h['v'][None])
+        Hm = ph.dlt_h(local4, corners)
+        if Hm is None:
+            self.set_status('ручки вырождены (углы на одной прямой) — расставьте заново')
+            return
+        cands = ph.plane_pose_from_h(Hm, h['origin'], h['u'], h['v'], h.get('n'), f35, w, hh)
+        # ПЕРЕБОРА СИММЕТРИЙ НЕТ: порядок ручек однозначен (стартовые TL,TR,BR,BL;
+        # пользователь тянет каждую из своего места). Перебор на почти-квадратной
+        # стене выбирал повёрнутый зеркальный вариант (жалоба пользователя).
+        # Из двух кандидатов (±масштаб) сторону НЕ выбираем по нормали: нормаль fits
+        # иногда смотрит от сканера (проверено — верная поза браковалась, урок «Выбор
+        # стороны камеры»). Зеркальный кандидат отправляет все точки за камеру, поэтому
+        # решает видимость инлайнеров: доля в рамке ручек + площадь проекции.
+        best = ph.pick_plane_pose(cands, inl_w, f35, w, hh, quad_px=corners)
+        if best is None:
+            self.set_status('поза не согласуется: проверьте ручки и фокусное')
+            return
+        uv, z, ok = ph.project(inl_w, best, f35, w, hh)
+        inside = int(np.sum(ok & (z > ph.EPS_Z) & ph.point_in_poly(corners, uv)))
+        if inside < min(30, len(inl_w)):
+            self.set_status(f'поза не согласуется: инлайнеров в рамке {inside} '
+                            f'из {len(inl_w)} — проверьте ручки и фокусное')
+            return
+        p['pose'] = np.asarray(best, float).tolist()
+        self._photo_save_hs()
+        self.s._photo_cache = {}
+        self.refresh_photo_panel()
+        self._update_title()
+        self.set_status(f'поза из поверхности: инлайнеров в рамке {inside} — '
+                        '«Окрасить облака» покажет соответствие')
+        self._photo_warm()
+
+    def _photo_refine_pose_by_edges(self, p, img, dt):
+        """Уточнение ПОЗЫ по краям фото сразу по всем выровненным поверхностям.
+
+        Контуры ядер всех поверхностей фото (hs) переводятся в 3D и уточняются
+        общим DT-Гауссом: две поверхности (фасад + соседняя стена) фиксируют
+        глубину лучше одной. Принимается только улучшение средней невязки.
+        Возвращает (T_new, err_old, err_new, n_surf) или None.
+        """
+        import photos as ph
+        w, hh = int(p.get('w') or 1), int(p.get('h') or 1)
+        f35 = float(p['f35'])
+        hs = p.get('hs') or {}
+        if not hs:
+            return None
+        loops, quads = [], []
+        for el_id, handles in hs.items():
+            el = self.s.element_by_id(el_id)
+            if el is None or el.get('kind') != 'plane':
+                continue
+            shape = self._photo_surface_shape(el)
+            if shape is None:
+                continue
+            hull = shape['hull']
+            origin, u, v = shape['origin'], shape['u'], shape['v']
+            half = shape['half']
+            local4 = ph.rect8(float(half[0]), float(half[1]))[::2]
+            Hm = ph.dlt_h(local4, np.asarray(handles, float)[::2])
+            if Hm is None:
+                continue
+            loop = ph.resample_loop(hull, 120)
+            loops.append(origin + loop[:, 0:1] * u + loop[:, 1:2] * v)
+            quads.append(origin + local4[:, 0:1] * u + local4[:, 1:2] * v)
+        if not loops:
+            return None
+        P3 = np.vstack(loops)
+
+        def mean_dt(T):
+            uv, _, ok = ph.project(P3, T, f35, w, hh)
+            uu = uv[:, 0] * (img.shape[1] / w)
+            vv = uv[:, 1] * (img.shape[0] / hh)
+            vis = ok & (uu >= 0) & (uu < dt.shape[1]) & (vv >= 0) & (vv < dt.shape[0])
+            if vis.sum() < 8:
+                return None
+            return float(ph._dt_at(dt, uu[vis], vv[vis]).mean())
+
+        T0 = np.asarray(p['pose'], float)
+        e0 = mean_dt(T0)
+        if e0 is None:
+            return None
+        T1, err, n_used = ph.refine_pose(T0, P3, dt, f35, w, hh, iters=20)
+        e1 = mean_dt(T1)
+        if e1 is None or e1 >= e0 - 0.05:
+            return None
+        return T1, e0, e1, len(loops)
+
+    def _photo_h_refine_edges(self):
+        """«Уточнить по краям» — явная кнопка, ограниченный проход.
+
+        - есть поза: уточняется ПОЗА по контурам всех выровненных поверхностей
+          (DT краёв фото), затем ручки пересчитываются из позы — точность выше,
+          чем сдвиг ручек поодиночке;
+        - позы нет: каждый перебор ручки ≤ ±28 экранных px по краям её участка.
+        """
+        import photos as ph
+        h = self._photo_h
+        p = self.s.photo_by_id(self._photo_cur) if self._photo_cur else None
+        if not h or p is None:
+            self.set_status('включите «Совместить по фото»')
+            return
+        if not self.photo_panel.magnet_on():
+            self.set_status('магнит отключён — включите чекбокс «магнит OpenCV»')
+            return
+        if not ph.HAS_CV2:
+            self.set_status('уточнение по краям нужно opencv (opencv-python-headless)')
+            return
+        try:
+            img = ph.load_image(p['path'], 1400)
+            gray = np.asarray(img, float).mean(axis=2).astype(np.uint8)
+        except Exception as e:                                # noqa: BLE001
+            self.set_status(f'фото не читается: {e}')
+            return
+        dt = ph.dist_transform(ph.photo_edges(img))
+
+        if p.get('pose') is not None:                         # точный путь: уточняем позу
+            res = self._photo_refine_pose_by_edges(p, img, dt)
+            if res is None:
+                self.set_status('уточнение по краям: улучшения нет (проверьте ручки/фокусное)')
+                return
+            T1, e0, e1, n_surf = res
+            p['pose'] = np.asarray(T1, float).tolist()
+            # ручки всех поверхностей — из новой позы
+            w, hh = int(p.get('w') or 1), int(p.get('h') or 1)
+            for el_id, handles in list((p.get('hs') or {}).items()):
+                el = self.s.element_by_id(el_id)
+                if el is None:
+                    continue
+                shape = self._photo_surface_shape(el)
+                if shape is None:
+                    continue
+                origin, u, v = shape['origin'], shape['u'], shape['v']
+                half = shape['half']
+                local4 = ph.rect8(float(half[0]), float(half[1]))[::2]
+                P4 = origin + local4[:, 0:1] * u + local4[:, 1:2] * v
+                uv4, _, ok4 = ph.project(P4, np.asarray(T1, float), float(p['f35']), w, hh)
+                if not ok4.all():
+                    continue
+                mids = np.array([(uv4[i] + uv4[(i + 1) % 4]) / 2 for i in range(4)])
+                r8 = np.empty((8, 2))
+                r8[::2] = uv4
+                r8[1::2] = mids
+                p['hs'][el_id] = np.round(r8, 2).tolist()
+            if self._photo_h and self._photo_h.get('el') in (p.get('hs') or {}):
+                self._photo_h['handles'] = np.asarray(p['hs'][self._photo_h['el']], float)
+            self.s._photo_cache = {}
+            self.refresh_photo_panel()
+            self._update_title()
+            self._photo_warm()
+            self.set_status(f'уточнение по краям: невязка {e0:.1f}→{e1:.1f} px, '
+                            f'поверхностей {n_surf}; повтор — ещё шаг')
+            return
+
+        # позы нет: сдвиг ручек по краям их участка (как раньше)
+        w, hh = int(p.get('w') or 1), int(p.get('h') or 1)
+        hs = img.shape[1] / w                                  # пиксель DT на пиксель оригинала
+        k = self._photo_widget_scale()                         # оригинал на экран
+        win = int(28.0 * k)
+
+        def score(handles, center):
+            Hm = ph.dlt_h(h['local4'], np.asarray(handles, float)[::2])
+            if Hm is None:
+                return None
+            hp = ph.apply_h(Hm, h['hull'])
+            near = np.hypot(hp[:, 0] - center[0], hp[:, 1] - center[1]) < 0.3 * 400
+            pts = hp[near]
+            if len(pts) < 3:
+                return None
+            u = pts[:, 0] * hs
+            v = pts[:, 1] * hs
+            vis = (u >= 0) & (u < dt.shape[1]) & (v >= 0) & (v < dt.shape[0])
+            if vis.sum() < 3:
+                return None
+            return float(ph._dt_at(dt, u[vis], v[vis]).mean())
+
+        hn = np.array(h['handles'], float)
+        moved = 0
+        for i in range(8):
+            u, v = hn[i]
+            if not (0 <= u < w and 0 <= v < hh):
+                continue                                       # за кадром — не трогаем
+            base = hn[i].copy()
+            best_s = score(hn, base)
+            if best_s is None:
+                continue
+            best_p = base.copy()
+            for su in (-win, 0, win):
+                for sv in (-win, 0, win):
+                    if su == 0 and sv == 0:
+                        continue
+                    hn[i] = base + (su, sv)
+                    sc = score(hn, base + (su, sv))
+                    if sc is not None and sc < best_s - 0.5:
+                        best_s, best_p = sc, base + (su, sv)
+            hn[i] = best_p
+            if np.hypot(*(best_p - base)) > 1.0:
+                moved += 1
+        h['handles'] = hn
+        self._photo_save_hs()
+        self._photo_h_show()
+        self.set_status(f'уточнение по краям: сдвинуто ручек {moved}; '
+                        'для точности — «Применить позу», затем ещё раз')
+
+    # ── окраска ──────────────────────────────────────────────────────────
+    def photo_paint_set(self, on):
+        """Включить/выключить окраску облаков по фото (общая точка для панели и слоя)."""
+        self._photo_paint = bool(on)
+        self.photo_panel.set_paint(self._photo_paint)
+        tp = self.tree_panel
+        if tp.switches.get('photo') is not None:
+            tp.switches['photo'].setChecked(self._photo_paint, emit=False)
+        if self._photo_paint:
+            self._photo_warm()
+        else:
+            self.redraw_all()
+
+    def _photo_warm(self):
+        """Фоновая окраска: пересчитать photo_rgb для всех сканов и перерисовать.
+
+        Терминальное условие обязательно: нет пригодных фото → сразу выход и
+        никаких перерисовок (иначе цикл прогрева на пустом фото-слое).
+        """
+        if not self._photo_paint:
+            return
+        if not any(self.s._photo_usable(p) for p in self.s.photos):
+            return
+        if self._photo_warm_busy:
+            return
+        scans = [sc for sc in self.s.scans if sc.pose is not None]
+        if not scans:
+            return
+
+        def job(_progress):
+            out = {}
+            for sc in scans:
+                r = self.s.photo_rgb(sc)
+                if r is not None:
+                    out[sc.id] = r
+            return out
+
+        self._photo_warm_busy = True
+        if not self.run_bg('Окраска по фото', job, done=lambda r: self._photo_warm_done(r)):
+            self._photo_warm_busy = False             # занято другой операцией — не залипаем
+
+    def _photo_warm_done(self, r):
+        self._photo_warm_busy = False
+        if not r:
+            return
+        for sc in self.s.scans:
+            if sc.id in r:
+                self._show_scan(sc)
+        self._draw_photo_points()
+        self.set_status(f'окрашено по фото: сканов {len(r)}')
+
+    def _photo_colors(self, sc, P):
+        """Цвета точек (N×3 uint8) для показа: фото-цвета, непокрытые — цвет скана."""
+        r = self.s.photo_rgb(sc)
+        if r is None:
+            return None
+        rgb, painted = r
+        if len(rgb) != len(P):
+            rgb, painted = ph.join_colors(P, np.asarray(sc._display, float), rgb, painted)
+        out = np.zeros((len(P), 3), np.uint8)
+        out[painted] = rgb[painted]
+        if not painted.all():                                  # неохваченное — палитра скана
+            base = np.array(self.scan_color(sc.id)[0], float)
+            out[~painted] = np.clip(np.round(base * 255), 0, 255).astype(np.uint8)
+        return out
+
+    def _draw_photo_points(self):
+        """Точки пар всех фото поверх облака — чтобы было куда прицеливаться."""
+        self.view.remove_prefix('photo:pts:')
+        if self.s.ref is None:
+            return
+        Tr = self.s.Tc(self.s.ref)
+        for p in self.s.photos:
+            pts = p.get('pairs') or []
+            if not pts:
+                continue
+            active = p['id'] == self._photo_cur
+            c = np.asarray(self._photo_color(p['id']), float)
+            if not active:
+                c = 0.35 + 0.45 * c                     # чужие фото — приглушённо
+            Q = np.array([[q['x'], q['y'], q['z']] for q in pts], float)
+            self.view.set_cloud(f'photo:pts:{p["id"]}', pr.transform(Q, Tr),
+                                tuple(c.tolist()), None, size=11 if active else 8, on_top=True)
+
     def refresh_tool(self):
         """Область, оценка и списки открытой панели по текущему проекту и выделению."""
         key = self.tool
@@ -931,6 +1977,8 @@ class MainWindow(QMainWindow):
             self._auto_estimate()
         elif key == 'fit':
             self.refresh_fit_panel()
+        elif key == 'photo':
+            self.refresh_photo_panel()
         elif key == 'drawing':
             v = self.drawing_panel.values()
             if v['source'] == 'proj':
@@ -1113,6 +2161,7 @@ class MainWindow(QMainWindow):
                               '(с общим ребром с первой)',
                      'cbox': 'Бокс отсечения: щёлкните по модели — центр нового бокса '
                              '(размер — как у последнего бокса; поля — в «Контроль» → «Боксы»)',
+                     'photo': 'Фото: щёлкните ту же точку в 3D-виде (пару с точкой на фото)',
                      'fit': 'Элемент: щёлкните по поверхности облака — подгонится плоскость, сфера, '
                             'цилиндр или окружность'}
 
@@ -1120,7 +2169,8 @@ class MainWindow(QMainWindow):
         if mode is not None and mode == self.measure_mode:
             mode = None
         want = {'zero': 'zero', 'secplane': 'section', 'fit': 'fit', 'level': 'zero',
-                'cbox': 'section', 'split': 'measure', 'merge': 'measure'}.get(mode, 'measure')
+                'cbox': 'section', 'split': 'measure', 'merge': 'measure',
+                'photo': 'photo'}.get(mode, 'measure')
         if mode is not None and self.tool != want:
             self.open_tool(want)
         if mode in self.control.m_type.values:
@@ -1600,6 +2650,8 @@ class MainWindow(QMainWindow):
         p = np.asarray(p, float)
         if self.measure_mode == 'fit':
             return self.fit_click_at(name, p)
+        if self.measure_mode == 'photo':
+            return self.photo_click_at(name, p)
         if self.measure_mode == 'level':
             return self.level_click_at(name, p)
         if self.measure_mode == 'cbox':
@@ -2271,7 +3323,7 @@ class MainWindow(QMainWindow):
         инструмента) и снизу (нижняя панель) — скрывают/показывают панели.
         Стрелки рисуем сами (Theme.chevron) одного размера: у нативной стрелки Qt
         размер зависит от размера кнопки, и в широком нижнем ушке она была огромной."""
-        if hasattr(self, '_ptabs'):
+        if getattr(self, '_ptabs', None):
             return
         t = W.THEME
         self._ptabs = {}
@@ -2583,7 +3635,9 @@ class MainWindow(QMainWindow):
         color = dsp.hex_rgb(d['color']) if d.get('color_mode') == 'solid' and d.get('color') else \
             self.scan_color(sc.id)[0]
         colors = None
-        if d.get('color_mode') in ('height', 'range') and len(P):
+        if self._photo_paint and len(P):
+            colors = self._photo_colors(sc, P)           # окраска по фото (непокрытые — палитра)
+        if colors is None and d.get('color_mode') in ('height', 'range') and len(P):
             colors = dsp.colors(P, pr.transform(P, T)[:, 2], d, self.s.zero_z() if self.s.scans else 0.0)
         self.view.remove(name)                           # размер и раскраска — заново
         self.view.set_cloud(name, P, color, T, sc.visible and not self.points_hidden, size=d.get('size'),
@@ -2608,6 +3662,7 @@ class MainWindow(QMainWindow):
         self.quality_refresh()
         self._draw_meshes()
         self._draw_measures()
+        self._draw_photo_points()
         import clip as clip_mod
         active = clip_mod.active_boxes(self.s)
         sec_on = (self.s.section or {}).get('mode', 'off') != 'off'
@@ -3166,6 +4221,8 @@ class MainWindow(QMainWindow):
             return self._mesh_tree_visible(key, vis)
         if key.startswith('cbox:'):
             return self._cbox_tree_visible(key, vis)
+        if key.startswith('photo:'):                     # группа photo:* тоже начинается с photo:
+            return self._photo_tree_visible(key, vis)
         if key.startswith('plan:'):
             if key == self.tree_panel.PLANS:
                 return
@@ -3179,6 +4236,22 @@ class MainWindow(QMainWindow):
             self.set_status('точки сканов снова показаны', log=False)
         self.apply_visibility()
         self.tree_panel.rebuild()
+
+    def _photo_tree_visible(self, key, vis):
+        """Глаз в ветви «Фото»: группа (всем фото) или одно фото — участвует в окраске."""
+        tp = self.tree_panel
+        if key == tp.PHOTOS:
+            for p in self.s.photos:
+                p['visible'] = bool(vis)
+        else:
+            p = self.s.photo_by_id(key[6:])
+            if p is None:
+                return
+            p['visible'] = bool(vis)
+        self.s._photo_cache = {}
+        tp.rebuild()
+        self._update_title()
+        self._photo_warm()
 
     def _cbox_tree_visible(self, key, vis):
         """Глаз в ветви «Боксы отсечения»: вся ветвь или один бокс."""
@@ -3397,6 +4470,33 @@ class MainWindow(QMainWindow):
             el = self.s.element_by_id(key[5:])
             if el is not None:
                 self._element_tree_visible(key, not self.s.element_visible(el))
+        elif name == 'photo_open':
+            self._photo_cur = key[6:]
+            self._photo_open_window()
+            self.refresh_photo_panel()
+        elif name == 'photo_edit':
+            self._photo_cur = key[6:]
+            self.open_tool('photo')
+            self.set_measure_mode('photo')
+            self.refresh_photo_panel()
+        elif name == 'photo_rename':
+            p = self.s.photo_by_id(key[6:])
+            if p is not None:
+                self.tree_panel.start_inline_rename(key, p.get('name', ''))
+        elif name == 'photo_toggle':
+            p = self.s.photo_by_id(key[6:])
+            if p is not None:
+                self._photo_tree_visible(key, not p.get('visible', True))
+        elif name == 'photo_delete':
+            self._photo_cur = key[6:]
+            self.on_photo_action('del', key[6:])
+        elif name in ('photo_show_all', 'photo_hide_all'):
+            for p in self.s.photos:
+                p['visible'] = (name == 'photo_show_all')
+            self.s._photo_cache = {}
+            self.tree_panel.rebuild()
+            self._update_title()
+            self._photo_warm()
         elif name == 'el_rename':
             el = self.s.element_by_id(key[5:])
             if el is not None:
@@ -3434,6 +4534,9 @@ class MainWindow(QMainWindow):
                 v = self.s.view_by_id(key[5:])
                 if v is not None:
                     v['name'] = text
+            elif key.startswith('photo:'):
+                self.s.rename_photo(key[6:], text)
+                self.refresh_photo_panel()
             elif self.s.by_id(key) is not None:
                 self.s.rename_scan(key, text)
                 self.refresh_inspector()
@@ -3529,6 +4632,11 @@ class MainWindow(QMainWindow):
         elif name == 'focus':
             if key and key.startswith('view:'):
                 return self.fly_to_view(key[5:])
+            if key and key.startswith('photo:'):
+                self._photo_cur = key[6:]
+                self._photo_open_window()
+                self.refresh_photo_panel()
+                return
             self.focus_node(key)
 
     def bake_group(self, key=None, bake=True):
@@ -4875,6 +5983,25 @@ class MainWindow(QMainWindow):
         pos = ev.position()
         x, y = pos.x(), pos.y()
         manual = self.mode == 'manual' and self.moving is not None and self.T_moving is not None
+        # фото: перетаскивание маркера пары в 3D (до общей логики клика-замера)
+        if self.measure_mode == 'photo' and self._photo_h is None:
+            if kind == 'press' and ev.button() == Qt.LeftButton:
+                grab = self._photo_pt_at(x, y)
+                if grab is not None:
+                    self._photo_pt_drag = grab
+                    self.set_status(f'правка пары {grab["i"] + 1}: тяните по облаку')
+                    return True
+            elif kind == 'move' and self._photo_pt_drag is not None:
+                self._photo_pt_move(x, y)
+                return True
+            elif kind == 'release' and self._photo_pt_drag is not None:
+                i = self._photo_pt_drag['i']
+                self._photo_pt_drag = None
+                self.s._photo_cache = {}
+                self.refresh_photo_panel()
+                self._update_title()
+                self.set_status(f'пара {i + 1} поправлена в 3D — «Привязать» пересчитает позу')
+                return True
         if self.measure_mode and kind in ('press', 'release') and ev.button() == Qt.LeftButton:
             if kind == 'press':
                 hit = self.vp.label_at(x, y)             # драг подписи замера (Ф13)
@@ -4887,7 +6014,7 @@ class MainWindow(QMainWindow):
             if kind == 'release' and self._mclick is not None:
                 x0, y0 = self._mclick
                 self._mclick = None
-                if abs(x - x0) + abs(y - y0) < 5:
+                if abs(x - x0) + abs(y - y0) < 8:         # 8 px: трекпад не превращает клик в орбиту
                     self.measure_click(x, y)
                 return False
         if kind == 'press' and ev.button() == Qt.LeftButton and not manual:
@@ -5328,6 +6455,9 @@ class MainWindow(QMainWindow):
                 self._draw_ghosts(self.s.by_id(sid))
         elif key == 'elements':
             self.draw_elements()
+        elif key == 'photo':
+            self.photo_paint_set(on)                     # кнопка-переключатель и слой — одна точка
+            return
         else:
             self.draw_features()
             if on and any(not s.analyzed for s in self.s.scans if s.visible):
@@ -5683,13 +6813,18 @@ class MainWindow(QMainWindow):
             self.set_status(msg)
             self.export_panel.set_result(msg)
         self.run_bg('экспорт…', lambda p: self.s.export(str(v['path']), v['voxel'], p, v['frame'],
-                                                        scan_ids=v['scan_ids']), done)
+                                                        scan_ids=v['scan_ids'],
+                                                        colors=v.get('colors', False)), done)
+
     def on_escape(self):
         if self.level_ring is not None:
             self.toggle_level_ring()
             return
         if self.measure_mode:
-            if self._mpts or self._mplane is not None:
+            if self._photo_pending is not None:            # точка пары фото — просто снять
+                self._photo_pending = None
+                self.set_status('точка фото снята')
+            elif self._mpts or self._mplane is not None:
                 self._mpts, self._mplane = [], None
                 self._draw_measures()
                 self.set_status('замер отменён')

@@ -17,11 +17,25 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import open3d as o3d                              # noqa: E402
 import plane_register as pr                       # noqa: E402
 import fileio                                     # noqa: E402
+import photos as ph                               # noqa: E402
+from PIL import Image                             # noqa: E402
 from scan_session import Session                  # noqa: E402
 from test_registration import scan, gt_pose, FLIP # noqa: E402
 
 
 POSES = {'A.ply': ((2.0, 1.8), 0.3), 'B.ply': ((6.8, 3.5), -1.1), 'C.ply': ((4.5, 4.0), 2.0)}
+
+
+def make_jpeg(path, size=(40, 30), color=(200, 10, 10), f35=None):
+    """Синтетический JPEG; f35 — EXIF FocalLengthIn35mmFilm (как в tests/test_photos.py)."""
+    im = Image.new('RGB', size, color)
+    if f35 is not None:
+        ex = Image.Exif()
+        ex.get_ifd(0x8769)[41989] = f35
+        im.save(str(path), exif=ex.tobytes())
+    else:
+        im.save(str(path))
+    return Path(path)
 
 
 def write_scans(tmp):
@@ -325,6 +339,128 @@ class TestSession(unittest.TestCase):
         self.assertEqual(got['eye'], [1, 2, 3])
         self.assertTrue(s2.remove_view(v['id']))
         self.assertIsNone(s2.view_by_id(v['id']))
+
+    # ── фото для окраски ─────────────────────────────────────────────────
+    def test_photos_roundtrip(self):
+        """Фото: сохранение в проект (путь относительный) и чтение."""
+        src = make_jpeg(Path(self.tmp) / 'ph_rt_src.jpg')
+        s = Session.from_scans(self.paths[:1])
+        p = s.add_photo(src)
+        p['pose'] = np.eye(4).tolist()
+        p['pairs'] = [{'u': 1, 'v': 2, 'x': 0.0, 'y': 0.0, 'z': 0.0}]
+        p['hs'] = {'el1': [[1, 2], [3, 4]]}
+        proj = Path(self.tmp) / 'ph_rt.json'
+        s.save(proj)
+        raw = json.loads(proj.read_text(encoding='utf-8'))
+        self.assertEqual(raw['photos'][0]['path'], 'photos/ph_rt_src.jpg')
+        s2 = Session.from_project(proj)
+        self.assertEqual(s2.photos_missing, [])
+        self.assertEqual(len(s2.photos), 1)
+        g = s2.photo_by_id(p['id'])
+        self.assertEqual(g['name'], 'ph_rt_src.jpg')
+        self.assertEqual(g['pose'], np.eye(4).tolist())
+        self.assertEqual(g['pairs'], p['pairs'])
+        self.assertEqual(g['hs'], {'el1': [[1, 2], [3, 4]]})
+        self.assertTrue(Path(g['path']).exists())
+        self.assertIsNone(g['f35'])                    # без EXIF фокусное не придумывается
+
+    def test_add_photo_copies(self):
+        """add_photo: копия в photos/, оригинал жив, размер и EXIF-фокусное прочитаны."""
+        srcdir = Path(self.tmp) / 'src_ph'
+        srcdir.mkdir(exist_ok=True)
+        src = make_jpeg(srcdir / 'shot.jpg', size=(40, 30), f35=26)
+        s = Session.from_scans(self.paths[:1])
+        p = s.add_photo(src)
+        dst = Path(p['path'])
+        self.assertEqual(dst.parent, (Path(self.tmp) / 'photos').resolve())
+        self.assertTrue(dst.exists())
+        self.assertTrue(src.exists())                  # исходный файл не тронут
+        self.assertEqual((p['w'], p['h']), (40, 30))
+        self.assertEqual(p['f35'], 26.0)
+        self.assertEqual(p['f35_src'], 'exif')
+        p2 = s.add_photo(src)                          # коллизия имён → суффикс _2
+        self.assertEqual(Path(p2['path']).name, 'shot_2.jpg')
+        self.assertNotEqual(p2['id'], p['id'])
+
+    def test_photos_missing(self):
+        """Удалённый файл фото: запись остаётся, имя — в photos_missing."""
+        src = make_jpeg(Path(self.tmp) / 'ph_gone_src.jpg')
+        s = Session.from_scans(self.paths[:1])
+        p = s.add_photo(src)
+        proj = Path(self.tmp) / 'ph_gone.json'
+        s.save(proj)
+        Path(p['path']).unlink()
+        s2 = Session.from_project(proj)
+        self.assertEqual(s2.photos_missing, ['ph_gone_src.jpg'])
+        self.assertEqual(len(s2.photos), 1)
+
+    def test_pack_photos(self):
+        """pack: файлы фото — в photos/ пакета, путь в проекте относительный."""
+        import project_store
+        src = make_jpeg(Path(self.tmp) / 'ph_pack_src.jpg', f35=26)
+        s = Session.from_scans(self.paths[:1])
+        s.add_photo(src)
+        dest = Path(self.tmp) / 'pack_ph'
+        s.pack(dest)
+        self.assertTrue((dest / 'photos' / 'ph_pack_src.jpg').exists())
+        proj = project_store.read_project(dest / 'pack_ph.pulse')
+        self.assertEqual(proj['photos'][0]['path'], 'photos/ph_pack_src.jpg')
+        self.assertTrue((dest / 'photos' / 'ph_pack_src.jpg').exists())
+
+    def test_photo_rgb_and_remove(self):
+        """photo_rgb: точки перед стеной красятся в цвет фото; удаление → None."""
+        src = make_jpeg(Path(self.tmp) / 'ph_rgb_src.jpg', size=(40, 30), color=(200, 10, 10))
+        s = Session.from_scans(self.paths[:1])
+        A = s.scans[0]
+        A.analyze()                                    # R_up нужен для Tc
+        ys = np.linspace(-0.8, 0.8, 5)
+        zs = np.linspace(-0.4, 0.4, 5)                 # камера в сканере: кадр ±1 м на 2 м
+        A._display = np.array([[2.0, y, z] for z in zs for y in ys])
+        p = s.add_photo(src)
+        p['pose'] = ph.T_of(ph.look_R((1.0, 0.0, 0.0), (0.0, 0.0, 1.0)), np.zeros(3)).tolist()
+        p['f35'] = 26.0
+        p['f35_src'] = 'manual'
+        out = s.photo_rgb(A)
+        self.assertIsNotNone(out)
+        rgb, painted = out
+        self.assertEqual(len(rgb), len(A._display))
+        self.assertTrue(painted.all())
+        self.assertGreater(rgb[:, 0].mean(), 150)
+        self.assertLess(rgb[:, 1].mean(), 80)
+        self.assertLess(rgb[:, 2].mean(), 80)
+        self.assertIs(s.photo_rgb(A), out)             # кеш по фингерпринту
+        # смена позы инвалидирует кеш
+        p['pose'] = np.eye(4).tolist()
+        self.assertIsNot(s.photo_rgb(A), out)
+        self.assertTrue(s.remove_photo(p['id']))
+        self.assertIsNone(s.photo_rgb(A))
+
+    def test_export_colors(self):
+        """export(colors=True): цвета в .ply и .e57 (фото покрывает часть комнаты)."""
+        src = make_jpeg(Path(self.tmp) / 'ph_exp_src.jpg', size=(400, 300), color=(180, 40, 40))
+        s = Session.from_scans(self.paths[:1])
+        A = s.scans[0]
+        A.analyze()
+        p = s.add_photo(src)
+        fwd = np.array([np.cos(POSES['A.ply'][1]), np.sin(POSES['A.ply'][1]), 0.0])  # внутрь комнаты
+        p['pose'] = ph.T_of(ph.look_R(fwd, (0.0, 0.0, 1.0)), np.zeros(3)).tolist()
+        p['f35'] = 14.0
+        p['f35_src'] = 'manual'
+        out_ply = Path(self.tmp) / 'exp_col.ply'
+        n = s.export(out_ply, voxel=0.05, colors=True)
+        self.assertGreater(n, 1000)
+        pc = o3d.io.read_point_cloud(str(out_ply))
+        self.assertTrue(pc.has_colors())
+        self.assertGreater(float(np.asarray(pc.colors).mean()), 0.0)
+        out_e57 = Path(self.tmp) / 'exp_col.e57'
+        s.export(out_e57, voxel=0.05, colors=True)
+        self.assertIn(b'colorRed', out_e57.read_bytes())
+        # нет пригодных фото → экспорт без цветов не падает
+        s2 = Session.from_scans(self.paths[:1])
+        out2 = Path(self.tmp) / 'exp_nocol.ply'
+        s2.export(out2, voxel=0.05, colors=True)
+        pc2 = o3d.io.read_point_cloud(str(out2))
+        self.assertFalse(pc2.has_colors())
 
 
 if __name__ == '__main__':

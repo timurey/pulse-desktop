@@ -105,20 +105,37 @@ def native_path(path, mode='r'):
             pass
 
 
-def write_cloud(path, pts):
-    """Облако N×3 → .e57 / .ply / .pcd (по расширению), любой путь на любой ОС."""
+def write_cloud(path, pts, colors=None):
+    """Облако N×3 → .e57 / .ply / .pcd (по расширению), любой путь на любой ОС.
+
+    colors — N×3 uint8 (или float 0–255) RGB, None — без цветов; непокрашенные
+    точки — чёрные (0, 0, 0).
+    """
     import numpy as np
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     P = np.ascontiguousarray(np.asarray(pts, np.float64)[:, :3])
+    C = None
+    if colors is not None:
+        if len(colors) != len(P):
+            raise ValueError(f'цветов {len(colors)} на {len(P)} точек')
+        C = np.clip(np.round(np.asarray(colors, np.float64)[:, :3]), 0, 255).astype(np.uint8)
     with native_path(path, 'w') as q:
         if path.suffix.lower() == '.e57':
             import pye57
             e57 = pye57.E57(q, mode='w')
-            e57.write_scan_raw({'cartesianX': P[:, 0], 'cartesianY': P[:, 1], 'cartesianZ': P[:, 2]})
+            data = {'cartesianX': P[:, 0], 'cartesianY': P[:, 1], 'cartesianZ': P[:, 2]}
+            if C is not None:
+                data['colorRed'] = C[:, 0]
+                data['colorGreen'] = C[:, 1]
+                data['colorBlue'] = C[:, 2]
+            e57.write_scan_raw(data)
             e57.close()
         else:
             import open3d as o3d
-            if not o3d.io.write_point_cloud(q, o3d.geometry.PointCloud(o3d.utility.Vector3dVector(P))):
+            pc = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(P))
+            if C is not None:
+                pc.colors = o3d.utility.Vector3dVector(np.asarray(C, float) / 255.0)
+            if not o3d.io.write_point_cloud(q, pc):
                 raise OSError(f'не удалось записать {path}')
     return path
