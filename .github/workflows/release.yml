@@ -11,7 +11,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-14          # Apple Silicon (arm64)
+          - os: macos-15          # Apple Silicon (arm64); macos-14 снят с поддержки GitHub
             name: macOS-arm64
           - os: windows-latest
             name: Windows-x64
